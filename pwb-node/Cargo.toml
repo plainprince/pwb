@@ -1,0 +1,18 @@
+[package]
+name = "pwb-node"
+version = "0.0.0"
+edition = "2021"
+license = "MIT OR Apache-2.0"
+description = "PlainWeb layer 3: a serverless network node — host, search, verify, identity, and system domains."
+
+[lib]
+name = "pwb_node"
+path = "src/lib.rs"
+
+[[bin]]
+name = "pwb-node"
+path = "src/main.rs"
+
+[dependencies]
+pwb-core = { path = "../pwb-core" }
+pwb-web = { path = "../pwb-web" }

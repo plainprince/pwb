@@ -1,0 +1,181 @@
+// PlainWeb DevTools - Application Script
+// Uses ONLY PlainWeb's available JS APIs.
+console.log("PlainWeb DevTools initializing...");
+
+// Tab switching - simple implementation
+(function() {
+    var tabIds = ["elements", "console"];
+    for (var i = 0; i < tabIds.length; i++) {
+        var tab = document.getElementById("tab-" + tabIds[i]);
+        if (tab) {
+            tab.addEventHandler("click", function() {
+                // Handlers run in a fresh context, so keep them self-contained.
+                var allTabs = ["elements", "console"];
+                var tabName = this.id.substring(4); // strip the "tab-" prefix
+                for (var j = 0; j < allTabs.length; j++) {
+                    var t = document.getElementById("tab-" + allTabs[j]);
+                    if (t) {
+                        t.setStyle("background-color", "#333");
+                        t.setStyle("color", "#e0e0e0");
+                    }
+                    var c = document.getElementById(allTabs[j] + "-tab");
+                    if (c) {
+                        c.setStyle("display", "none");
+                    }
+                }
+                this.setStyle("background-color", "#0078d7");
+                this.setStyle("color", "white");
+                var content = document.getElementById(tabName + "-tab");
+                if (content) {
+                    content.setStyle("display", "block");
+                }
+                // The styles panel belongs to the Elements view: close it while
+                // inspecting the Console, reopen it when back on Elements.
+                var sp = document.getElementById("styles-panel");
+                if (sp) {
+                    sp.setStyle("display", tabName === "elements" ? "block" : "none");
+                }
+            });
+        }
+    }
+})();
+
+// Close button: hides devtools and also ends pick mode.
+var closeBtn = document.getElementById("close-devtools");
+if (closeBtn) {
+    closeBtn.addEventHandler("click", function() {
+        if (typeof __pwb_closeDevtools === "function") {
+            __pwb_closeDevtools();
+        }
+        if (typeof __pwb_stopElementSelection === "function") {
+            __pwb_stopElementSelection();
+        }
+        var sb = document.getElementById("select-element");
+        if (sb) {
+            sb.setStyle("background-color", "#2d2d2d");
+            sb.setStyle("color", "#cccccc");
+        }
+    });
+}
+
+// Element selection (pick) button: toggles inspect mode. Picking one element
+// selects it (the pipeline highlights its row and fills the styles panel) and
+// ends pick mode automatically.
+var selectBtn = document.getElementById("select-element");
+if (selectBtn) {
+    selectBtn.addEventHandler("click", function() {
+        var isActive = this.getStyle("background-color") === "#0078d7";
+        if (isActive) {
+            this.setStyle("background-color", "#2d2d2d");
+            this.setStyle("color", "#cccccc");
+            if (typeof __pwb_stopElementSelection === "function") {
+                __pwb_stopElementSelection();
+            }
+            console.log("Element inspection off");
+        } else {
+            this.setStyle("background-color", "#0078d7");
+            this.setStyle("color", "white");
+            if (typeof __pwb_startElementSelection === "function") {
+                __pwb_startElementSelection();
+            }
+            console.log("Element inspection on - click an element to inspect it");
+        }
+    });
+}
+
+// Console command input: a little REPL with arrow-key history.
+// Enter evaluates the typed expression in the page's JS context;
+// console.log output lands in the panel above.
+// Arrow Up / Arrow Down cycle through previous commands.
+var consoleInput = document.getElementById("console-input");
+if (consoleInput) {
+    // Globals so handlers (stored as strings, dispatched later) can reach state.
+    if (typeof globalThis.__pwb_consoleHistory === "undefined") {
+        globalThis.__pwb_consoleHistory = [];
+        globalThis.__pwb_consoleHistoryIdx = 0;
+        globalThis.__pwb_consoleSavedDraft = "";
+    }
+    consoleInput.addEventHandler("enter", function(evt) {
+        var expr = this.getValue();
+        if (expr.trim().length === 0) {
+            return;
+        }
+        var h = globalThis.__pwb_consoleHistory;
+        h.push(expr);
+        globalThis.__pwb_consoleHistoryIdx = h.length;
+        globalThis.__pwb_consoleSavedDraft = "";
+        console.log("> " + expr);
+        this.setValue("");
+        try {
+            var result = (0, eval)(expr);
+            if (result !== undefined) {
+                console.log(String(result));
+            }
+        } catch (e) {
+            console.error("Uncaught: " + (e && e.stack ? e.stack : String(e)));
+        }
+    });
+
+    consoleInput.addEventHandler("arrowup", function(evt) {
+        var h = globalThis.__pwb_consoleHistory;
+        var i = globalThis.__pwb_consoleHistoryIdx;
+        if (h.length === 0) return;
+        if (i === h.length) {
+            globalThis.__pwb_consoleSavedDraft = this.getValue();
+        }
+        if (i > 0) {
+            i = i - 1;
+            globalThis.__pwb_consoleHistoryIdx = i;
+            this.setValue(h[i]);
+        }
+    });
+
+    consoleInput.addEventHandler("arrowdown", function(evt) {
+        var h = globalThis.__pwb_consoleHistory;
+        var i = globalThis.__pwb_consoleHistoryIdx;
+        if (i < h.length - 1) {
+            i = i + 1;
+            globalThis.__pwb_consoleHistoryIdx = i;
+            this.setValue(h[i]);
+        } else if (i === h.length - 1) {
+            globalThis.__pwb_consoleHistoryIdx = h.length;
+            this.setValue(globalThis.__pwb_consoleSavedDraft);
+        }
+    });
+}
+
+// Populate the Elements tree and the styles panel. The rebuild itself lives in
+// the engine (`__pwb_refreshDevtools`) so it can re-run after any DOM change —
+// the pipeline calls it after click handlers, resize drags, etc.
+if (typeof __pwb_refreshDevtools === "function") {
+    __pwb_refreshDevtools();
+    console.log("Elements tree + styles panel populated");
+}
+
+console.log("PlainWeb DevTools ready.");
+
+// Console send button: triggers the same action as pressing Enter.
+var consoleSend = document.getElementById("console-send");
+if (consoleSend && consoleInput) {
+    consoleSend.addEventHandler("click", function() {
+        // Manually trigger evaluation.
+        var expr = consoleInput.getValue();
+        if (expr.trim().length === 0) {
+            return;
+        }
+        var h = globalThis.__pwb_consoleHistory;
+        h.push(expr);
+        globalThis.__pwb_consoleHistoryIdx = h.length;
+        globalThis.__pwb_consoleSavedDraft = "";
+        console.log("> " + expr);
+        consoleInput.setValue("");
+        try {
+            var result = (0, eval)(expr);
+            if (result !== undefined) {
+                console.log(String(result));
+            }
+        } catch (e) {
+            console.error("Uncaught: " + (e && e.stack ? e.stack : String(e)));
+        }
+    });
+}

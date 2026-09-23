@@ -1,0 +1,22 @@
+[package]
+name = "pwb-web"
+version = "0.0.0"
+edition = "2021"
+license = "MIT OR Apache-2.0"
+description = "PlainWeb layer 1: author, parse, bundle, and losslessly compress sites into plain artifacts."
+
+[lib]
+name = "pwb_web"
+path = "src/lib.rs"
+
+[[bin]]
+name = "pwb-web"
+path = "src/main.rs"
+
+[dependencies]
+pwb-core = { path = "../pwb-core" }
+lightningcss = { version = "1.0.0-alpha.72", features = ["bundler"] }
+
+# Planned (not wired in the skeleton):
+#   html5ever, cssparser  — parse markup + styles
+#   zstd / zip           — the compression half of the wire format

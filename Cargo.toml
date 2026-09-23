@@ -1,0 +1,8 @@
+[workspace]
+resolver = "2"
+members = ["pwb-core", "pwb-web", "pwb-browser", "pwb-node"]
+
+# PlainWeb (pwb) — see README.md.
+# This is a workspace of a few sensible top-level crystals, not a single crate
+# and not a forest of tiny crates. `pwb-core` is the shared layer every other
+# crate builds on.

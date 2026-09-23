@@ -1,0 +1,19 @@
+# PlainWeb Bundle Manifest for DevTools
+version = "1.0"
+title = "PlainWeb DevTools"
+
+[root]
+tag = "View"
+style = "background-color: #1e1e1e; color: #e0e0e0; height: 100%; display: flex; flex-direction: column; font-family: 'SFMono-Regular', Consolas, 'Liberation Mono', Menlo, monospace;"
+
+[[assets]]
+path = "index.pml"
+type = "text/plain"
+
+[[assets]]
+path = "style.pss"
+type = "text/css"
+
+[[assets]]
+path = "app.pjs"
+type = "text/javascript"

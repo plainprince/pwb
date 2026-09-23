@@ -1,0 +1,38 @@
+console.log("PlainWeb QuickJS Engine initializing with EventHandler system...");
+
+// Query element using custom PlainJS document.selector
+var btn = document.selector("#main-btn");
+if (btn) {
+    console.log("Found #main-btn via document.selector! Original text: " + btn.getText());
+    btn.setText("Explore Network (PlainJS Active)");
+
+    // Register interactive click EventHandler!
+    btn.onClick("console.log('Button clicked! Updating text via EventHandler...'); var b = document.selector('#main-btn'); if (b) b.setText('Clicked!');");
+
+    // Right-click: show different text and suppress the native OS context menu.
+    btn.addEventHandler("contextmenu", function(evt) {
+        console.log('Context menu event on #main-btn, preventing default...');
+        if (evt && evt.preventDefault) {
+            evt.preventDefault();
+        }
+        var b = document.selector('#main-btn');
+        if (b) b.setText('Right-clicked! Menu suppressed.');
+    });
+}
+
+var heading = document.selector(".heading");
+if (heading) {
+    console.log("Found .heading! Original HTML: " + heading.getHtml());
+}
+
+// The demo input: press Enter to echo the typed value below it.
+var demoInput = document.selector("#demo-input");
+if (demoInput) {
+    console.log("Found #demo-input. Focus it and type — Enter echoes the value.");
+    demoInput.addEventHandler("enter", function(evt) {
+        var echo = document.selector("#echo-text");
+        if (echo) {
+            echo.setText("You typed: " + this.getValue());
+        }
+    });
+}

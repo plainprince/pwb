@@ -1,0 +1,55 @@
+.welcome {
+    background-color: #1e1e2e;
+    padding: 5vh;
+    gap: 2.5vh;
+}
+
+.title {
+    color: #89b4fa;
+    font-size: 4.7vh;
+}
+
+.subtitle {
+    color: #cdd6f4;
+    font-size: 2.7vh;
+}
+
+.card {
+    background-color: #313244;
+    padding: 3vh;
+    gap: 1.5vh;
+}
+
+.card-title {
+    color: #a6e3a1;
+    font-size: 2.5vh;
+}
+
+.card-hint {
+    color: #bac2de;
+    font-size: 1.8vh;
+}
+
+.chips {
+    flex-direction: row;
+    gap: 1vh;
+    padding: 0;
+    margin-top: 1.5vh;
+}
+
+.chip {
+    background-color: #45475a;
+    padding: 0.8vh 1.6vh;
+    border-radius: 8px;
+    font-size: 1.6vh;
+    color: #cdd6f4;
+}
+
+#ctx-btn {
+    background-color: #fab387;
+    color: #11111b;
+    font-size: 2.2vh;
+    padding: 1.5vh;
+    border-radius: 6px;
+    cursor: pointer;
+}

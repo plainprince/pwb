@@ -1,0 +1,28 @@
+[package]
+name = "pwb-core"
+version = "0.0.0"
+edition = "2021"
+license = "MIT OR Apache-2.0"
+description = "Shared primitives for the PlainWeb network: plain-language spec, wire/compression format, crypto, and transport."
+
+[dependencies]
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+tokio = { version = "1.0", features = ["full"] }
+bytes = "1.0"
+thiserror = "1.0"
+rand = "0.8"
+blake3 = "1.0"
+ed25519-dalek = "2.0"
+x25519-dalek = { version = "2.0", features = ["static_secrets", "getrandom"] }
+curve25519-dalek = { version = "4.1", features = ["alloc"] }
+chacha20poly1305 = "0.10"
+zeroize = { version = "1.0", features = ["derive"] }
+hex = "0.4"
+
+# No external deps in the skeleton so `cargo build` stays green offline.
+# Planned stack (see README):
+#   serde, serde_json        — struct serialization on the wire
+#   ed25519-dalek / x25519   — keypair identity + packet encryption
+#   blake3                   — content ids / hashing
+#   zstd (or similar)        — the zip-style packing half of compression

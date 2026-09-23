@@ -1,0 +1,46 @@
+[package]
+name = "pwb-browser"
+version = "0.0.0"
+edition = "2021"
+license = "MIT OR Apache-2.0"
+description = "PlainWeb layer 2: open a plain artifact, decompile it, build a DOM, and render it."
+
+[lib]
+name = "pwb_browser"
+path = "src/lib.rs"
+
+[[bin]]
+name = "pwb-browser"
+path = "src/main.rs"
+
+[features]
+# Enforce CORS on `fetch` (same-origin file/relative requests always allowed;
+# cross-origin http(s) requests require `Access-Control-Allow-Origin: *`).
+# Off by default so local bundles can fetch any API during development.
+strict-cors = []
+
+[dependencies]
+pwb-core = { path = "../pwb-core" }
+pwb-node = { path = "../pwb-node" }
+pwb-web = { path = "../pwb-web" }
+tiny-skia = { version = "0.12", features = ["png-format"] }
+winit = "0.30"
+softbuffer = "0.4"
+ab_glyph = "0.2"
+rquickjs = "0.12"
+toml = "0.8"
+arboard = "3.6"
+serde_json = "1"
+ureq = { version = "2.12", features = ["native-certs"] }
+tungstenite = { version = "0.24", features = ["rustls-tls-webpki-roots", "url"] }
+base64 = "0.22"
+rand = "0.8"
+uuid = { version = "1", features = ["v4"] }
+
+# Native OS dialogs (alert/confirm/prompt) and context menu. Only used on
+# macOS today; other platforms fall back to console output / defaults.
+[target.'cfg(target_os = "macos")'.dependencies]
+objc2 = "0.5.2"
+objc2-app-kit = { version = "0.2.2", features = ["NSMenu", "NSMenuItem", "NSView", "NSResponder", "NSAlert", "NSButton", "NSControl", "NSTextField"] }
+objc2-foundation = "0.2.2"
+raw-window-handle = "0.6"

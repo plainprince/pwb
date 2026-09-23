@@ -1,0 +1,15 @@
+console.log("Welcome page loaded.");
+
+var btn = document.selector("#ctx-btn");
+if (btn) {
+    btn.onClick("console.log('Button clicked!'); var b = document.selector('#ctx-btn'); if (b) b.setText('Clicked!');");
+
+    btn.addEventHandler("contextmenu", function(evt) {
+        console.log("Context menu event — preventing default.");
+        if (evt && evt.preventDefault) {
+            evt.preventDefault();
+        }
+        var b = document.selector("#ctx-btn");
+        if (b) b.setText("Right-clicked! Menu suppressed.");
+    });
+}

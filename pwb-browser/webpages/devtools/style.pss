@@ -1,0 +1,173 @@
+/* PlainWeb DevTools - Style Sheet */
+/* Dark theme inspired by Chrome DevTools. Only properties the runtime style
+   engine supports are used (no borders/shadows/transitions/pseudo-selectors).
+   Sizes are viewport-relative (Xpx → X/6 vh) so the panel scales with the
+   window like the pre-exact-pixel rendering did. */
+
+.devtools-sidebar {
+    position: fixed;
+    right: 0;
+    top: 0;
+    width: 25vw;
+    height: 100vh;
+    background-color: #1e1e1e;
+    color: #e0e0e0;
+    font-size: 2.2vh;
+    resize: horizontal;
+    min-width: 15vw;
+    max-width: 50vw;
+    padding: 0;
+    gap: 0.7vh;
+}
+
+.devtools-header {
+    display: flex;
+    flex-direction: row;
+    justify-content: space-between;
+    background-color: #252526;
+    padding: 0;
+    gap: 0.3vh;
+    border-bottom: 0.1vh solid #3e3e42;
+}
+
+.devtools-tabs {
+    display: flex;
+    flex-direction: row;
+    gap: 0.15vh;
+    padding: 0;
+}
+
+.tab {
+    min-width: 3vh;
+    min-height: 3vh;
+    height: 3vh;
+    padding: 0.3vh;
+    background-color: #333;
+    border-radius: 0.4vh;
+    cursor: pointer;
+    font-size: 2.0vh;
+    color: #e0e0e0;
+    display: flex;
+    flex-direction: row;
+    align-items: center;
+    justify-content: center;
+}
+
+.tab.active {
+    background-color: #0078d7;
+    color: white;
+}
+
+.devtools-controls {
+    display: flex;
+    flex-direction: row;
+    gap: 0.3vh;
+    padding: 0;
+    align-items: center;
+}
+
+#select-element,
+#close-devtools,
+#console-send {
+    min-width: 3vh;
+    min-height: 3vh;
+    height: 3vh;
+    background-color: #2d2d2d;
+    color: #cccccc;
+    border-radius: 0.4vh;
+    cursor: pointer;
+    font-size: 2.0vh;
+    padding: 0.3vh;
+    display: flex;
+    flex-direction: row;
+    align-items: center;
+    justify-content: center;
+}
+
+.console-input-row {
+    display: flex;
+    flex-direction: row;
+    gap: 0.2vh;
+    padding: 0.4vh;
+}
+
+.console-input-row #console-input {
+    flex: 1;
+    min-width: 0;
+}
+
+.tab-content {
+    display: none;
+    padding: 1.3vh;
+}
+
+.tab-content.active {
+    display: block;
+}
+
+/* The tree scrolls when rows overflow (new PSS `overflow` support — the engine
+   clips the content, scrolls it on mouse wheel, and draws a scrollbar). */
+.elements-tree {
+    font-size: 2.0vh;
+    padding: 0.33vh;
+    gap: 0;
+    overflow: scroll;
+    height: 58vh;
+    /* Separator line below the tree (above the styles panel). */
+    border-bottom: 0.1vh solid #3e3e42;
+}
+
+/* Styles panel: always visible, pinned to the bottom of the sidebar. It is
+   out-of-flow (absolute) and resolves against the sidebar itself (the engine
+   gives positioned boxes their own containing block when the height is
+   explicit), so `bottom: 0` + `width: 100%` track the sidebar exactly. */
+.styles-panel {
+    position: absolute;
+    left: 0;
+    bottom: 0;
+    width: 100%;
+    height: 28vh;
+    background-color: #252526;
+    color: #d4d4d4;
+    font-size: 2.2vh;
+    padding: 1.3vh;
+    gap: 0.5vh;
+    /* Separator line above the styles panel. */
+    border-top: 0.1vh solid #3e3e42;
+}
+
+.panel-hint {
+    color: #6a9955;
+    font-size: 2vh;
+}
+
+/* Console tab: Chrome-like — the output takes most of the height with just
+   enough room for the single-line input at the bottom, and the whole thing
+   fits between the header and the window edge (the styles panel hides while
+   the Console tab is active). */
+#console-tab {
+    padding: 0.4vh;
+    font-size: 1.9vh;
+}
+
+.console-output {
+    font-size: 1.9vh;
+    padding: 0.4vh;
+    overflow: scroll;
+    /* Fill remaining space in the console-tab flex column. */
+    height: auto;
+    /* Separator line below the console output. */
+    border-bottom: 0.1vh solid #3e3e42;
+}
+
+/* Console input: full width at the bottom of the Console tab. */
+#console-input {
+    width: 100%;
+    height: 3.5vh;
+    background-color: #1e1e1e;
+    color: #e0e0e0;
+    padding: 0.4vh;
+    font-size: 1.9vh;
+    /* Separator line above the console input. */
+    border-top: 0.1vh solid #3e3e42;
+}
