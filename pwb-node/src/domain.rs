@@ -2,23 +2,15 @@
 //!
 //! Note: The `.plain` TLD is strictly reserved for built-in system protocols (`search.plain`,
 //! `register.plain`, `gossip.plain`, `nodes.plain`). User network sites claim `.pwb` domain names.
+//! The canonical reserved-domain list and `.plain` security rule live in
+//! `pwb-core::system`; they are re-exported here for compatibility.
 
 use pwb_core::crypto::{ContentId, PublicKey};
 use std::collections::HashMap;
 
-pub const DOMAIN_CLAIM_COST: u64 = 50;
+pub use pwb_core::system::{is_reserved_system_domain, RESERVED_SYSTEM_DOMAINS};
 
-/// Reserved system domain names in the PlainWeb network.
-pub const RESERVED_SYSTEM_DOMAINS: &[&str] = &[
-    "search.plain",
-    "register.plain",
-    "gossip.plain",
-    "nodes.plain",
-    "network.plain",
-    "help.plain",
-    // Internal browser tools: no TLD, blocked so user sites cannot claim them.
-    "devtools",
-];
+pub const DOMAIN_CLAIM_COST: u64 = 50;
 
 #[derive(Debug, Clone)]
 pub struct DomainRecord {
@@ -83,11 +75,10 @@ impl DomainRegistry {
     }
 }
 
-/// Check if a domain name falls under the reserved `.plain` system TLD.
-pub fn is_reserved_system_domain(domain: &str) -> bool {
-    let clean = domain.trim().to_lowercase();
-    let domain_part = clean.split('?').next().unwrap_or(&clean);
-    domain_part.ends_with(".plain") || RESERVED_SYSTEM_DOMAINS.contains(&domain_part)
+impl Default for DomainRegistry {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 #[cfg(test)]

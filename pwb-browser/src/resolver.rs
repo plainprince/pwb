@@ -3,7 +3,12 @@
 /// Security Rule: `.plain` TLD is strictly reserved for built-in system protocols (`search.plain`,
 /// `register.plain`, `gossip.plain`, `nodes.plain`). User sites reside under `.pwb` domain names (e.g. `welcome.pwb`).
 /// The bare `devtools` domain is a special internal browser tool with no TLD.
-use pwb_node::domain::{is_reserved_system_domain, DomainRegistry};
+///
+/// URL matching is centralized in `pwb-core::system` ([`SystemUrl`] /
+/// [`SystemDomain`]); this module only picks the native page to render for
+/// each recognized domain.
+use pwb_core::system::{SystemDomain, SystemUrl};
+use pwb_node::domain::DomainRegistry;
 use pwb_node::host::ArtifactHost;
 use pwb_node::identity::IdentityManager;
 use pwb_node::search::SearchEngine;
@@ -39,28 +44,32 @@ pub fn resolve_url_or_file(
         return Ok(bytes);
     }
 
-    // 2. Dynamic Reserved System Domains (.plain TLD)
-    if is_reserved_system_domain(clean) {
-        if clean == "search.plain"
-            || clean.starts_with("search.plain?")
-            || clean.starts_with("search?")
-        {
-            let query = if let Some((_, q_part)) = clean.split_once('?') {
-                q_part.trim_start_matches("q=").to_string()
-            } else {
-                "PlainWeb".to_string()
-            };
-
-            let handler = SystemDomainHandler::new(search, host, registry, identity);
-            let bundle = handler.render_system_search_page(&query);
-            return Ok(bundle.serialize());
-        }
-
-        if clean == "register.plain" {
-            let handler = SystemDomainHandler::new(search, host, registry, identity);
-            let bundle = handler.render_system_register_page(identity.public_key());
-            return Ok(bundle.serialize());
-        }
+    // 2. Reserved System Domains (.plain TLD) — matching centralized in pwb-core::system.
+    if let Some(system_url) = SystemUrl::parse(clean) {
+        let handler = SystemDomainHandler::new(search, host, registry, identity);
+        let bundle = match system_url.domain() {
+            SystemDomain::Search => {
+                let query = system_url
+                    .search_query()
+                    .unwrap_or_else(|| "PlainWeb".to_string());
+                handler.render_system_search_page(&query)
+            }
+            SystemDomain::Register => handler.render_system_register_page(identity.public_key()),
+            // The interactive devtools panel normally mounts from `webpages/devtools`
+            // (step 1); this is the standalone fallback page.
+            SystemDomain::DevTools => handler.render_system_devtools_page(None),
+            SystemDomain::Gossip => handler.render_system_gossip_page(),
+            // `plain://nodes.plain?connect=<ip:port>/<pubkey>` links render as a
+            // native connect card; bare nodes.plain shows the peer registry.
+            SystemDomain::Nodes => handler.render_system_nodes_page(system_url.connection_target()),
+            SystemDomain::Network | SystemDomain::Help => {
+                return Err(ResolverError::SystemError(format!(
+                    "{} is a reserved system domain but has no native handler yet",
+                    system_url.domain().as_str()
+                )));
+            }
+        };
+        return Ok(bundle.serialize());
     }
 
     // 3. Explicit File System Access (e.g. `file.pwb/path/to/file.pwb`)
@@ -121,5 +130,50 @@ mod tests {
         let bytes = resolve_url_or_file("welcome.plain", &search, &host, &registry, &identity)
             .expect("welcome.plain should resolve");
         assert_eq!(&bytes[0..4], b"PWB1");
+    }
+
+    #[test]
+    fn test_all_native_system_domains_resolve() {
+        let search = SearchEngine::new();
+        let host = ArtifactHost::new();
+        let registry = DomainRegistry::new();
+        let identity = IdentityManager::new();
+
+        for target in [
+            "search.plain?q=untrackable",
+            "register.plain",
+            "gossip.plain",
+            "nodes.plain",
+            "devtools.plain",
+            // bare aliases and the nodes.plain connection-link form
+            "search?q=plainweb",
+            "plain://nodes.plain?connect=127.0.0.1:9000/0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+        ] {
+            let bytes = resolve_url_or_file(target, &search, &host, &registry, &identity)
+                .unwrap_or_else(|e| panic!("{target} should resolve: {e:?}"));
+            assert!(
+                bytes.len() > 50 && &bytes[0..4] == b"PWB1",
+                "{target} should produce a PWB1 bundle"
+            );
+        }
+    }
+
+    #[test]
+    fn test_reserved_domains_without_handlers_error_clearly() {
+        let search = SearchEngine::new();
+        let host = ArtifactHost::new();
+        let registry = DomainRegistry::new();
+        let identity = IdentityManager::new();
+
+        // network.plain / help.plain are reserved but have no native handler:
+        // they must fail with a clear system error, not a filesystem miss.
+        for target in ["network.plain", "help.plain"] {
+            let err = resolve_url_or_file(target, &search, &host, &registry, &identity)
+                .expect_err("reserved unhandled domain should error");
+            assert!(
+                matches!(err, ResolverError::SystemError(_)),
+                "{target} should be a SystemError, got {err:?}"
+            );
+        }
     }
 }

@@ -289,13 +289,13 @@ fn parse_pml(content: &str) -> PlainNode {
         if let Some(end) = find_char(bytes, cursor, b'<') {
             let text = content[cursor..end].trim();
             if !text.is_empty() {
-                attach_text(&mut stack, &mut id_counter, &text);
+                attach_text(&mut stack, &mut id_counter, text);
             }
             cursor = end;
         } else {
             let text = content[cursor..].trim();
             if !text.is_empty() {
-                attach_text(&mut stack, &mut id_counter, &text);
+                attach_text(&mut stack, &mut id_counter, text);
             }
             break;
         }
@@ -318,7 +318,7 @@ fn parse_pml(content: &str) -> PlainNode {
 /// Attach a text run to the current element. Views (e.g. `<div>Label</div>`)
 /// get a `Text` child node so the label is actually rendered; leaf elements
 /// (`title`, `button`, `text`, `input`) store it as `text_content`.
-fn attach_text(stack: &mut Vec<PlainNode>, id_counter: &mut usize, text: &str) {
+fn attach_text(stack: &mut [PlainNode], id_counter: &mut usize, text: &str) {
     let Some(parent) = stack.last_mut() else {
         return;
     };
@@ -341,12 +341,7 @@ fn attach_text(stack: &mut Vec<PlainNode>, id_counter: &mut usize, text: &str) {
 }
 
 fn find_char(bytes: &[u8], start: usize, target: u8) -> Option<usize> {
-    for i in start..bytes.len() {
-        if bytes[i] == target {
-            return Some(i);
-        }
-    }
-    None
+    (start..bytes.len()).find(|&i| bytes[i] == target)
 }
 
 fn find_sub(bytes: &[u8], start: usize, needle: &[u8]) -> Option<usize> {
@@ -379,8 +374,12 @@ pub fn apply_pss_to_dom(root: &mut crate::dom::DomNode, css_text: &str) -> bool 
                     .map(|id| format!("#{}", id.trim()) == *selector)
                     .unwrap_or(false)
             } else if selector.starts_with('.') {
-                let required: Vec<&str> =
-                    selector[1..].split('.').filter(|c| !c.is_empty()).collect();
+                let required: Vec<&str> = selector
+                    .strip_prefix('.')
+                    .unwrap_or(selector)
+                    .split('.')
+                    .filter(|c| !c.is_empty())
+                    .collect();
                 if let Some(class_attr) = node.attributes.get("class") {
                     let classes: Vec<&str> = class_attr.split_whitespace().collect();
                     !required.is_empty() && required.iter().all(|c| classes.contains(c))

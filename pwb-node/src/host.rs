@@ -31,4 +31,14 @@ impl ArtifactHost {
     pub fn len(&self) -> usize {
         self.storage.len()
     }
+
+    pub fn is_empty(&self) -> bool {
+        self.storage.is_empty()
+    }
+}
+
+impl Default for ArtifactHost {
+    fn default() -> Self {
+        Self::new()
+    }
 }

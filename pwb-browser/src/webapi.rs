@@ -49,12 +49,11 @@ pub fn next_op_id() -> u64 {
     NEXT_OP_ID.fetch_add(1, Ordering::Relaxed)
 }
 
-/// Async op ids are unique process-wide, but the queues themselves are
-/// per-session (inside [`WebApiState`]) so concurrent browser sessions or
-/// parallel tests never steal each other's events.
-
 /// Plain-data results produced by background threads, drained on the main
-/// thread by `js_runtime::poll_async_ops`.
+/// thread by `js_runtime::poll_async_ops`. Async op ids are unique
+/// process-wide, but the queues themselves are per-session (inside
+/// [`WebApiState`]) so concurrent browser sessions or parallel tests never
+/// steal each other's events.
 pub enum AsyncEvent {
     Fetch {
         id: u64,
@@ -578,7 +577,7 @@ pub fn show_confirm(msg: &str) -> bool {
     #[cfg(not(target_os = "macos"))]
     {
         println!("[JS Confirm] {}", msg);
-        return true;
+        true
     }
 }
 
@@ -590,7 +589,7 @@ pub fn show_prompt(msg: &str, default_val: &str) -> Option<String> {
     #[cfg(not(target_os = "macos"))]
     {
         println!("[JS Prompt] {} (default: {})", msg, default_val);
-        return Some(default_val.to_string());
+        Some(default_val.to_string())
     }
 }
 

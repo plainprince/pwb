@@ -25,12 +25,14 @@ pub fn set_actions(actions: ContextMenuActions) {
     let _ = ACTIONS.set(actions);
 }
 
+#[cfg(target_os = "macos")]
 fn invoke_copy() {
     if let Some(a) = ACTIONS.get() {
         (a.on_copy)();
     }
 }
 
+#[cfg(target_os = "macos")]
 fn invoke_inspect() {
     if let Some(a) = ACTIONS.get() {
         (a.on_inspect)();

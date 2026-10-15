@@ -15,6 +15,12 @@ pub fn get_font() -> Option<&'static ab_glyph::FontArc> {
                 "/System/Library/Fonts/Supplemental/Arial.ttf",
                 "/System/Library/Fonts/Helvetica.ttc",
                 "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
+                // Liberation Sans is metric-compatible with Arial and ships on
+                // most Linux distros (Fedora, Debian/Ubuntu non-Noto setups).
+                "/usr/share/fonts/liberation/LiberationSans-Regular.ttf",
+                "/usr/share/fonts/truetype/liberation/LiberationSans-Regular.ttf",
+                "/usr/share/fonts/noto/NotoSans-Regular.ttf",
+                "/usr/share/fonts/truetype/noto/NotoSans-Regular.ttf",
                 "C:\\Windows\\Fonts\\arial.ttf",
             ];
             for path in font_paths {

@@ -68,6 +68,7 @@ pub fn glyph_advance_px(font: &FontArc, glyph_id: ab_glyph::GlyphId, size_px: f3
 /// text box is sized exactly to the text it paints (buttons, inputs, and the
 /// input caret all agree on where the glyphs land).
 pub fn measure_text_width(text: &str, size: f32, font_opt: Option<&FontArc>) -> f32 {
+    #[allow(clippy::redundant_closure)]
     let font = font_opt.or_else(|| get_font());
     if let Some(font) = font {
         text.chars()
@@ -110,7 +111,7 @@ pub fn docked_devtools_width(
     {
         return None;
     }
-    let sidebar = find_node_with_class(&root, "devtools-sidebar")?;
+    let sidebar = find_node_with_class(root, "devtools-sidebar")?;
     let style = crate::style::compute_style(sidebar);
     let dim = viewport_w; // sidebar width is viewport-relative (vw by default)
     resolve_clamped_width(&style, dim, viewport_w, viewport_h)

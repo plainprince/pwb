@@ -40,14 +40,9 @@ pub enum PipelineError {
 }
 
 /// DevTools state
+#[derive(Default)]
 struct DevToolsState {
     is_open: bool,
-}
-
-impl Default for DevToolsState {
-    fn default() -> Self {
-        Self { is_open: false }
-    }
 }
 
 /// Scroll every listed box to its bottom (the devtools console jumps to the
@@ -103,6 +98,7 @@ impl ResizeDrag {
 /// physical dimensions/position at grab time; the result clamps to `[min, max]`
 /// (the element's `min-width`/`max-width` for horizontal edges; vertical edges
 /// only clamp at `min` since `max` is MAX for them).
+#[allow(clippy::too_many_arguments)]
 fn resize_new_dimensions(
     edge: ResizeEdge,
     start_w: f32,
@@ -1347,7 +1343,7 @@ impl ApplicationHandler for BrowserApp {
                 if !suppressed {
                     *self.menu_result.lock().unwrap() = 0;
                     context_menu::show_context_menu(
-                        &window,
+                        window,
                         self.current_mouse_pos.x,
                         self.current_mouse_pos.y,
                     );
@@ -1871,7 +1867,7 @@ mod tests {
         // (block-flow spacing adds a little to the content height).
         let scrolled = *scrolls.get(&5).expect("scrolled");
         assert!(
-            scrolled >= 300.0 && scrolled <= 400.0,
+            (300.0..=400.0).contains(&scrolled),
             "scrolled to bottom of the container (got {})",
             scrolled
         );

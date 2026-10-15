@@ -45,16 +45,15 @@ fn main() {
 
                     // Claim user domain under .pwb TLD (security enforced: .plain is reserved)
                     let user_domain = "welcome.pwb";
-                    if identity.spend_credits(DOMAIN_CLAIM_COST).is_ok() {
-                        if registry
+                    if identity.spend_credits(DOMAIN_CLAIM_COST).is_ok()
+                        && registry
                             .register(user_domain, content_id, identity.public_key())
                             .is_ok()
-                        {
-                            println!(
-                                "[Domain] Claimed user domain '{}' -> {} (Spent {} credits)",
-                                user_domain, content_id, DOMAIN_CLAIM_COST
-                            );
-                        }
+                    {
+                        println!(
+                            "[Domain] Claimed user domain '{}' -> {} (Spent {} credits)",
+                            user_domain, content_id, DOMAIN_CLAIM_COST
+                        );
                     }
                 }
             }

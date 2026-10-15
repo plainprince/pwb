@@ -242,7 +242,7 @@ impl NodeEngine {
     /// Add a peer to the peer table.
     pub fn add_peer(&self, peer_info: PeerInfo) {
         let mut peer_table = self.peer_table.lock().unwrap();
-        peer_table.insert(peer_info.public_key.clone(), peer_info);
+        peer_table.insert(peer_info.public_key, peer_info);
     }
 
     /// Remove a peer from the peer table.
@@ -265,9 +265,7 @@ impl NodeEngine {
     ///
     /// Format: `plain://nodes.plain?connect=<ip:port>/<pubkey_hex>`
     pub fn generate_connection_link(&self) -> String {
-        let addr = self.config.listen_addr;
-        let pubkey_hex = self.config.keypair.public.to_hex();
-        format!("plain://nodes.plain?connect={}/{}", addr, pubkey_hex)
+        Self::build_connection_link(self.config.listen_addr, self.config.keypair.public)
     }
 
     /// Static method to build a connection link from address and public key.
@@ -275,8 +273,7 @@ impl NodeEngine {
     ///
     /// Format: `plain://nodes.plain?connect=<ip:port>/<pubkey_hex>`
     pub fn build_connection_link(listen_addr: SocketAddr, pubkey: PublicKey) -> String {
-        let pubkey_hex = pubkey.to_hex();
-        format!("plain://nodes.plain?connect={}/{}", listen_addr, pubkey_hex)
+        crate::system::build_connection_link(listen_addr, pubkey)
     }
 
     /// Generate a connection link from a parsed (SocketAddr, PublicKey) tuple.
@@ -291,31 +288,7 @@ impl NodeEngine {
     ///
     /// Returns Some((SocketAddr, PublicKey)) if the link is valid.
     pub fn parse_connection_link(link: &str) -> Option<(SocketAddr, PublicKey)> {
-        // Strip the "plain://nodes.plain?connect=" prefix
-        let prefix = "plain://nodes.plain?connect=";
-        if !link.starts_with(prefix) {
-            return None;
-        }
-        let remaining = &link[prefix.len()..];
-
-        // Split into address and pubkey (last 64 hex chars = 32 bytes = Ed25519 pubkey)
-        if remaining.len() < 65 {
-            // addr + ":" + 64 hex chars minimum
-            return None;
-        }
-        let pubkey_hex = &remaining[remaining.len() - 64..];
-        let addr_part = &remaining[..remaining.len() - 64 - 1]; // -1 for the colon
-
-        let addr: SocketAddr = addr_part.parse().ok()?;
-        let pubkey_bytes: Vec<u8> = hex::decode(pubkey_hex).ok()?;
-        if pubkey_bytes.len() != 32 {
-            return None;
-        }
-        let mut bytes = [0u8; 32];
-        bytes.copy_from_slice(&pubkey_bytes);
-        let pubkey = crate::crypto::PublicKey(bytes);
-
-        Some((addr, pubkey))
+        crate::system::parse_connection_link(link)
     }
 
     /// Internal message handler loop.
@@ -375,35 +348,29 @@ impl NodeEngine {
                 // Handle peer discovery gossip
                 // Add sender to peer table if not present
                 let mut pt = peer_table.lock().unwrap();
-                if !pt.contains_key(&sender_pubkey) {
+                pt.entry(sender_pubkey).or_insert_with(|| {
                     // We would normally have the sender's address from the transport layer
                     // For now, we'll use a placeholder
                     let placeholder_addr = SocketAddr::from(([127, 0, 0, 1], 0));
-                    pt.insert(
-                        sender_pubkey.clone(),
-                        PeerInfo {
-                            public_key: sender_pubkey,
-                            last_seen: Instant::now(),
-                            address: placeholder_addr,
-                            reputation: 0,
-                        },
-                    );
-                }
+                    PeerInfo {
+                        public_key: sender_pubkey,
+                        last_seen: Instant::now(),
+                        address: placeholder_addr,
+                        reputation: 0,
+                    }
+                });
 
                 // Add known peers
                 for peer_pubkey in known_peers {
-                    if !pt.contains_key(&peer_pubkey) {
+                    pt.entry(peer_pubkey).or_insert_with(|| {
                         let placeholder_addr = SocketAddr::from(([127, 0, 0, 1], 0));
-                        pt.insert(
-                            peer_pubkey.clone(),
-                            PeerInfo {
-                                public_key: peer_pubkey,
-                                last_seen: Instant::now(),
-                                address: placeholder_addr,
-                                reputation: 0,
-                            },
-                        );
-                    }
+                        PeerInfo {
+                            public_key: peer_pubkey,
+                            last_seen: Instant::now(),
+                            address: placeholder_addr,
+                            reputation: 0,
+                        }
+                    });
                 }
             }
 
@@ -419,18 +386,15 @@ impl NodeEngine {
                 let mut pt = peer_table.lock().unwrap();
 
                 // Add the publisher to the peer table if we don't know them yet
-                if !pt.contains_key(&publisher) {
+                pt.entry(publisher).or_insert_with(|| {
                     let placeholder_addr = SocketAddr::from(([127, 0, 0, 1], 0));
-                    pt.insert(
-                        publisher.clone(),
-                        PeerInfo {
-                            public_key: publisher,
-                            last_seen: Instant::now(),
-                            address: placeholder_addr,
-                            reputation: 0,
-                        },
-                    );
-                }
+                    PeerInfo {
+                        public_key: publisher,
+                        last_seen: Instant::now(),
+                        address: placeholder_addr,
+                        reputation: 0,
+                    }
+                });
 
                 // Record that we've seen this content_id from this publisher
                 // by updating the publisher's last_seen timestamp, indicating activity

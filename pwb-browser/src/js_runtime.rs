@@ -78,7 +78,7 @@ impl DomHandle {
 // per page, and rquickjs contexts are designed to be reused; each call re-installs the
 // `document`/`console` bindings for the current DOM handle.
 thread_local! {
-    static JS_CONTEXT: RefCell<Option<rquickjs::Context>> = RefCell::new(None);
+    static JS_CONTEXT: RefCell<Option<rquickjs::Context>> = const { RefCell::new(None) };
 }
 
 fn get_or_create_context() -> Result<rquickjs::Context, JsError> {
@@ -1459,6 +1459,7 @@ fn make_close_row(data_node: &str, next_id: &mut usize, indent: &str, tag: &str)
 /// Leaf row: `<tag` `#id` `> text` `</tag>` on one line. The content text is
 /// width-truncated with a `…` ellipsis so the closing tag always stays visible
 /// within `budget_px` (the tree's content width minus the scrollbar).
+#[allow(clippy::too_many_arguments)]
 fn make_leaf_row(
     row_id: &str,
     next_id: &mut usize,
@@ -1683,7 +1684,7 @@ fn render_styles_panel(dom: &mut Dom, selected: Option<usize>) {
 /// `kind` is `o` (opening-tag row), `c` (closing-tag row, emitted after the
 /// children) or `l` (a single leaf row carrying the element's text).
 fn collect_dom_tree_lines(node: &DomNode, depth: usize, out: &mut String) {
-    if node.attributes.get("data-devtools").is_some() {
+    if node.attributes.contains_key("data-devtools") {
         return;
     }
     let id_attr = node.attributes.get("id").cloned().unwrap_or_default();
@@ -1752,7 +1753,7 @@ fn parse_props_json(props_json: &str) -> HashMap<String, String> {
 
 /// Replace `{param}` placeholders in a DOM subtree's attributes and text.
 fn substitute_params_dom(node: &mut DomNode, params: &HashMap<String, String>) {
-    for (_, v) in node.attributes.iter_mut() {
+    for v in node.attributes.values_mut() {
         for (key, value) in params {
             *v = v.replace(&format!("{{{}}}", key), value);
         }
@@ -1858,7 +1859,7 @@ fn find_node_by_selector<'a>(node: &'a DomNode, selector: &str) -> Option<&'a Do
     }
     if selector.starts_with('#') {
         // ID selector: matches the `id` attribute or the numeric node id.
-        return find_node_by_id(node, &selector[1..]);
+        return find_node_by_id(node, selector.strip_prefix('#').unwrap_or(selector));
     }
     if selector.starts_with('.') {
         // Class selector - check attributes
@@ -2437,12 +2438,12 @@ mod tests {
         // `</tag>` line) can select the element it represents.
         let title_open = rows
             .iter()
-            .find(|(_, _, p)| p.iter().any(|t| *t == "    <title>"))
+            .find(|(_, _, p)| p.contains(&"    <title>"))
             .expect("title open row");
         assert_eq!(title_open.1, Some("100003"), "leaf rows carry data-node");
         let head_close = rows
             .iter()
-            .find(|(_, _, p)| p.iter().any(|t| *t == "  </head>"))
+            .find(|(_, _, p)| p.contains(&"  </head>"))
             .expect("head close row");
         assert_eq!(
             head_close.1,
@@ -2454,7 +2455,7 @@ mod tests {
         // `<title>` child, then the `</head>` closing row — not inline.
         let title_row = rows
             .iter()
-            .find(|(_, _, p)| p.iter().any(|t| *t == "</title>"))
+            .find(|(_, _, p)| p.contains(&"</title>"))
             .expect("title row");
         let title_idx = rows
             .iter()

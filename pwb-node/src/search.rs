@@ -62,6 +62,12 @@ impl SearchEngine {
     }
 }
 
+impl Default for SearchEngine {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 fn extract_terms(node: &pwb_core::spec::PlainNode, counts: &mut HashMap<String, u32>) {
     if let Some(txt) = &node.text_content {
         for word in txt.split_whitespace() {

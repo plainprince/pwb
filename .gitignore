@@ -1,0 +1,6 @@
+# Rust build output (workspace target lives at the repo root)
+/target
+
+# editor / OS cruft
+*.rs.bk
+.DS_Store

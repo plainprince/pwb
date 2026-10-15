@@ -201,7 +201,7 @@ pub fn caret_index_at_x(value: &str, font_size: f32, x_local: f32) -> usize {
 }
 
 /// Find a layout box by its DOM node id.
-pub fn find_box_by_id<'a>(root: &'a LayoutBox, node_id: usize) -> Option<&'a LayoutBox> {
+pub fn find_box_by_id(root: &LayoutBox, node_id: usize) -> Option<&LayoutBox> {
     if root.node_id == node_id {
         return Some(root);
     }
@@ -216,7 +216,7 @@ pub fn find_box_by_id<'a>(root: &'a LayoutBox, node_id: usize) -> Option<&'a Lay
 /// Hit-test a resize handle on a `resize`-enabled box.
 /// Returns `(node_id, ResizeEdge)` when the point is within 8px of an edge.
 pub fn hit_test_resize_handle(root: &LayoutBox, x: f32, y: f32) -> Option<(usize, ResizeEdge)> {
-    fn walk<'a>(node: &'a LayoutBox, x: f32, y: f32) -> Option<(usize, ResizeEdge)> {
+    fn walk(node: &LayoutBox, x: f32, y: f32) -> Option<(usize, ResizeEdge)> {
         // Only check boxes that actually have `resize` set.
         if node.style.resize == crate::style::ComputedStyle::default().resize {
             // No resize on this box, but check children

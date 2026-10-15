@@ -11,11 +11,18 @@
 //!   crypto      — keypair identity, signatures, and packet encryption.
 //!   net         — the transport abstraction (share-links, gossip, broadcast/
 //!                 multicast) as framing only.
+//!   onion       — fixed-size Sphinx-style onion cells: layered
+//!                 ChaCha20-Poly1305 over per-hop X25519 ECDH keys.
+//!   system      — the unified system protocol resolver: reserved `.plain`
+//!                 domain list, `plain://` URL parsing, and the `nodes.plain`
+//!                 connection-link codec.
 //!   components  — reusable UI component primitives (sidebars, navbars, tabs)
 //!                 shared by both `pwb-web` and `pwb-browser`.
 
 pub mod components;
 pub mod crypto;
 pub mod net;
+pub mod onion;
 pub mod spec;
+pub mod system;
 pub mod wire;

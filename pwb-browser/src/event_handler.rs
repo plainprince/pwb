@@ -6,11 +6,14 @@
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
+/// Maps `(element_id, event_type)` -> list of event callback JS snippets.
+type HandlerMap = HashMap<(String, String), Vec<String>>;
+
 /// Global Event Registry shared between UI Window and QuickJS runtime.
 #[derive(Default, Clone)]
 pub struct EventHandlerRegistry {
     /// Maps `(element_id, event_type)` -> list of event callback JS snippets (for new API)
-    handlers: Arc<Mutex<HashMap<(String, String), Vec<String>>>>,
+    handlers: Arc<Mutex<HandlerMap>>,
 
     /// Legacy: Maps `element_id` -> list of event callback JS snippets (for backward compatibility)
     click_handlers: Arc<Mutex<HashMap<String, Vec<String>>>>,

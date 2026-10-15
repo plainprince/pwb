@@ -91,9 +91,9 @@ pub fn bundle_css_files(site_dir: &Path, css_files: &[String]) -> String {
     }
 
     let mut css = String::new();
-    let mut provider = lightningcss::bundler::FileProvider::new();
+    let provider = lightningcss::bundler::FileProvider::new();
     let mut bundler = lightningcss::bundler::Bundler::new(
-        &mut provider,
+        &provider,
         None,
         lightningcss::stylesheet::ParserOptions::default(),
     );

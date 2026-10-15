@@ -644,7 +644,7 @@ impl BlindVoucher {
         let alpha = Scalar::from_bytes_mod_order(blinding.alpha.0);
         let beta = Scalar::from_bytes_mod_order(blinding.beta.0);
 
-        let commitment = nonce.point + &alpha * RISTRETTO_BASEPOINT_TABLE + &beta * &issuer_point;
+        let commitment = nonce.point + &alpha * RISTRETTO_BASEPOINT_TABLE + beta * issuer_point;
         let challenge = blind_voucher_challenge(amount, &issuer_point, &commitment, &token);
 
         Some((
@@ -701,7 +701,7 @@ impl BlindVoucher {
         };
 
         // Recover the commitment the issuer signed: R = s*G - c*X.
-        let commitment = &response * RISTRETTO_BASEPOINT_TABLE - &challenge * &issuer_point;
+        let commitment = &response * RISTRETTO_BASEPOINT_TABLE - challenge * issuer_point;
         blind_voucher_challenge(self.amount, &issuer_point, &commitment, &token) == challenge
     }
 
@@ -761,7 +761,7 @@ impl BlindVoucher {
         };
 
         let challenge = ownership_challenge(self.amount, &self.token, &commitment);
-        &response * RISTRETTO_BASEPOINT_TABLE == commitment + &challenge * &token_point
+        &response * RISTRETTO_BASEPOINT_TABLE == commitment + challenge * token_point
     }
 
     /// Token bytes identifying this voucher, used for double-spend tracking.

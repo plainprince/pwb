@@ -71,6 +71,7 @@ fn is_positioned(style: &ComputedStyle) -> bool {
 }
 
 /// Lay out a node and its subtree, returning its LayoutBox.
+#[allow(clippy::too_many_arguments)]
 fn layout_node(
     node: &DomNode,
     ctx: &LayoutCtx,
@@ -268,6 +269,7 @@ fn final_box_width(
 }
 
 /// Lay out a node in-flow (or in local coordinates for out-of-flow elements).
+#[allow(clippy::too_many_arguments)]
 fn build_box(
     node: &DomNode,
     ctx: &LayoutCtx,
@@ -746,6 +748,7 @@ fn build_box(
 }
 
 /// Resolve the final rect for an out-of-flow box against its containing block.
+#[allow(clippy::too_many_arguments)]
 fn resolve_oof_rect(
     style: &ComputedStyle,
     containing: &Rect,
@@ -829,7 +832,7 @@ mod tests {
         }
     }
 
-    fn find<'a>(b: &'a LayoutBox, id: usize) -> Option<&'a LayoutBox> {
+    fn find(b: &LayoutBox, id: usize) -> Option<&LayoutBox> {
         if b.node_id == id {
             return Some(b);
         }

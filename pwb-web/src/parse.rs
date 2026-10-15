@@ -139,7 +139,7 @@ pub fn parse_site_directory<P: AsRef<Path>>(dir_path: P) -> Result<ParsedSite, P
     let entry_name = ["app.pjs", "main.pjs", "index.pjs"]
         .iter()
         .find(|n| js_entries.iter().any(|(name, _)| name == *n))
-        .map(|s| *s);
+        .copied();
     let (script_payload, modules) = crate::bundler::bundle_js_files(&js_entries, entry_name);
     let title = extract_title(&root_node);
 
@@ -400,7 +400,7 @@ fn extract_bundlables(
             }
             Tag::Script => {
                 if let Some(src) = child.attributes.get("src").cloned() {
-                    let name = src.split('/').last().unwrap_or(&src).to_string();
+                    let name = src.split('/').next_back().unwrap_or(&src).to_string();
                     if let Ok(bytes) = fs::read(dir.join(&src)) {
                         js_entries.push((name, bytes));
                     } else {
@@ -469,7 +469,7 @@ fn resolve_imports(node: &mut PlainNode, components: &HashMap<String, PlainNode>
 /// Replace `{key}` placeholders in a node's attributes and text with the given
 /// parameter values (unknown placeholders are left untouched).
 fn substitute_params(node: &mut PlainNode, params: &HashMap<String, String>) {
-    for (_, v) in node.attributes.iter_mut() {
+    for v in node.attributes.values_mut() {
         *v = substitute_in_string(v, params);
     }
     if let Some(text) = &mut node.text_content {
@@ -489,12 +489,7 @@ fn substitute_in_string(input: &str, params: &HashMap<String, String>) -> String
 }
 
 fn find_char(bytes: &[u8], start: usize, target: u8) -> Option<usize> {
-    for i in start..bytes.len() {
-        if bytes[i] == target {
-            return Some(i);
-        }
-    }
-    None
+    (start..bytes.len()).find(|&i| bytes[i] == target)
 }
 
 fn parse_tag_content(content: &str) -> (String, HashMap<String, String>) {

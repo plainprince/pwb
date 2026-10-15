@@ -22,22 +22,33 @@ This document outlines the architectural refactoring and implementation roadmap 
   - Implement zero-knowledge / blind signature vouchers for credit attestations.
     - Implemented as unlinkable Chaum-style blind Schnorr signatures over Ristretto (`BlindVoucherIssuer`, `BlindVoucher`, `BlindVoucherPublicKey`, `VoucherSecret`, `VoucherBlinding`): the issuer never sees the token, and redemption is publicly verifiable without revealing the bearer secret.
     - Added zero-knowledge ownership proofs (`VoucherOwnershipProof`, `BlindVoucher::prove_ownership` / `verify_ownership`), per-denomination issuer keys (`BlindVoucherIssuer::from_denomination_seed`) that reject out-of-denomination requests, single-round issuance via pre-generated nonce pools (`nonce_pool`), and replay rejection (`VoucherSpendLog`, `VoucherSpendError`).
-- [ ] **Unified System Protocol Resolver**
+- [x] **Unified System Protocol Resolver**
   - Centralize native `.plain` system domain handlers (`search.plain`, `devtools.plain`, `register.plain`, `gossip.plain`, `nodes.plain`) inside `pwb-core::system`.
+    - `pwb-core::system` is now the single source of truth for the reserved-domain list, the `.plain` TLD security rule, `plain://` URL parsing (`SystemUrl` / `SystemDomain` with `q=` / `connect=` parameter extraction), and the `nodes.plain` connection-link codec (`build_connection_link` / `parse_connection_link`, previously inlined in `NodeEngine`).
+    - `pwb-node::domain` re-exports the canonical list/rule; `NodeEngine`'s link methods delegate to `pwb-core::system`.
+    - `pwb-node::system` gained native `gossip.plain` and `nodes.plain` page renderers (connection links render as a connect card); `pwb-browser`'s resolver dispatches all five domains through the core parser (reserved-but-unhandled domains like `network.plain`/`help.plain` now fail with a clear `SystemError` instead of a filesystem miss).
 
 ---
 
 ## 2. Onion Routing & Encryption Layer (`pwb-core::onion`)
 
-- [ ] **Layered Sphinx-Style Onion Encapsulation**
+- [x] **Layered Sphinx-Style Onion Encapsulation**
   - Implement fixed-size packet cell framing (e.g. 512 bytes) to obscure query payloads and packet types.
   - Encrypt packet headers and payloads with multi-layer ChaCha20-Poly1305 symmetric ciphers using ephemeral X25519 keys per relay hop.
-- [ ] **Cryptographically Random Hop Counts & Dummy Nodes**
+    - Implemented in `pwb-core::onion`: fixed 512-byte cells (40-byte clear framing + 6×56-byte encrypted layer slots + 136-byte encrypted payload region) — the uniform wire image hides query, packet type, path length, and payload length.
+    - Per-cell ephemeral X25519 key ECDHs against each relay's long-term key; BLAKE3 `derive_key` splits independent layer/payload sub-keys (separate contexts), so every AEAD runs a single-use key with a safe zero nonce.
+    - Sphinx shift semantics: directives (`FORWARD <next relay>` / `DELIVER`) stack inside-out, relays peel the front slot and re-emit an identical-size cell with a re-randomized trailing slot; unused slots are sender-random padding that hides the true hop count.
+    - Groundwork for §2.2/§2.3: `MIN_HOPS=3`..`MAX_LAYER_SLOTS=6` paths via `validate_path` (unique-relay rule), reserved `cell_kind` + 6 header bytes for cover traffic, `PAYLOAD_MAX=118` for future multi-cell streams.
+- [x] **Cryptographically Random Hop Counts & Dummy Nodes**
   - Generate randomized relay path lengths for every request ($N \ge 3$ active hops + randomized dummy relay hops).
   - Intermediate nodes cannot determine if the next hop is another relay or the final destination.
+    - Implemented in `pwb-core::onion`: `randomize_path` / `randomize_path_with` take a caller-supplied active route (3..=6 distinct hops, enforced by `validate_path`) plus a candidate pool, draw a uniform `0..=` room count of dummy relays, and scatter them over the route's interior gaps — entry/exit preserved, every relay unique, route survives as an ordered subsequence (`RandomizedPath { relays, active_hops }`, `dummy_hops()`).
+    - Indistinguishability proven by `test_intermediate_cannot_tell_if_next_hop_is_destination`: two worlds where the middle relay's next hop is/isn't the final destination produce a byte-identical observable (only `PeeledCell`'s action + forward framing exist — no position, path length, or "final hop" flag), while downstream genuinely diverges (Deliver vs Forward), and the forwarded cell no longer authenticates for the middle relay.
+    - 256-sample test locks in that lengths actually vary across requests over the same active route; validation tests cover short/duplicate/oversized routes, capacity-exact routes (0 dummies), and candidate pools overlapping or duplicating the route.
 - [ ] **IP & Transport Metadata Protection**
   - Mask source IP headers at intermediate hops; unencryptable metadata (like raw sockets) yields no actionable tracking information.
   - Implement cover traffic (decoy onion packets) dispatched at randomized intervals.
+    - Groundwork in `pwb-core::onion`: `CoverTraffic`/`CoverConfig` build decoy cells over `randomize_path` paths with uniformly random payloads of random length (ordinary `cell_kind` 0 cells — wire-indistinguishable from real requests) and sample exponentially distributed, clamped dispatch delays via inverse-CDF (injectable RNG for tests). Cells carry no source-address field; actual IP masking + the dispatch loop land with transport integration (cells are not yet sent over the wire by `NodeEngine`).
 
 ---
 

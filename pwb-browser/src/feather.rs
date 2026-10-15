@@ -598,7 +598,7 @@ mod tests {
         ] {
             let d = feather_path(name).expect("icon exists");
             let path = crate::render::parse_icon_path(d);
-            assert!(path.len() > 0, "{name} produced an empty path");
+            assert!(!path.is_empty(), "{name} produced an empty path");
             let stroke = tiny_skia::Stroke {
                 width: 2.0,
                 miter_limit: 4.0,

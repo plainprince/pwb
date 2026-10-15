@@ -102,7 +102,7 @@ fn cached_icon_path(name: &str) -> Option<Path> {
         }
         if let Some(d) = crate::feather::feather_path(name) {
             let p = parse_icon_path(d);
-            if p.len() > 0 {
+            if !p.is_empty() {
                 cache.insert(name.to_string(), p.clone());
                 return Some(p);
             }
@@ -216,6 +216,7 @@ pub struct ScrollbarInfo {
 /// Allocating a fresh full-viewport `Pixmap` on every frame leaves many megabytes of
 /// freed-but-cached allocations behind (a Retina window is 1800x1300 = ~9MB per frame),
 /// so the caller keeps one pixmap alive and we only reallocate when the size changes.
+#[allow(clippy::too_many_arguments)]
 pub fn render_dom_into_pixmap(
     pixmap: &mut Pixmap,
     dom: &Dom,
@@ -503,7 +504,7 @@ pub fn draw_selected_highlight_scrolled(
     draw_highlight_at(pixmap, r, tx, ty, true);
 }
 
-pub fn hit_test_layout_box<'a>(box_node: &'a LayoutBox, mx: f32, my: f32) -> Option<&'a LayoutBox> {
+pub fn hit_test_layout_box(box_node: &LayoutBox, mx: f32, my: f32) -> Option<&LayoutBox> {
     hit_test_layout_box_scrolled(box_node, mx, my, &HashMap::new())
 }
 
@@ -586,6 +587,7 @@ pub fn find_scroll_container<'a>(
     }
     walk(root, mx, my, RenderState::identity(), scrolls)
 }
+#[allow(clippy::too_many_arguments)]
 fn render_layout_box(
     box_node: &LayoutBox,
     pixmap: &mut Pixmap,
@@ -1181,6 +1183,7 @@ fn is_js_keyword(word: &str) -> bool {
     )
 }
 
+#[allow(clippy::too_many_arguments)]
 fn draw_text_ab_glyph(
     pixmap: &mut Pixmap,
     text: &str,
@@ -1247,8 +1250,8 @@ fn draw_text_ab_glyph(
                 let bounds = outlined.px_bounds();
                 outlined.draw(|gx, gy, coverage| {
                     if coverage > 0.02 {
-                        let xf = bounds.min.x as f32 + gx as f32 + sx;
-                        let yf = bounds.min.y as f32 + gy as f32 + sy;
+                        let xf = bounds.min.x + gx as f32 + sx;
+                        let yf = bounds.min.y + gy as f32 + sy;
                         if visible(xf, yf) {
                             let px = xf as u32;
                             let py = yf as u32;
@@ -1710,12 +1713,14 @@ mod tests {
         use crate::style::ComputedStyle;
         use pwb_core::spec::{Color, OverflowStyle};
         // A 100x50 scroll container holding one red 100px-tall row (overflows).
-        let mut child_style = ComputedStyle::default();
-        child_style.background_color = Color {
-            r: 255,
-            g: 0,
-            b: 0,
-            a: 255,
+        let child_style = ComputedStyle {
+            background_color: Color {
+                r: 255,
+                g: 0,
+                b: 0,
+                a: 255,
+            },
+            ..Default::default()
         };
         let child = crate::layout::LayoutBox {
             node_id: 2,
@@ -1819,12 +1824,14 @@ mod tests {
         use pwb_core::spec::Color as SpecColor;
         // A green `home` icon in a 48x48 box must paint stroke pixels in its
         // color and nothing outside the box.
-        let mut style = ComputedStyle::default();
-        style.text_color = SpecColor {
-            r: 0,
-            g: 255,
-            b: 0,
-            a: 255,
+        let style = ComputedStyle {
+            text_color: SpecColor {
+                r: 0,
+                g: 255,
+                b: 0,
+                a: 255,
+            },
+            ..Default::default()
         };
         let icon = crate::layout::LayoutBox {
             node_id: 7,
@@ -1898,12 +1905,14 @@ mod tests {
         use pwb_core::spec::Color as SpecColor;
         // Test that an icon is centered in a rectangular box (taller than wide).
         // The icon should be horizontally centered.
-        let mut style = ComputedStyle::default();
-        style.text_color = SpecColor {
-            r: 255,
-            g: 0,
-            b: 0,
-            a: 255,
+        let style = ComputedStyle {
+            text_color: SpecColor {
+                r: 255,
+                g: 0,
+                b: 0,
+                a: 255,
+            },
+            ..Default::default()
         };
         // 40px wide, 100px tall box - icon should be centered horizontally
         let icon = crate::layout::LayoutBox {
@@ -2112,10 +2121,7 @@ mod tests {
             Some((2, 0)),
         );
         // Locate the input box so the caret region is checked within it.
-        fn find_box<'a>(
-            b: &'a crate::layout::LayoutBox,
-            id: usize,
-        ) -> Option<&'a crate::layout::LayoutBox> {
+        fn find_box(b: &crate::layout::LayoutBox, id: usize) -> Option<&crate::layout::LayoutBox> {
             if b.node_id == id {
                 return Some(b);
             }
@@ -2183,10 +2189,7 @@ mod tests {
         let mut pixmap = Pixmap::new(600, 200).unwrap();
         let (layout, _) =
             render_dom_into_pixmap(&mut pixmap, &dom, 600, 200, 0.0, sel, &empty_scrolls, None);
-        fn find_box<'a>(
-            b: &'a crate::layout::LayoutBox,
-            id: usize,
-        ) -> Option<&'a crate::layout::LayoutBox> {
+        fn find_box(b: &crate::layout::LayoutBox, id: usize) -> Option<&crate::layout::LayoutBox> {
             if b.node_id == id {
                 return Some(b);
             }
@@ -2219,17 +2222,19 @@ mod tests {
         use pwb_core::spec::Color as SpecColor;
         // A 100x60 view with a 2px red border (top+bottom+left+right) and a
         // white interior.
-        let mut style = ComputedStyle::default();
-        style.background_color = SpecColor::WHITE;
-        style.border_top = 2.0;
-        style.border_right = 2.0;
-        style.border_bottom = 2.0;
-        style.border_left = 2.0;
-        style.border_color = SpecColor {
-            r: 255,
-            g: 0,
-            b: 0,
-            a: 255,
+        let style = ComputedStyle {
+            background_color: SpecColor::WHITE,
+            border_top: 2.0,
+            border_right: 2.0,
+            border_bottom: 2.0,
+            border_left: 2.0,
+            border_color: SpecColor {
+                r: 255,
+                g: 0,
+                b: 0,
+                a: 255,
+            },
+            ..Default::default()
         };
         let view = crate::layout::LayoutBox {
             node_id: 3,
@@ -2278,14 +2283,16 @@ mod tests {
         assert!(!is_red(&pixmap, 25, 12), "nothing above the box");
 
         // A side-only border (`border-bottom`) paints only that side.
-        let mut style = ComputedStyle::default();
-        style.background_color = SpecColor::WHITE;
-        style.border_bottom = 2.0;
-        style.border_color = SpecColor {
-            r: 255,
-            g: 0,
-            b: 0,
-            a: 255,
+        let style = ComputedStyle {
+            background_color: SpecColor::WHITE,
+            border_bottom: 2.0,
+            border_color: SpecColor {
+                r: 255,
+                g: 0,
+                b: 0,
+                a: 255,
+            },
+            ..Default::default()
         };
         let view = crate::layout::LayoutBox {
             node_id: 3,

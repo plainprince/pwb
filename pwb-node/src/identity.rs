@@ -43,3 +43,9 @@ impl IdentityManager {
         }
     }
 }
+
+impl Default for IdentityManager {
+    fn default() -> Self {
+        Self::new()
+    }
+}
