@@ -200,6 +200,7 @@ mod tests {
     fn test_system_url_parse_search_query() {
         let url = SystemUrl::parse("plain://search.plain?q=untrackable").expect("search url");
         assert_eq!(url.domain(), SystemDomain::Search);
+        assert_eq!(url.query(), "q=untrackable");
         assert_eq!(url.search_query().as_deref(), Some("untrackable"));
 
         // Scheme-less and bare-alias forms resolve too.
@@ -275,6 +276,12 @@ mod tests {
         .is_none());
         assert!(parse_connection_link(&format!(
             "plain://search.plain?connect=127.0.0.1:8080/{}",
+            hex64
+        ))
+        .is_none());
+        // Unparsable address → None (the addr parse failure path).
+        assert!(parse_connection_link(&format!(
+            "plain://nodes.plain?connect=not-an-addr/{}",
             hex64
         ))
         .is_none());

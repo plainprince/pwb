@@ -8,16 +8,23 @@
 //! routing logic, framing serialization, and socket event loops. Both pwb-node
 //! and pwb-browser instantiate this engine to ensure they run on the exact same
 //! network stack.
+//!
+//! [`CellChannel`] carries onion cells hop-by-hop over UDP with source-IP
+//! masking (TODO §2.3): each relay re-originates the datagram from its own
+//! socket, so a receiving hop only ever observes the previous relay's
+//! address.
 
 use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 use thiserror::Error;
+use tokio::net::UdpSocket;
 use tokio::sync::mpsc;
 use tokio::time::interval;
 
-use crate::crypto::{ContentId, Keypair, PublicKey, Signature};
+use crate::crypto::{ContentId, DhPublicKey, Keypair, PublicKey, Signature};
+use crate::onion::{OnionCell, OnionError, CELL_SIZE};
 
 /// Wire format representation of a search result.
 #[derive(Debug, Clone, PartialEq)]
@@ -116,6 +123,99 @@ pub enum NetworkError {
 
     #[error("Timeout")]
     Timeout,
+
+    #[error(transparent)]
+    Onion(#[from] OnionError),
+}
+
+/// A bound UDP socket that carries onion cells hop-by-hop (TODO §2.3).
+///
+/// **Source-IP masking by construction.** Every hop re-originates the
+/// datagram from its *own* bound socket toward the next relay's registered
+/// address, and the payload is exactly the [`OnionCell`] bytes — there is no
+/// source-address field in the envelope to carry, spoof, or strip. A
+/// receiving hop therefore observes only the previous relay's IP; the
+/// originator's address stops at the entry hop. IP addresses are
+/// unencryptable socket metadata, so the masking has to happen by
+/// re-originating datagrams, never by trying to encrypt the address.
+///
+/// The remaining observable metadata is deliberately unactionable for
+/// tracking: every datagram is exactly [`CELL_SIZE`] bytes (constant size),
+/// and decoy cells scheduled by [`crate::onion::CoverDispatch`] arrive at
+/// randomized intervals (no fixed period).
+pub struct CellChannel {
+    socket: UdpSocket,
+    relays: HashMap<DhPublicKey, SocketAddr>,
+}
+
+impl CellChannel {
+    /// Bind a channel on `local` (use port `0` for an ephemeral port).
+    pub async fn bind(local: SocketAddr) -> std::io::Result<Self> {
+        Ok(Self {
+            socket: UdpSocket::bind(local).await?,
+            relays: HashMap::new(),
+        })
+    }
+
+    /// This channel's local socket address — what remote hops observe as the
+    /// source address of everything this node sends.
+    pub fn local_addr(&self) -> std::io::Result<SocketAddr> {
+        self.socket.local_addr()
+    }
+
+    /// Register (or re-register) the address of a relay that onion cells may
+    /// be forwarded to next.
+    pub fn register_relay(&mut self, relay: DhPublicKey, addr: SocketAddr) {
+        self.relays.insert(relay, addr);
+    }
+
+    /// Look up a registered relay's address.
+    pub fn relay_address(&self, relay: &DhPublicKey) -> Option<SocketAddr> {
+        self.relays.get(relay).copied()
+    }
+
+    /// Forward `cell` to `relay`'s registered address from this node's own
+    /// socket (source-IP masking: the previous hop's address is not part of
+    /// the envelope in any form).
+    pub async fn send_cell(
+        &self,
+        relay: &DhPublicKey,
+        cell: &OnionCell,
+    ) -> Result<(), NetworkError> {
+        let addr = self
+            .relays
+            .get(relay)
+            .copied()
+            .ok_or_else(|| NetworkError::PeerNotFound(relay.to_hex()))?;
+        self.send_cell_to(addr, cell).await
+    }
+
+    /// Forward `cell` to an explicit address from this node's own socket,
+    /// for callers that resolve hop addresses out of band (e.g. the entry
+    /// hop's first peer).
+    pub async fn send_cell_to(
+        &self,
+        addr: SocketAddr,
+        cell: &OnionCell,
+    ) -> Result<(), NetworkError> {
+        let sent = self.socket.send_to(&cell.to_bytes(), addr).await?;
+        debug_assert_eq!(sent, CELL_SIZE, "UDP send must emit one full cell");
+        Ok(())
+    }
+
+    /// Receive one onion-cell datagram, returning it with the source address
+    /// the OS observed — i.e. the *previous relay's* socket, never the
+    /// originator's. Datagrams that are not exactly [`CELL_SIZE`] bytes of
+    /// valid onion cell are rejected.
+    pub async fn recv_cell(&self) -> Result<(OnionCell, SocketAddr), NetworkError> {
+        let mut buf = [0u8; CELL_SIZE + 1];
+        let (len, from) = self.socket.recv_from(&mut buf).await?;
+        if len != CELL_SIZE {
+            return Err(NetworkError::InvalidMessage);
+        }
+        let cell = OnionCell::from_bytes(&buf[..len])?;
+        Ok((cell, from))
+    }
 }
 
 /// Peer information for the peer table.
@@ -708,5 +808,250 @@ mod tests {
 
         assert_eq!(link1, link1_back);
         assert_eq!(link2, link2_back);
+    }
+
+    /// TODO §2.3 source-IP masking: three relays on loopback UDP. Each hop
+    /// re-originates the datagram from its own socket, so every receiver
+    /// observes only the previous relay's address — the originator's IP
+    /// stops at the entry hop and the envelope (exactly the cell bytes)
+    /// carries no source field that could resurrect it.
+    #[tokio::test]
+    async fn test_cell_channel_masks_source_ip_across_hops() {
+        use crate::crypto::DhKeypair;
+        use crate::onion::OnionAction;
+
+        let relays: Vec<DhKeypair> = (0..3).map(|_| DhKeypair::generate()).collect();
+
+        let originator = CellChannel::bind("127.0.0.1:0".parse().unwrap())
+            .await
+            .unwrap();
+        let mut entry = CellChannel::bind("127.0.0.1:0".parse().unwrap())
+            .await
+            .unwrap();
+        let mut middle = CellChannel::bind("127.0.0.1:0".parse().unwrap())
+            .await
+            .unwrap();
+        let exit = CellChannel::bind("127.0.0.1:0".parse().unwrap())
+            .await
+            .unwrap();
+
+        let originator_addr = originator.local_addr().unwrap();
+        let entry_addr = entry.local_addr().unwrap();
+        let middle_addr = middle.local_addr().unwrap();
+        let exit_addr = exit.local_addr().unwrap();
+
+        entry.register_relay(relays[1].public, middle_addr);
+        middle.register_relay(relays[2].public, exit_addr);
+
+        let path = [relays[0].public, relays[1].public, relays[2].public];
+        let cell = OnionCell::encapsulate(b"hidden query", &path).unwrap();
+
+        // Hop 1: only the entry ever sees the originator's address.
+        originator.send_cell_to(entry_addr, &cell).await.unwrap();
+        let (cell, from) = entry.recv_cell().await.unwrap();
+        assert_eq!(from, originator_addr);
+
+        // The entry peels and re-originates toward the middle from *its own*
+        // socket.
+        let peeled = cell.peel(&relays[0]).unwrap().unwrap();
+        let OnionAction::Forward(next) = peeled.action else {
+            panic!("entry must forward, got {:?}", peeled.action);
+        };
+        assert_eq!(next, relays[1].public);
+        entry
+            .send_cell(&next, &peeled.forward.unwrap())
+            .await
+            .unwrap();
+
+        // Hop 2: only the entry's IP is observable — the originator's
+        // address does not survive the entry hop.
+        let (cell, from) = middle.recv_cell().await.unwrap();
+        assert_eq!(from, entry_addr, "hop 2 sees only the previous relay");
+        assert_ne!(from, originator_addr, "originator IP must not reach hop 2");
+
+        let peeled = cell.peel(&relays[1]).unwrap().unwrap();
+        let OnionAction::Forward(next) = peeled.action else {
+            panic!("middle must forward, got {:?}", peeled.action);
+        };
+        middle
+            .send_cell(&next, &peeled.forward.unwrap())
+            .await
+            .unwrap();
+
+        // Hop 3: the exit sees only the middle's IP and recovers the payload.
+        let (cell, from) = exit.recv_cell().await.unwrap();
+        assert_eq!(from, middle_addr);
+        let peeled = cell.peel(&relays[2]).unwrap().unwrap();
+        assert_eq!(peeled.action, OnionAction::Deliver);
+        assert_eq!(peeled.payload.as_deref(), Some(b"hidden query".as_slice()));
+    }
+
+    /// TODO §2.3: unknown next hops are refused before anything is sent, and
+    /// malformed / wrong-version datagrams are rejected on receive.
+    #[tokio::test]
+    async fn test_cell_channel_rejects_unknown_relay_and_bad_datagrams() {
+        use crate::crypto::DhKeypair;
+        use crate::onion::ONION_VERSION;
+
+        let mut channel = CellChannel::bind("127.0.0.1:0".parse().unwrap())
+            .await
+            .unwrap();
+        let keys: Vec<DhKeypair> = (0..3).map(|_| DhKeypair::generate()).collect();
+        let path = [keys[0].public, keys[1].public, keys[2].public];
+        let cell = OnionCell::encapsulate(b"x", &path).unwrap();
+
+        let raw = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let raw_addr = raw.local_addr().unwrap();
+        let addr = channel.local_addr().unwrap();
+
+        // Unregistered relay → PeerNotFound, nothing leaves the socket.
+        let unknown = DhKeypair::generate().public;
+        let err = channel.send_cell(&unknown, &cell).await.unwrap_err();
+        assert!(matches!(err, NetworkError::PeerNotFound(_)));
+
+        // Registered relay → address lookup round-trips and send succeeds.
+        channel.register_relay(unknown, raw_addr);
+        assert_eq!(channel.relay_address(&unknown), Some(raw_addr));
+        assert_eq!(channel.relay_address(&DhKeypair::generate().public), None);
+        channel.send_cell(&unknown, &cell).await.unwrap();
+
+        // Undersized datagram → InvalidMessage.
+        raw.send_to(b"not a cell", addr).await.unwrap();
+        assert!(matches!(
+            channel.recv_cell().await,
+            Err(NetworkError::InvalidMessage)
+        ));
+
+        // Correct size but wrong onion version → typed onion error.
+        let mut bytes = cell.to_bytes();
+        bytes[0] = ONION_VERSION + 1;
+        raw.send_to(&bytes, addr).await.unwrap();
+        let err = channel.recv_cell().await.unwrap_err();
+        assert!(matches!(
+            err,
+            NetworkError::Onion(OnionError::UnsupportedVersion(_))
+        ));
+    }
+
+    /// TODO §2.3 cover traffic: a scheduled decoy rides the same masked hop
+    /// channel as real cells — constant-size datagram, peelable by the
+    /// first relay, dispatched exactly on the scheduler's due time.
+    #[tokio::test]
+    async fn test_cover_decoy_dispatched_over_cell_channel() {
+        use crate::crypto::DhKeypair;
+        use crate::onion::{CoverConfig, CoverDispatch, OnionAction};
+        use rand::{rngs::StdRng, SeedableRng};
+
+        let keys: Vec<DhKeypair> = (0..3).map(|_| DhKeypair::generate()).collect();
+        let candidates: Vec<DhPublicKey> = keys.iter().map(|k| k.public).collect();
+
+        let mut rng = StdRng::seed_from_u64(21);
+        let mut dispatch = CoverDispatch::new(CoverConfig {
+            mean_interval: Duration::from_secs(60),
+            min_interval: Duration::from_secs(1),
+            max_interval: Duration::from_secs(120),
+        });
+
+        // Arm, then collect the decoy exactly when due.
+        let t0 = Instant::now();
+        assert!(dispatch.poll(t0, &candidates, &mut rng).is_none());
+        let due = dispatch.next_due().expect("armed");
+        let (decoy, path) = dispatch
+            .poll(due, &candidates, &mut rng)
+            .expect("due poll dispatches a decoy");
+
+        // Send it like a real request: sender socket → first relay's socket.
+        let mut sender = CellChannel::bind("127.0.0.1:0".parse().unwrap())
+            .await
+            .unwrap();
+        let hop = CellChannel::bind("127.0.0.1:0".parse().unwrap())
+            .await
+            .unwrap();
+        let hop_addr = hop.local_addr().unwrap();
+        sender.register_relay(path.relays[0], hop_addr);
+        sender.send_cell(&path.relays[0], &decoy).await.unwrap();
+
+        let (cell, from) = hop.recv_cell().await.unwrap();
+        assert_eq!(from, sender.local_addr().unwrap());
+        assert_eq!(
+            cell.to_bytes().len(),
+            CELL_SIZE,
+            "cover datagrams are indistinguishable in size"
+        );
+
+        // The receiving relay peels the decoy exactly like a real request.
+        let key_for = |pk: &DhPublicKey| {
+            keys.iter()
+                .find(|k| k.public == *pk)
+                .expect("path relay comes from candidates")
+        };
+        let peeled = cell.peel(key_for(&path.relays[0])).unwrap().unwrap();
+        let OnionAction::Forward(next) = peeled.action else {
+            panic!("first hop of a decoy path must forward");
+        };
+        assert_eq!(next, path.relays[1]);
+    }
+
+    /// Engine error paths: double-start is a no-op, `peer_table()` exposes
+    /// the shared table, unknown-peer sends fail before touching the
+    /// channel, and gossip announcements register/refresh the publisher.
+    #[tokio::test]
+    async fn test_node_engine_error_paths_and_gossip_registration() {
+        let config = NodeConfig {
+            listen_addr: SocketAddr::from_str("127.0.0.1:0").unwrap(),
+            keypair: Keypair::generate(),
+            bootstrap_peers: Vec::new(),
+            max_peers: 100,
+            heartbeat_interval: Duration::from_secs(30),
+        };
+        let engine = NodeEngine::new(config);
+
+        engine.start().await.expect("first start");
+        engine.start().await.expect("second start is a no-op");
+        assert!(
+            engine.peer_table().lock().unwrap().is_empty(),
+            "no peers registered before any traffic"
+        );
+
+        // Unknown peer → PeerNotFound before anything is queued.
+        let stranger = Keypair::generate().public;
+        let err = engine
+            .send_to(
+                &stranger,
+                NetworkMessage::SearchQuery {
+                    query: "x".to_string(),
+                    sender: Keypair::generate().public,
+                },
+            )
+            .unwrap_err();
+        assert!(matches!(err, NetworkError::PeerNotFound(_)));
+
+        // A gossip announcement registers the publisher and refreshes it.
+        let publisher = Keypair::generate().public;
+        engine
+            .broadcast(NetworkMessage::GossipAnnounce {
+                content_id: ContentId([1u8; 32]),
+                title: "artifact".to_string(),
+                publisher,
+                signature: Signature([2u8; 64]),
+            })
+            .expect("broadcast enqueues");
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        let seen = engine.get_peer(&publisher).expect("publisher registered");
+        assert_eq!(seen.public_key, publisher);
+
+        // Second announcement refreshes last_seen on the existing entry.
+        engine
+            .broadcast(NetworkMessage::GossipAnnounce {
+                content_id: ContentId([3u8; 32]),
+                title: "artifact 2".to_string(),
+                publisher,
+                signature: Signature([4u8; 64]),
+            })
+            .expect("broadcast enqueues");
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        assert!(engine.get_peer(&publisher).is_some());
+
+        engine.stop().await;
     }
 }

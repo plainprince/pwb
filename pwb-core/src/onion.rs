@@ -59,14 +59,17 @@
 //!   [`OnionAction::Forward`] names another relay or the final destination
 //!   (locked in by
 //!   `test_intermediate_cannot_tell_if_next_hop_is_destination`).
-//! - **Cover traffic** (TODO §2.3): [`CoverTraffic`] builds decoy cells over
-//!   randomized paths and samples exponentially distributed dispatch
-//!   delays. Decoys are ordinary cells (`cell_kind` 0), so wire observers
-//!   cannot separate them from real requests. The header reserves
-//!   `cell_kind` plus 6 bytes for transport integration; cells contain no
-//!   source-address field at all, so once relays re-send forwarded cells
-//!   from their own sockets the next hop only ever observes the previous
-//!   relay's IP (the actual masking happens at the transport layer).
+//! - **Cover traffic & metadata protection** (TODO §2.3): [`CoverTraffic`]
+//!   builds decoy cells over randomized paths (ordinary `cell_kind` 0 cells,
+//!   indistinguishable from real requests), [`CoverDispatch`] schedules them
+//!   at exponentially distributed, clamped intervals — one per due poll, no
+//!   fixed period — and [`crate::net::CellChannel`] carries every cell
+//!   hop-by-hop over UDP re-originated from the forwarding relay's own
+//!   socket. The datagram envelope is exactly the cell bytes: no
+//!   source-address field exists to carry or forge, constant [`CELL_SIZE`]
+//!   datagrams hide sizes, and the remaining unencryptable socket metadata
+//!   (prev-relay IP → next-relay IP, randomized timing) carries no
+//!   actionable signal about the originator.
 //! - **Bulk payloads**: [`PAYLOAD_MAX`] is the per-cell capacity; larger
 //!   transfers will fragment into multi-cell streams above this layer.
 
@@ -76,7 +79,7 @@ use chacha20poly1305::{ChaCha20Poly1305, Key, Nonce};
 use rand::rngs::OsRng;
 use rand::{Rng, RngCore};
 use std::fmt;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use zeroize::{Zeroize, Zeroizing};
 
 /// Cell format version written into every cell's first byte.
@@ -532,14 +535,40 @@ impl Default for CoverConfig {
     }
 }
 
+impl CoverConfig {
+    /// Sample the delay until the next decoy should be dispatched: an
+    /// exponential (memoryless) distribution with the configured mean —
+    /// sampled via inverse CDF, `-ln(U) / rate` for `U ~ (0, 1]` — clamped
+    /// into `[min_interval, max_interval]` so dispatch never bursts or
+    /// stalls. Callers in tests inject a seeded RNG; production callers
+    /// pass `OsRng`.
+    pub fn sample_delay(&self, rng: &mut impl RngCore) -> Duration {
+        let mean = self.mean_interval.as_secs_f64();
+        let mut secs: f64 = 0.0;
+        if mean > 0.0 {
+            let rate = 1.0 / mean;
+            if rate.is_finite() && rate > 0.0 {
+                let u: f64 = 1.0 - rng.gen::<f64>();
+                secs = -u.ln() / rate;
+            }
+        }
+        if !secs.is_finite() {
+            secs = 0.0;
+        }
+        let lo = self.min_interval.as_secs_f64();
+        let hi = self.max_interval.as_secs_f64();
+        Duration::from_secs_f64(secs.clamp(lo.min(hi), lo.max(hi)))
+    }
+}
+
 /// Decoy-cell generator with randomized dispatch timing (TODO §2.3).
 ///
 /// Produces cover traffic that is byte-for-byte shaped like a real request:
 /// an ordinary [`OnionCell`] (`cell_kind` 0, [`CELL_SIZE`] bytes) over a
-/// [`randomize_path`]-randomized path with a uniformly random payload. The
-/// transport layer owns the dispatch loop — sample
-/// [`Self::sample_next_delay`], wait that long, then send the cell from
-/// [`Self::decoy_cell`] to `path[0]`.
+/// [`randomize_path`]-randomized path with a uniformly random payload.
+/// [`CoverDispatch`] wraps this generator with the due-time scheduling;
+/// advanced callers that drive their own loop can use
+/// [`Self::sample_next_delay`] + [`Self::decoy_cell`] directly.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CoverTraffic {
     /// The timing configuration in effect.
@@ -552,28 +581,10 @@ impl CoverTraffic {
         Self { config }
     }
 
-    /// Sample the delay until the next decoy should be dispatched: an
-    /// exponential (memoryless) distribution with the configured mean —
-    /// sampled via inverse CDF, `-ln(U) / rate` for `U ~ (0, 1]` — clamped
-    /// into `[min_interval, max_interval]` so dispatch never bursts or
-    /// stalls. Callers in tests inject a seeded RNG; production callers
-    /// pass `OsRng`.
+    /// Sample the delay until the next decoy should be dispatched (see
+    /// [`CoverConfig::sample_delay`]).
     pub fn sample_next_delay(&self, rng: &mut impl RngCore) -> Duration {
-        let mean = self.config.mean_interval.as_secs_f64();
-        let mut secs: f64 = 0.0;
-        if mean > 0.0 {
-            let rate = 1.0 / mean;
-            if rate.is_finite() && rate > 0.0 {
-                let u: f64 = 1.0 - rng.gen::<f64>();
-                secs = -u.ln() / rate;
-            }
-        }
-        if !secs.is_finite() {
-            secs = 0.0;
-        }
-        let lo = self.config.min_interval.as_secs_f64();
-        let hi = self.config.max_interval.as_secs_f64();
-        Duration::from_secs_f64(secs.clamp(lo.min(hi), lo.max(hi)))
+        self.config.sample_delay(rng)
     }
 
     /// Build one decoy (cover) cell: a uniformly random payload routed over
@@ -615,6 +626,73 @@ impl CoverTraffic {
         let path = randomize_path_with(&route, &pool, &mut *rng)?;
         let cell = OnionCell::encapsulate(&payload, &path.relays)?;
         Ok((cell, path))
+    }
+}
+
+/// Cover-traffic dispatch scheduler (TODO §2.3): arms itself with a freshly
+/// sampled randomized delay and hands out decoy cells when they come due.
+///
+/// The transport loop owns the tick — call [`Self::poll`] with the current
+/// time on every iteration. Each time the scheduler comes due it re-arms
+/// with a **fresh** delay (intervals stay exponential and memoryless, so
+/// there is no fixed period for a traffic analyst to lock onto) and returns
+/// the next decoy to send. Lateness never accumulates into a burst: one
+/// decoy per due poll.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CoverDispatch {
+    traffic: CoverTraffic,
+    next_due: Option<Instant>,
+}
+
+impl CoverDispatch {
+    /// Create a scheduler with the given timing configuration. Nothing is
+    /// due until the first [`Self::poll`] or [`Self::arm`] arms it.
+    pub fn new(config: CoverConfig) -> Self {
+        Self {
+            traffic: CoverTraffic::new(config),
+            next_due: None,
+        }
+    }
+
+    /// The timing configuration in effect.
+    pub fn config(&self) -> &CoverConfig {
+        &self.traffic.config
+    }
+
+    /// When the next decoy is due; `None` until first armed.
+    pub fn next_due(&self) -> Option<Instant> {
+        self.next_due
+    }
+
+    /// (Re)schedule the next decoy for `now + sampled delay`.
+    pub fn arm(&mut self, now: Instant, rng: &mut impl RngCore) {
+        self.next_due = Some(now + self.traffic.config.sample_delay(rng));
+    }
+
+    /// Poll at `now` for a due decoy.
+    ///
+    /// - First call arms the scheduler and returns `None` — the first decoy
+    ///   comes due after the initial sampled delay.
+    /// - Before the due time: `None`.
+    /// - At/after the due time: re-arms with a fresh delay and returns the
+    ///   next decoy cell over `candidates`. If the pool cannot form a path
+    ///   (fewer than [`MIN_HOPS`] distinct relays), the attempt is dropped
+    ///   and the next one runs at the new due time.
+    pub fn poll(
+        &mut self,
+        now: Instant,
+        candidates: &[DhPublicKey],
+        rng: &mut impl RngCore,
+    ) -> Option<(OnionCell, RandomizedPath)> {
+        let Some(due) = self.next_due else {
+            self.arm(now, rng);
+            return None;
+        };
+        if now < due {
+            return None;
+        }
+        self.arm(now, rng);
+        self.traffic.decoy_cell(candidates, rng).ok()
     }
 }
 
@@ -1227,5 +1305,136 @@ mod tests {
         let mut dups = candidates.clone();
         dups.extend_from_slice(&candidates[..2]);
         assert!(traffic.decoy_cell(&dups, &mut rng).is_ok());
+    }
+
+    #[test]
+    fn test_cover_dispatch_schedules_decoys_at_random_intervals() {
+        use rand::{rngs::StdRng, SeedableRng};
+        use std::collections::BTreeSet;
+
+        let candidates = pubkeys(&path_of(6));
+        let mut rng = StdRng::seed_from_u64(11);
+        let mut dispatch = CoverDispatch::new(CoverConfig::default());
+
+        let t0 = Instant::now();
+
+        // First poll arms the scheduler; nothing is due yet.
+        assert!(dispatch.poll(t0, &candidates, &mut rng).is_none());
+        let due = dispatch.next_due().expect("armed by first poll");
+        assert!(due > t0);
+
+        // Before the due time → nothing.
+        assert!(dispatch
+            .poll(due - Duration::from_millis(1), &candidates, &mut rng)
+            .is_none());
+
+        // At the due time → a decoy, and the scheduler re-arms with a fresh
+        // delay strictly after the one that just fired.
+        let (cell, path) = dispatch
+            .poll(due, &candidates, &mut rng)
+            .expect("due poll emits a decoy");
+        assert_eq!(cell.to_bytes().len(), CELL_SIZE);
+        validate_path(path.as_slice()).expect("decoy path validates");
+        let due2 = dispatch.next_due().expect("re-armed after firing");
+        assert!(due2 > due);
+
+        // Intervals stay randomized across re-arms: step time to each due in
+        // turn and collect the sampled spacings.
+        let mut spacings = BTreeSet::new();
+        for _ in 0..16 {
+            let now = dispatch.next_due().expect("armed");
+            assert!(dispatch.poll(now, &candidates, &mut rng).is_some());
+            let next = dispatch.next_due().expect("re-armed");
+            spacings.insert(next - now);
+        }
+        assert!(
+            spacings.len() > 1,
+            "dispatch intervals must vary, saw only {spacings:?}"
+        );
+    }
+
+    #[test]
+    fn test_cover_dispatch_drops_bad_pools_and_accepts_manual_arm() {
+        use rand::{rngs::StdRng, SeedableRng};
+
+        let mut rng = StdRng::seed_from_u64(5);
+        let mut dispatch = CoverDispatch::new(CoverConfig::default());
+        let t0 = Instant::now();
+
+        // Pool too small for a path: the attempt is dropped, but the
+        // scheduler still re-arms so it retries at the next due time.
+        assert!(dispatch.poll(t0, &[], &mut rng).is_none());
+        let due = dispatch.next_due().expect("armed");
+        let too_small = [DhKeypair::generate().public];
+        assert!(
+            dispatch.poll(due, &too_small, &mut rng).is_none(),
+            "cannot build a decoy from fewer than MIN_HOPS relays"
+        );
+        let rearmed = dispatch.next_due().expect("failed attempt re-arms");
+        assert!(rearmed > due);
+
+        // arm() reschedules explicitly (e.g., after a config change).
+        let base = t0 + Duration::from_secs(3600);
+        dispatch.arm(base, &mut rng);
+        let manual = dispatch.next_due().expect("manually armed");
+        assert!(
+            manual >= base + CoverConfig::default().min_interval,
+            "manual arm still respects the sampled delay bounds"
+        );
+    }
+
+    #[test]
+    fn test_display_impls_and_accessors() {
+        use rand::{rngs::StdRng, SeedableRng};
+
+        // OnionError Display covers every variant with the real limits.
+        assert_eq!(
+            OnionError::PayloadTooLarge { got: 119 }.to_string(),
+            format!(
+                "payload of 119 bytes exceeds the per-cell onion capacity of {PAYLOAD_MAX} bytes"
+            )
+        );
+        assert_eq!(
+            OnionError::PathTooShort { got: 2 }.to_string(),
+            format!("onion path must include at least {MIN_HOPS} relays, got 2")
+        );
+        assert_eq!(
+            OnionError::PathTooLong { got: 7 }.to_string(),
+            format!("onion path exceeds the {MAX_LAYER_SLOTS}-slot cell capacity, got 7")
+        );
+        assert_eq!(
+            OnionError::DuplicateRelay.to_string(),
+            "onion path contains a duplicated relay"
+        );
+        assert_eq!(
+            OnionError::MalformedCell.to_string(),
+            "malformed onion cell"
+        );
+        assert_eq!(
+            OnionError::UnsupportedVersion(9).to_string(),
+            "unsupported onion version 9"
+        );
+
+        // Cell Display reports the wire geometry; slots() exposes it too.
+        let cell = OnionCell::encapsulate(b"x", &pubkeys(&path_of(MIN_HOPS))).unwrap();
+        let shown = cell.to_string();
+        assert!(shown.contains(&format!("version: {}", ONION_VERSION)));
+        assert!(shown.contains("kind: 0"));
+        assert!(shown.contains(&format!("slots: {SLOTS_SIZE}B")));
+        assert!(shown.contains(&format!("payload: {PAYLOAD_REGION_SIZE}B")));
+        assert_eq!(cell.slots().len(), SLOTS_SIZE);
+
+        // RandomizedPath::AsRef agrees with as_slice (both feed encapsulate).
+        let mut rng = StdRng::seed_from_u64(77);
+        let route = pubkeys(&path_of(MIN_HOPS));
+        let pool = pubkeys(&path_of(4));
+        let path = randomize_path_with(&route, &pool, &mut rng).unwrap();
+        assert_eq!(path.as_ref(), path.as_slice());
+        assert!(OnionCell::encapsulate(b"x", path.as_ref()).is_ok());
+
+        // CoverDispatch::config exposes the timing configuration in effect.
+        let dispatch = CoverDispatch::new(CoverConfig::default());
+        assert_eq!(*dispatch.config(), CoverConfig::default());
+        assert!(dispatch.next_due().is_none());
     }
 }
