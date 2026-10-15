@@ -56,8 +56,13 @@ This document outlines the architectural refactoring and implementation roadmap 
 
 ## 3. Decentralized Node Discovery (`pwb-core::discovery`)
 
-- [ ] **Local UDP Broadcast & IP Multicast**
+- [x] **Local UDP Broadcast & IP Multicast**
   - Auto-discover local peers on LAN via UDP broadcast beacons and IP multicast groups (`239.255.0.1:7922`).
+    - Implemented in `pwb-core::discovery`: signed 112-byte beacons (`"PWBD"` magic + version + kind + listen port + unix timestamp + Ed25519 public key + signature over the header) exchanged over a single bound UDP socket at `DISCOVERY_PORT=7922`.
+    - `DiscoveryService::announce` fans out each beacon to both `255.255.255.255:7922` (UDP broadcast) and `239.255.0.1:7922` (IP multicast, `join_multicast_v4` best-effort with loopback enabled), plus optional direct unicast to known peers; success is "≥1 datagram sent" so a host without multicast routing still works via broadcast.
+    - Trust model: `Beacon::verify` checks framing/size, freshness (`BEACON_MAX_AGE=120s` clock-skew window, checked *before* the signature to reject unauthenticated old data cheaply), then the Ed25519 signature — garbage, tampered, forged, stale, and future-dated beacons are all rejected with typed `BeaconError`/`DiscoveryError` reasons.
+    - `merge` is address-sticky within `ADDR_REBIND_GRACE=300s`: a replayed old beacon cannot redirect an existing peer's advertised port until the grace window expires (anti-replay redirect).
+    - `spawn()` runs a tokio loop: periodic announce every `BEACON_INTERVAL=30s` + continuous recv, both merging into a shared `Arc<Mutex<HashMap<DhPublicKey, PeerInfo>>>`; all sockets bind port 0 in tests (no SO_REUSEPORT/new deps).
 - [ ] **Connection Links & URI Handlers**
   - Support parsing and launching node connections via `plain://nodes.plain?connect=<ip:port>/<pubkey>` URIs.
 - [ ] **QR Code Encoding & Scanning Support**

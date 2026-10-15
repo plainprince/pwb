@@ -16,11 +16,14 @@
 //!   system      — the unified system protocol resolver: reserved `.plain`
 //!                 domain list, `plain://` URL parsing, and the `nodes.plain`
 //!                 connection-link codec.
+//!   discovery   — local peer discovery: signed LAN beacons over UDP
+//!                 broadcast + IP multicast (§3.1).
 //!   components  — reusable UI component primitives (sidebars, navbars, tabs)
 //!                 shared by both `pwb-web` and `pwb-browser`.
 
 pub mod components;
 pub mod crypto;
+pub mod discovery;
 pub mod net;
 pub mod onion;
 pub mod spec;
