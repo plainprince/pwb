@@ -63,8 +63,15 @@ This document outlines the architectural refactoring and implementation roadmap 
     - Trust model: `Beacon::verify` checks framing/size, freshness (`BEACON_MAX_AGE=120s` clock-skew window, checked *before* the signature to reject unauthenticated old data cheaply), then the Ed25519 signature — garbage, tampered, forged, stale, and future-dated beacons are all rejected with typed `BeaconError`/`DiscoveryError` reasons.
     - `merge` is address-sticky within `ADDR_REBIND_GRACE=300s`: a replayed old beacon cannot redirect an existing peer's advertised port until the grace window expires (anti-replay redirect).
     - `spawn()` runs a tokio loop: periodic announce every `BEACON_INTERVAL=30s` + continuous recv, both merging into a shared `Arc<Mutex<HashMap<DhPublicKey, PeerInfo>>>`; all sockets bind port 0 in tests (no SO_REUSEPORT/new deps).
-- [ ] **Connection Links & URI Handlers**
+- [x] **Connection Links & URI Handlers**
   - Support parsing and launching node connections via `plain://nodes.plain?connect=<ip:port>/<pubkey>` URIs.
+    - Parsing pre-existing in `pwb-core::system` (`build_connection_link` / `parse_connection_link`, §1) and `NodeEngine::parse_connection_link`.
+    - Added in `pwb-core::net::NodeEngine`: `connect_to(addr, pubkey)` — validates address (non-zero port, not unspecified, not self-key), registers/refreshes `PeerInfo` in the engine's peer table (preserving reputation on refresh), returns the stored `PeerInfo`. `launch_connection(link)` — parses a `plain://nodes.plain?connect=...` URI via `system::parse_connection_link`, delegates to `connect_to`, returns `PeerInfo` or `NetworkError::InvalidConnectionLink`.
+    - `NetworkError::InvalidConnectionLink(String)` variant added for malformed links / invalid addresses / self-connection attempts.
+    - Tests: 10 new `test_launch_connection_*` / `test_connect_to_*` covering valid links, garbage, self-link, port-zero, unspecified address, reputation preservation on refresh.
+    - CLI URI handler in `pwb-browser/src/main.rs`: when the positional argument parses as a connection link, the binary launches a `NodeEngine`, calls `launch_connection`, and reports the registered peer.
+    - CLI `--connect <link>` flag in `pwb-node/src/main.rs`: accepts a connection link after `--connect` / `-c`, launches the same flow, prints the connected peer.
+    - Help text in both binaries updated with `plain://nodes.plain?connect=...` example.
 - [ ] **QR Code Encoding & Scanning Support**
   - Add QR code binary generator and string payload parser for out-of-band node pairing (mobile/desktop peer exchange).
 - [ ] **Distributed Kademlia / DHT Peer Table**
