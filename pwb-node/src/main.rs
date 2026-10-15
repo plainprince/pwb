@@ -12,6 +12,27 @@ fn main() {
     println!("PlainWeb Layer 3 Serverless Node (pwb-node)");
     println!("Starting node process...");
 
+    // Parse CLI arguments (TODO §3.2 Connection Links & URI Handlers)
+    let args: Vec<String> = std::env::args().collect();
+    let mut arg_index = 1;
+    let mut connect_target: Option<String> = None;
+    while arg_index < args.len() {
+        match args[arg_index].as_str() {
+            "-c" | "--connect" => {
+                if arg_index + 1 < args.len() {
+                    connect_target = Some(args[arg_index + 1].clone());
+                    arg_index += 2;
+                } else {
+                    eprintln!("Error: --connect requires a link argument");
+                    std::process::exit(1);
+                }
+            }
+            _ => {
+                arg_index += 1;
+            }
+        }
+    }
+
     let mut identity = IdentityManager::new();
     println!("  Node Identity Public Key : {}", identity.public_key());
     println!("  Starting Credit Balance  : {} credits", identity.credits);
@@ -96,6 +117,29 @@ fn main() {
             identity.public_key(),
         )
     );
+
+    // Launch a connection to a peer described by a `nodes.plain` link (TODO §3.2).
+    if let Some(link) = connect_target {
+        println!(
+            "\n[Network] Launching connection to peer via link: {}",
+            link
+        );
+        let config = pwb_core::net::NodeConfig {
+            listen_addr: std::net::SocketAddr::new("127.0.0.1".parse().unwrap(), 0),
+            keypair: identity.keypair.clone(),
+            bootstrap_peers: Vec::new(),
+            max_peers: 100,
+            heartbeat_interval: std::time::Duration::from_secs(30),
+        };
+        let engine = pwb_core::net::NodeEngine::new(config);
+        match engine.launch_connection(&link) {
+            Ok(peer) => println!(
+                "[Network] Connected to peer {} at {} (reputation 0)",
+                peer.public_key, peer.address
+            ),
+            Err(e) => eprintln!("[Network] Could not launch connection: {:?}", e),
+        }
+    }
 
     println!("\nNode remaining balance: {} credits.", identity.credits);
     println!("Node daemon active.");

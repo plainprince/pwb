@@ -118,6 +118,9 @@ pub enum NetworkError {
     #[error("Peer not found: {0}")]
     PeerNotFound(String),
 
+    #[error("Invalid connection link: {0}")]
+    InvalidConnectionLink(String),
+
     #[error("Invalid message")]
     InvalidMessage,
 
@@ -382,6 +385,62 @@ impl NodeEngine {
     /// Format: `plain://nodes.plain?connect=<ip:port>/<pubkey_hex>`
     pub fn generate_connection_link_from_parsed(parsed: (SocketAddr, PublicKey)) -> String {
         Self::build_connection_link(parsed.0, parsed.1)
+    }
+
+    /// Register a peer described by a `nodes.plain` connection link.
+    ///
+    /// The link format is `plain://nodes.plain?connect=<ip:port>/<pubkey_hex>`.
+    /// Returns the [`PeerInfo`] on success, or [`NetworkError::InvalidConnectionLink`]
+    /// if the link is malformed, the address is invalid, or the peer is oneself.
+    pub fn connect_to(
+        &self,
+        addr: SocketAddr,
+        pubkey: PublicKey,
+    ) -> Result<PeerInfo, NetworkError> {
+        if addr.port() == 0 {
+            return Err(NetworkError::InvalidConnectionLink(
+                "port 0 is not a valid connection address".to_string(),
+            ));
+        }
+        if addr.ip().is_unspecified() {
+            return Err(NetworkError::InvalidConnectionLink(
+                "unspecified address is not a valid connection address".to_string(),
+            ));
+        }
+        if pubkey == self.config.keypair.public {
+            return Err(NetworkError::InvalidConnectionLink(
+                "cannot connect to oneself".to_string(),
+            ));
+        }
+        let peer_info = PeerInfo {
+            public_key: pubkey,
+            last_seen: Instant::now(),
+            address: addr,
+            reputation: 0,
+        };
+        let mut peer_table = self.peer_table.lock().unwrap();
+        if let Some(_old) = peer_table.get(&pubkey) {
+            peer_table.entry(pubkey).and_modify(|e| {
+                e.address = addr;
+                e.last_seen = Instant::now();
+            });
+        } else {
+            peer_table.insert(pubkey, peer_info.clone());
+        }
+        let final_peer = peer_table
+            .get(&pubkey)
+            .cloned()
+            .ok_or(NetworkError::PeerNotFound(pubkey.to_hex()))?;
+        Ok(final_peer)
+    }
+
+    /// Launch a connection to a peer described by a `nodes.plain` link URI.
+    ///
+    /// Parses the link, validates it, and registers the peer in the engine's peer table.
+    pub fn launch_connection(&self, link: &str) -> Result<PeerInfo, NetworkError> {
+        let (addr, pubkey) = crate::system::parse_connection_link(link)
+            .ok_or_else(|| NetworkError::InvalidConnectionLink(link.to_string()))?;
+        self.connect_to(addr, pubkey)
     }
 
     /// Parse a connection link URI to extract the address and public key.
@@ -1052,6 +1111,278 @@ mod tests {
         tokio::time::sleep(Duration::from_millis(50)).await;
         assert!(engine.get_peer(&publisher).is_some());
 
+        engine.stop().await;
+    }
+
+    #[tokio::test]
+    async fn test_launch_connection_valid_link() {
+        let kp = Keypair::generate();
+        let config = NodeConfig {
+            listen_addr: SocketAddr::from_str("127.0.0.1:0").unwrap(),
+            keypair: kp.clone(),
+            bootstrap_peers: Vec::new(),
+            max_peers: 100,
+            heartbeat_interval: Duration::from_secs(30),
+        };
+        let engine = NodeEngine::new(config);
+        let _ = engine.start().await;
+        let peer_kp = Keypair::generate();
+        let link = format!(
+            "plain://nodes.plain?connect=127.0.0.1:9000/{}",
+            peer_kp.public.to_hex()
+        );
+        let result = engine.launch_connection(&link);
+        assert!(result.is_ok());
+        let peer = engine.get_peer(&peer_kp.public).unwrap();
+        assert_eq!(
+            peer.address,
+            "127.0.0.1:9000".parse::<SocketAddr>().unwrap()
+        );
+        assert_eq!(peer.public_key, peer_kp.public);
+        engine.stop().await;
+    }
+
+    #[tokio::test]
+    async fn test_launch_connection_invalid_link() {
+        let kp = Keypair::generate();
+        let config = NodeConfig {
+            listen_addr: SocketAddr::from_str("127.0.0.1:0").unwrap(),
+            keypair: kp.clone(),
+            bootstrap_peers: Vec::new(),
+            max_peers: 100,
+            heartbeat_interval: Duration::from_secs(30),
+        };
+        let engine = NodeEngine::new(config);
+        let _ = engine.start().await;
+        let result = engine.launch_connection("garbage-link");
+        assert!(matches!(
+            result,
+            Err(NetworkError::InvalidConnectionLink(_))
+        ));
+        engine.stop().await;
+    }
+
+    #[tokio::test]
+    async fn test_launch_connection_self_link() {
+        let kp = Keypair::generate();
+        let config = NodeConfig {
+            listen_addr: SocketAddr::from_str("127.0.0.1:0").unwrap(),
+            keypair: kp.clone(),
+            bootstrap_peers: Vec::new(),
+            max_peers: 100,
+            heartbeat_interval: Duration::from_secs(30),
+        };
+        let engine = NodeEngine::new(config);
+        let _ = engine.start().await;
+        let link = format!(
+            "plain://nodes.plain?connect=127.0.0.1:9000/{}",
+            kp.public.to_hex()
+        );
+        let result = engine.launch_connection(&link);
+        assert!(matches!(
+            result,
+            Err(NetworkError::InvalidConnectionLink(_))
+        ));
+        engine.stop().await;
+    }
+
+    #[tokio::test]
+    async fn test_launch_connection_port_zero() {
+        let kp = Keypair::generate();
+        let config = NodeConfig {
+            listen_addr: SocketAddr::from_str("127.0.0.1:0").unwrap(),
+            keypair: kp.clone(),
+            bootstrap_peers: Vec::new(),
+            max_peers: 100,
+            heartbeat_interval: Duration::from_secs(30),
+        };
+        let engine = NodeEngine::new(config);
+        let _ = engine.start().await;
+        let peer_kp = Keypair::generate();
+        let link = format!(
+            "plain://nodes.plain?connect=127.0.0.1:0/{}",
+            peer_kp.public.to_hex()
+        );
+        let result = engine.launch_connection(&link);
+        assert!(matches!(
+            result,
+            Err(NetworkError::InvalidConnectionLink(_))
+        ));
+        engine.stop().await;
+    }
+
+    #[tokio::test]
+    async fn test_launch_connection_unspecified_address() {
+        let kp = Keypair::generate();
+        let config = NodeConfig {
+            listen_addr: SocketAddr::from_str("127.0.0.1:0").unwrap(),
+            keypair: kp.clone(),
+            bootstrap_peers: Vec::new(),
+            max_peers: 100,
+            heartbeat_interval: Duration::from_secs(30),
+        };
+        let engine = NodeEngine::new(config);
+        let _ = engine.start().await;
+        let peer_kp = Keypair::generate();
+        let link = format!(
+            "plain://nodes.plain?connect=0.0.0.0:8080/{}",
+            peer_kp.public.to_hex()
+        );
+        let result = engine.launch_connection(&link);
+        assert!(matches!(
+            result,
+            Err(NetworkError::InvalidConnectionLink(_))
+        ));
+        engine.stop().await;
+    }
+
+    #[tokio::test]
+    async fn test_launch_connection_refresh_preserves_reputation() {
+        let kp = Keypair::generate();
+        let config = NodeConfig {
+            listen_addr: SocketAddr::from_str("127.0.0.1:0").unwrap(),
+            keypair: kp.clone(),
+            bootstrap_peers: Vec::new(),
+            max_peers: 100,
+            heartbeat_interval: Duration::from_secs(30),
+        };
+        let engine = NodeEngine::new(config);
+        let _ = engine.start().await;
+        let peer_kp = Keypair::generate();
+        let peer_info = PeerInfo {
+            public_key: peer_kp.public,
+            last_seen: Instant::now(),
+            address: "127.0.0.1:8080".parse::<SocketAddr>().unwrap(),
+            reputation: 42,
+        };
+        engine.add_peer(peer_info);
+        let link = format!(
+            "plain://nodes.plain?connect=127.0.0.1:9000/{}",
+            peer_kp.public.to_hex()
+        );
+        let result = engine.launch_connection(&link);
+        assert!(result.is_ok());
+        let final_peer = engine.get_peer(&peer_kp.public).unwrap();
+        assert_eq!(final_peer.reputation, 42);
+        assert_eq!(
+            final_peer.address,
+            "127.0.0.1:9000".parse::<SocketAddr>().unwrap()
+        );
+        engine.stop().await;
+    }
+
+    #[tokio::test]
+    async fn test_connect_to_valid() {
+        let kp = Keypair::generate();
+        let config = NodeConfig {
+            listen_addr: SocketAddr::from_str("127.0.0.1:0").unwrap(),
+            keypair: kp.clone(),
+            bootstrap_peers: Vec::new(),
+            max_peers: 100,
+            heartbeat_interval: Duration::from_secs(30),
+        };
+        let engine = NodeEngine::new(config);
+        let _ = engine.start().await;
+        let peer_kp = Keypair::generate();
+        let addr = "127.0.0.1:9000".parse::<SocketAddr>().unwrap();
+        let result = engine.connect_to(addr, peer_kp.public);
+        assert!(result.is_ok());
+        let peer = engine.get_peer(&peer_kp.public).unwrap();
+        assert_eq!(peer.address, addr);
+        assert_eq!(peer.public_key, peer_kp.public);
+        engine.stop().await;
+    }
+
+    #[tokio::test]
+    async fn test_connect_to_invalid_address() {
+        let kp = Keypair::generate();
+        let config = NodeConfig {
+            listen_addr: SocketAddr::from_str("127.0.0.1:0").unwrap(),
+            keypair: kp.clone(),
+            bootstrap_peers: Vec::new(),
+            max_peers: 100,
+            heartbeat_interval: Duration::from_secs(30),
+        };
+        let engine = NodeEngine::new(config);
+        let _ = engine.start().await;
+        let peer_kp = Keypair::generate();
+        let addr = "0.0.0.0:8080".parse::<SocketAddr>().unwrap();
+        let result = engine.connect_to(addr, peer_kp.public);
+        assert!(matches!(
+            result,
+            Err(NetworkError::InvalidConnectionLink(_))
+        ));
+        engine.stop().await;
+    }
+
+    #[tokio::test]
+    async fn test_connect_to_self_rejection() {
+        let kp = Keypair::generate();
+        let config = NodeConfig {
+            listen_addr: SocketAddr::from_str("127.0.0.1:0").unwrap(),
+            keypair: kp.clone(),
+            bootstrap_peers: Vec::new(),
+            max_peers: 100,
+            heartbeat_interval: Duration::from_secs(30),
+        };
+        let engine = NodeEngine::new(config);
+        let _ = engine.start().await;
+        let addr = "127.0.0.1:8080".parse::<SocketAddr>().unwrap();
+        let result = engine.connect_to(addr, kp.public);
+        assert!(matches!(
+            result,
+            Err(NetworkError::InvalidConnectionLink(_))
+        ));
+        engine.stop().await;
+    }
+
+    #[tokio::test]
+    async fn test_connect_to_port_zero_rejection() {
+        let kp = Keypair::generate();
+        let config = NodeConfig {
+            listen_addr: SocketAddr::from_str("127.0.0.1:0").unwrap(),
+            keypair: kp.clone(),
+            bootstrap_peers: Vec::new(),
+            max_peers: 100,
+            heartbeat_interval: Duration::from_secs(30),
+        };
+        let engine = NodeEngine::new(config);
+        let _ = engine.start().await;
+        let peer_kp = Keypair::generate();
+        let addr = "127.0.0.1:0".parse::<SocketAddr>().unwrap();
+        let result = engine.connect_to(addr, peer_kp.public);
+        assert!(matches!(
+            result,
+            Err(NetworkError::InvalidConnectionLink(_))
+        ));
+        engine.stop().await;
+    }
+
+    #[tokio::test]
+    async fn test_connect_to_refresh_preserves_reputation() {
+        let kp = Keypair::generate();
+        let config = NodeConfig {
+            listen_addr: SocketAddr::from_str("127.0.0.1:0").unwrap(),
+            keypair: kp.clone(),
+            bootstrap_peers: Vec::new(),
+            max_peers: 100,
+            heartbeat_interval: Duration::from_secs(30),
+        };
+        let engine = NodeEngine::new(config);
+        let _ = engine.start().await;
+        let peer_kp = Keypair::generate();
+        let addr1 = "127.0.0.1:8080".parse::<SocketAddr>().unwrap();
+        let result1 = engine.connect_to(addr1, peer_kp.public);
+        assert!(result1.is_ok());
+        let info = engine.get_peer(&peer_kp.public).unwrap();
+        assert_eq!(info.address, addr1);
+        assert_eq!(info.reputation, 0);
+        let addr2 = "127.0.0.1:9000".parse::<SocketAddr>().unwrap();
+        let result2 = engine.connect_to(addr2, peer_kp.public);
+        assert!(result2.is_ok());
+        let final_info = engine.get_peer(&peer_kp.public).unwrap();
+        assert_eq!(final_info.address, addr2);
+        assert_eq!(final_info.reputation, 0);
         engine.stop().await;
     }
 }
