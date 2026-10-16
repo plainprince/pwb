@@ -1,7 +1,8 @@
 //! `pwb-node` CLI node launcher.
 
+use pwb_core::crypto::{ContentId, PublicKey};
 use pwb_core::wire::Bundle;
-use pwb_node::domain::{DomainRegistry, DOMAIN_CLAIM_COST};
+use pwb_node::domain::{DomainRegistry, PricingEpochStats};
 use pwb_node::host::ArtifactHost;
 use pwb_node::identity::IdentityManager;
 use pwb_node::search::SearchEngine;
@@ -184,16 +185,16 @@ fn main() {
                         Ok(certificate) => {
                             let neighborhood: Vec<_> =
                                 attestor_keys.iter().map(|k| k.public).collect();
+                            let claim_price = registry.claim_cost();
                             match registry.register_attested(
                                 user_domain,
                                 content_id,
                                 &certificate,
-                                DOMAIN_CLAIM_COST,
                                 2,
                                 &neighborhood,
                             ) {
                                 Ok(()) => println!(
-                                    "[Domain] Claimed '{user_domain}' -> {content_id} via 2-of-3 attestor quorum (attested balance {})",
+                                    "[Domain] Claimed '{user_domain}' -> {content_id} via 2-of-3 attestor quorum (attested balance {}, price {claim_price})",
                                     certificate.balance
                                 ),
                                 Err(e) => println!("[Domain] Attested claim refused: {e}"),
@@ -209,6 +210,15 @@ fn main() {
                             // only the bearer token: the claim is unlinkable
                             // to the earning identity and to the withdrawal.
                             if !attestor_ledgers.is_empty() {
+                                // Pick the smallest default denomination that
+                                // covers the current claim price.
+                                let denomination = pwb_node::blind::DEFAULT_DENOMINATIONS
+                                    .iter()
+                                    .copied()
+                                    .find(|d| *d >= claim_price)
+                                    .unwrap_or_else(|| {
+                                        *pwb_node::blind::DEFAULT_DENOMINATIONS.last().unwrap()
+                                    });
                                 let mut blind_issuer =
                                     pwb_node::blind::BlindBalanceIssuer::with_defaults(&[0xB1; 32]);
                                 match pwb_node::blind::withdraw_attested(
@@ -216,7 +226,7 @@ fn main() {
                                     &mut attestor_ledgers[0],
                                     identity.public_key(),
                                     epoch,
-                                    DOMAIN_CLAIM_COST,
+                                    denomination,
                                     1,
                                 ) {
                                     Ok(receipt) => {
@@ -232,11 +242,11 @@ fn main() {
                                             );
                                         }
                                         let voucher_key =
-                                            blind_issuer.public_key(DOMAIN_CLAIM_COST).unwrap();
+                                            blind_issuer.public_key(denomination).unwrap();
                                         let binding = pwb_node::blind::IssuerBinding::sign(
                                             &attestor_keys[0],
                                             epoch,
-                                            DOMAIN_CLAIM_COST,
+                                            denomination,
                                             voucher_key,
                                         );
                                         let claim = pwb_node::blind::BlindClaim::build(
@@ -253,7 +263,6 @@ fn main() {
                                             content_id,
                                             pseudonym,
                                             &claim,
-                                            DOMAIN_CLAIM_COST,
                                             &neighborhood,
                                         ) {
                                             Ok(()) => println!(
@@ -307,6 +316,69 @@ fn main() {
             record.target_content_id, record.owner
         );
     }
+
+    // Live pricing demo (TODO §5): fold a hot epoch of network stats into
+    // the rolling window and watch the claim price leave its initial value.
+    let price_before = registry.claim_cost();
+    registry.record_pricing_epoch(pwb_node::domain::PricingEpochStats {
+        epoch: 2,
+        registrations: 32,
+        network_work: 2_000,
+        node_count: 4,
+    });
+    println!(
+        "[Pricing] Claim price moved {price_before} -> {} credits after a hot epoch (32 claims, 2000 credits minted, 4 nodes)",
+        registry.claim_cost()
+    );
+
+    // Gossip partition merge demo (TODO §5.2): two isolated clusters evolve
+    // independently, then reconcile their registries and pricing
+    // deterministically (CRDT merge: last-writer-wins domains, max claimed
+    // spend, unioned spend log, max base cost).
+    let mut cluster_a = DomainRegistry::new();
+    let mut cluster_b = DomainRegistry::new();
+    let alice = PublicKey([11; 32]);
+    let bob = PublicKey([22; 32]);
+    let cid = ContentId([33; 32]);
+
+    let _ = cluster_a.register("alpha.pwb", cid, alice);
+    let _ = cluster_b.register("beta.pwb", cid, bob);
+    // Both partitions claim the same domain at the same epoch; the merge
+    // tie-breaks deterministically by owner public key bytes.
+    let _ = cluster_a.register("contested.pwb", cid, alice);
+    let _ = cluster_b.register("contested.pwb", cid, bob);
+
+    // Each cluster observes a disjoint pricing epoch.
+    cluster_a.record_pricing_epoch(PricingEpochStats {
+        epoch: 1,
+        registrations: 40,
+        network_work: 1_000,
+        node_count: 1,
+    });
+    cluster_b.record_pricing_epoch(PricingEpochStats {
+        epoch: 1,
+        registrations: 0,
+        network_work: 100_000,
+        node_count: 100,
+    });
+
+    let price_before = cluster_a.claim_cost();
+    cluster_a.merge(&cluster_b);
+    let contested_owner = cluster_a
+        .resolve("contested.pwb")
+        .map(|record| record.owner)
+        .expect("contested.pwb exists after merge");
+    println!(
+        "[Gossip] merged clusters: {} domains; 'contested.pwb' won by {}",
+        cluster_a.count(),
+        contested_owner
+    );
+    println!(
+        "[Gossip] merged base cost: {} credits (max of cluster prices {} and {})",
+        cluster_a.claim_cost(),
+        price_before,
+        cluster_b.claim_cost()
+    );
 
     // Display the connection link for this node
     let own_link = pwb_core::net::NodeEngine::build_connection_link(

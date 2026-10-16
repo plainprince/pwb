@@ -176,4 +176,70 @@ mod tests {
             );
         }
     }
+
+    #[test]
+    fn test_file_pwb_path_reads_local_file() {
+        use pwb_core::spec::{PlainNode, Tag};
+        use pwb_core::wire::{Bundle, CURRENT_VERSION};
+        use std::collections::HashMap;
+
+        let search = SearchEngine::new();
+        let mut host = ArtifactHost::new();
+        let mut registry = DomainRegistry::new();
+        let identity = IdentityManager::new();
+
+        let payload = Bundle {
+            version: CURRENT_VERSION,
+            title: "disk".into(),
+            author_pubkey: None,
+            root_node: PlainNode::new(0, Tag::Document),
+            script_payload: None,
+            components: HashMap::new(),
+            modules: HashMap::new(),
+        }
+        .serialize();
+
+        let dir = std::env::temp_dir().join(format!("pwb-resolver-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("bundle.pwb");
+        std::fs::write(&file, &payload).unwrap();
+
+        // Absolute path after the file.pwb/ prefix so the read is CWD-independent.
+        let rel = format!("file.pwb/{}", file.display());
+        let bytes = resolve_url_or_file(&rel, &search, &host, &registry, &identity)
+            .expect("file.pwb/ branch reads from disk");
+        assert_eq!(bytes, payload);
+
+        // Local-path fallback (step 5): an existing path ending in .pwb that
+        // is not a registered domain falls through to a filesystem read.
+        let abs = file.display().to_string();
+        let bytes = resolve_url_or_file(&abs, &search, &host, &registry, &identity)
+            .expect("unregistered .pwb path falls back to disk");
+        assert_eq!(bytes, payload);
+
+        // A stored artifact resolves through the registry branch (step 4).
+        let content_id = host.store(payload.clone()).expect("stores");
+        registry
+            .register("mysite.pwb", content_id, identity.public_key())
+            .expect("registers");
+        let bytes = resolve_url_or_file("mysite.pwb", &search, &host, &registry, &identity)
+            .expect("registered domain resolves from the host");
+        assert_eq!(bytes, payload);
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_missing_local_file_is_io_error() {
+        let search = SearchEngine::new();
+        let host = ArtifactHost::new();
+        let registry = DomainRegistry::new();
+        let identity = IdentityManager::new();
+        let err = resolve_url_or_file("no-such-file-xyz123", &search, &host, &registry, &identity)
+            .expect_err("missing file must error");
+        assert!(
+            matches!(err, ResolverError::Io(_)),
+            "expected Io error, got {err:?}"
+        );
+    }
 }

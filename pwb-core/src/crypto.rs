@@ -841,7 +841,7 @@ pub enum VoucherSpendError {
 /// an issuance, so replay prevention is necessarily a separate, stateful step.
 /// This log supplies that state: it records each spent token identifier and
 /// rejects any repeat presentation of the same voucher.
-#[derive(Debug, Default)]
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
 pub struct VoucherSpendLog {
     spent: HashSet<[u8; 32]>,
 }
@@ -864,6 +864,18 @@ impl VoucherSpendLog {
     /// Whether no voucher has been redeemed yet.
     pub fn is_empty(&self) -> bool {
         self.spent.is_empty()
+    }
+
+    /// Union another spend log into this one (gossip partition merge).
+    ///
+    /// A token spent on either side of an isolated partition is spent
+    /// everywhere after the merge, so a bearer voucher cannot be redeemed
+    /// twice across the re-joined network. Commutative, associative,
+    /// idempotent.
+    pub fn merge(&mut self, other: &VoucherSpendLog) {
+        for token in &other.spent {
+            self.spent.insert(*token);
+        }
     }
 
     /// Verify a voucher and record its token, rejecting replays.

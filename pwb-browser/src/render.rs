@@ -2556,4 +2556,277 @@ mod tests {
         }
         assert!(painted, "tooltip painted pixels in the expected region");
     }
+
+    fn rich_dom() -> Dom {
+        use crate::dom::{Dom, DomNode};
+        use std::collections::HashMap;
+        let attrs = |pairs: &[(&str, &str)]| -> HashMap<String, String> {
+            pairs
+                .iter()
+                .map(|(k, v)| (k.to_string(), v.to_string()))
+                .collect()
+        };
+        Dom {
+            title: "rich".into(),
+            root: DomNode {
+                id: 1,
+                tag: Tag::Document,
+                attributes: HashMap::new(),
+                text: None,
+                children: vec![
+                    DomNode {
+                        id: 2,
+                        tag: Tag::View,
+                        attributes: attrs(&[("background-color", "#ff0000")]),
+                        text: None,
+                        children: vec![DomNode {
+                            id: 3,
+                            tag: Tag::Text,
+                            attributes: attrs(&[("color", "#ffffff")]),
+                            text: Some("Hello PlainWeb".into()),
+                            children: vec![],
+                        }],
+                    },
+                    DomNode {
+                        id: 4,
+                        tag: Tag::Button,
+                        attributes: HashMap::new(),
+                        text: Some("Click".into()),
+                        children: vec![],
+                    },
+                    DomNode {
+                        id: 5,
+                        tag: Tag::Input,
+                        attributes: attrs(&[("value", "typed"), ("placeholder", "enter…")]),
+                        text: None,
+                        children: vec![],
+                    },
+                    DomNode {
+                        id: 6,
+                        tag: Tag::Code,
+                        attributes: HashMap::new(),
+                        text: Some("let x = 1;".into()),
+                        children: vec![],
+                    },
+                    DomNode {
+                        id: 7,
+                        tag: Tag::Icon,
+                        attributes: attrs(&[("icon", "star")]),
+                        text: None,
+                        children: vec![],
+                    },
+                    DomNode {
+                        id: 8,
+                        tag: Tag::View,
+                        attributes: attrs(&[
+                            ("position", "fixed"),
+                            ("top", "0"),
+                            ("right", "0"),
+                            ("width", "120"),
+                            ("height", "60"),
+                            ("background-color", "#00ff00"),
+                        ]),
+                        text: None,
+                        children: vec![],
+                    },
+                    DomNode {
+                        id: 9,
+                        tag: Tag::View,
+                        attributes: attrs(&[
+                            ("overflow", "scroll"),
+                            ("height", "100"),
+                            ("background-color", "#0000ff"),
+                        ]),
+                        text: None,
+                        children: vec![DomNode {
+                            id: 10,
+                            tag: Tag::View,
+                            attributes: attrs(&[
+                                ("height", "400"),
+                                ("background-color", "#ffff00"),
+                            ]),
+                            text: None,
+                            children: vec![],
+                        }],
+                    },
+                    // Tall in-flow block so the PAGE (not just the element)
+                    // overflows the viewport and produces a page scrollbar.
+                    DomNode {
+                        id: 11,
+                        tag: Tag::View,
+                        attributes: attrs(&[("height", "1500")]),
+                        text: None,
+                        children: vec![],
+                    },
+                ],
+            },
+            components: HashMap::new(),
+            modules: HashMap::new(),
+        }
+    }
+
+    #[test]
+    fn test_render_dom_full_featured_tree() {
+        let dom = rich_dom();
+        let (pixmap, layout_root, scrollbar) =
+            render_dom_to_pixmap(&dom, 800, 600, 0.0, &TextSelection::default(), false);
+
+        // Layout was built and the scroll container overflows → scrollbar.
+        assert!(layout_root.rect.height() > 0.0);
+        let info = scrollbar.expect("tall scroll content produces a scrollbar");
+        assert!(info.thumb_rect.height() >= 30.0);
+        assert!(info.track_rect.width() > 0.0);
+
+        // The red hero view and the green fixed panel painted real pixels.
+        let mut saw_red = false;
+        let mut saw_green = false;
+        for y in 0..600u32 {
+            for x in 0..800u32 {
+                let px = pixmap.pixel(x, y).unwrap();
+                if px.red() > 200 && px.green() < 40 && px.blue() < 40 {
+                    saw_red = true;
+                }
+                if px.green() > 200 && px.red() < 40 && px.blue() < 40 {
+                    saw_green = true;
+                }
+            }
+        }
+        assert!(saw_red, "background-color: #ff0000 view paints red");
+        assert!(saw_green, "fixed panel background paints green");
+
+        // Scrolling the container moves its yellow content into view and
+        // exercises the scrolled rendering paths.
+        let scrolls = HashMap::from([(9, 150.0f32)]);
+        let mut pixmap2 = Pixmap::new(800, 600).unwrap();
+        let (_, scrollbar2) = render_dom_into_pixmap(
+            &mut pixmap2,
+            &dom,
+            800,
+            600,
+            0.0,
+            &TextSelection::default(),
+            &scrolls,
+            None,
+        );
+        assert!(scrollbar2.is_some());
+    }
+
+    #[test]
+    fn test_render_dom_no_scrollbar_for_short_content() {
+        let dom = crate::dom::Dom {
+            title: "short".into(),
+            root: crate::dom::DomNode {
+                id: 1,
+                tag: Tag::Document,
+                attributes: HashMap::new(),
+                text: None,
+                children: vec![crate::dom::DomNode {
+                    id: 2,
+                    tag: Tag::Text,
+                    attributes: HashMap::new(),
+                    text: Some("one line".into()),
+                    children: vec![],
+                }],
+            },
+            components: HashMap::new(),
+            modules: HashMap::new(),
+        };
+        let (_, _, scrollbar) =
+            render_dom_to_pixmap(&dom, 800, 600, 0.0, &TextSelection::default(), false);
+        assert!(scrollbar.is_none(), "no scrollbar when content fits");
+    }
+
+    #[test]
+    fn test_render_dom_into_pixmap_resizes_buffer() {
+        let dom = rich_dom();
+        let mut pixmap = Pixmap::new(100, 100).unwrap();
+        render_dom_into_pixmap(
+            &mut pixmap,
+            &dom,
+            100,
+            100,
+            0.0,
+            &TextSelection::default(),
+            &HashMap::new(),
+            None,
+        );
+        assert_eq!((pixmap.width(), pixmap.height()), (100, 100));
+
+        render_dom_into_pixmap(
+            &mut pixmap,
+            &dom,
+            400,
+            300,
+            0.0,
+            &TextSelection::default(),
+            &HashMap::new(),
+            None,
+        );
+        assert_eq!((pixmap.width(), pixmap.height()), (400, 300));
+    }
+
+    #[test]
+    fn test_render_with_selection_and_input_focus() {
+        let dom = rich_dom();
+        let selection = TextSelection {
+            start_node_id: Some(3),
+            start_char_pos: Some(0),
+            end_node_id: Some(3),
+            end_char_pos: Some(5),
+            is_selecting: true,
+            selected_text_buffer: "Hello".into(),
+        };
+        let mut pixmap = Pixmap::new(800, 600).unwrap();
+        let (layout_root, _) = render_dom_into_pixmap(
+            &mut pixmap,
+            &dom,
+            800,
+            600,
+            0.0,
+            &selection,
+            &HashMap::new(),
+            Some((5, 2)),
+        );
+        // Selection + focus must not disturb layout, and the input box with
+        // its focused caret still lays out where expected.
+        let text_box = crate::layout::find_box_by_id(&layout_root, 3).expect("text box laid out");
+        assert!(text_box.rect.width() > 0.0);
+        let input = crate::layout::find_box_by_id(&layout_root, 5).expect("input box laid out");
+        assert!(input.rect.height() > 0.0);
+        // The glyph-selection band is only painted when a system font loads
+        // (draw_text_ab_glyph's font path); the no-font fallback draws plain
+        // char rects, so we only require the render to complete.
+        assert_eq!((pixmap.width(), pixmap.height()), (800, 600));
+    }
+
+    #[test]
+    fn test_hit_test_cursor_from_layout_variants() {
+        let dom = rich_dom();
+        let layout_root = crate::layout::build_layout_tree(&dom, 800, 600, 0.0);
+
+        // Button → pointer, text/input → text caret, plain view → default.
+        let button = crate::layout::find_box_by_id(&layout_root, 4).unwrap();
+        assert_eq!(
+            hit_test_cursor_from_layout(
+                &layout_root,
+                button.rect.left() + 2.0,
+                button.rect.top() + 2.0
+            ),
+            CursorIcon::Pointer
+        );
+        let input = crate::layout::find_box_by_id(&layout_root, 5).unwrap();
+        assert_eq!(
+            hit_test_cursor_from_layout(
+                &layout_root,
+                input.rect.left() + 2.0,
+                input.rect.top() + 2.0
+            ),
+            CursorIcon::Text
+        );
+        // Outside everything → default.
+        assert_eq!(
+            hit_test_cursor_from_layout(&layout_root, -10.0, -10.0),
+            CursorIcon::Default
+        );
+    }
 }

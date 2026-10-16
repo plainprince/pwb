@@ -1183,4 +1183,278 @@ mod tests {
 
         let _ = std::fs::remove_dir_all(&dir);
     }
+
+    #[test]
+    fn test_parse_alignment_and_resize_helpers() {
+        use pwb_core::spec::{Alignment, ResizeStyle};
+        assert_eq!(parse_alignment("center"), Some(Alignment::Center));
+        assert_eq!(parse_alignment("flex-start"), Some(Alignment::Start));
+        assert_eq!(parse_alignment("start"), Some(Alignment::Start));
+        assert_eq!(parse_alignment("flex-end"), Some(Alignment::End));
+        assert_eq!(parse_alignment("end"), Some(Alignment::End));
+        assert_eq!(
+            parse_alignment("space-between"),
+            Some(Alignment::SpaceBetween)
+        );
+        assert_eq!(parse_alignment("stretch"), None);
+        assert_eq!(format_alignment(&Alignment::Start), "flex-start");
+        assert_eq!(format_alignment(&Alignment::Center), "center");
+        assert_eq!(format_alignment(&Alignment::End), "flex-end");
+        assert_eq!(format_alignment(&Alignment::SpaceBetween), "space-between");
+
+        assert_eq!(parse_resize("both"), Some(ResizeStyle::Both));
+        assert_eq!(parse_resize("vertical"), Some(ResizeStyle::Vertical));
+        assert_eq!(parse_resize("horizontal"), Some(ResizeStyle::Horizontal));
+        assert_eq!(parse_resize("none"), Some(ResizeStyle::None));
+        assert_eq!(parse_resize("diagonal"), None);
+    }
+
+    #[test]
+    fn test_unit_value_parse_and_format() {
+        use pwb_core::spec::UnitValue;
+        assert_eq!(parse_unit_value("auto"), Some(UnitValue::Auto));
+        assert_eq!(parse_unit_value(" 50% "), Some(UnitValue::Percent(0.5)));
+        assert_eq!(parse_unit_value("10vw"), Some(UnitValue::Vw(0.1)));
+        assert_eq!(parse_unit_value("20vh"), Some(UnitValue::Vh(0.2)));
+        assert_eq!(parse_unit_value("15px"), Some(UnitValue::Px(15.0)));
+        assert_eq!(parse_unit_value("15"), Some(UnitValue::Px(15.0)));
+        assert_eq!(parse_unit_value("banana"), None);
+
+        assert_eq!(format_unit(&UnitValue::Px(15.0)), "15px");
+        assert_eq!(format_unit(&UnitValue::Percent(0.5)), "50%");
+        assert_eq!(format_unit(&UnitValue::Vw(0.1)), "10vw");
+        assert_eq!(format_unit(&UnitValue::Vh(0.2)), "20vh");
+        assert_eq!(format_unit(&UnitValue::Auto), "auto");
+    }
+
+    #[test]
+    fn test_parse_hex_color_variants() {
+        assert_eq!(
+            parse_hex_color("#ff0000"),
+            Some(Color {
+                r: 255,
+                g: 0,
+                b: 0,
+                a: 255
+            })
+        );
+        assert_eq!(
+            parse_hex_color("00ff00"),
+            Some(Color {
+                r: 0,
+                g: 255,
+                b: 0,
+                a: 255
+            })
+        );
+        assert_eq!(parse_hex_color("white"), Some(Color::WHITE));
+        assert_eq!(parse_hex_color("#black"), Some(Color::BLACK));
+        assert_eq!(parse_hex_color("#fff"), None, "3-digit hex unsupported");
+        assert_eq!(parse_hex_color("#gggggg"), None, "non-hex digits");
+        assert_eq!(parse_hex_color("transparent"), None);
+    }
+
+    #[test]
+    fn test_parse_tag_content_attributes() {
+        let (tag, attrs) = parse_tag_content("view id=\"hero\" class='big wide' data-x=42");
+        assert_eq!(tag, "view");
+        assert_eq!(attrs.get("id").map(|s| s.as_str()), Some("hero"));
+        assert_eq!(attrs.get("class").map(|s| s.as_str()), Some("big wide"));
+        assert_eq!(attrs.get("data-x").map(|s| s.as_str()), Some("42"));
+
+        let (tag, attrs) = parse_tag_content("");
+        assert_eq!(tag, "view");
+        assert!(attrs.is_empty());
+    }
+
+    #[test]
+    fn test_substitute_in_string_params() {
+        let params = HashMap::from([
+            ("name".to_string(), "Ada".to_string()),
+            ("count".to_string(), "3".to_string()),
+        ]);
+        assert_eq!(
+            substitute_in_string("hello {name}, {count} items", &params),
+            "hello Ada, 3 items"
+        );
+        assert_eq!(
+            substitute_in_string("no placeholders", &params),
+            "no placeholders"
+        );
+        assert_eq!(substitute_in_string("{unknown}", &params), "{unknown}");
+    }
+
+    #[test]
+    fn test_parse_pss_stylesheet_property_coverage() {
+        let css = "\
+.alpha {
+    color: #ff0000;
+    background-color: #00ff00;
+    padding: 8px;
+    margin: 4%;
+    gap: 2vw;
+    font-size: 18px;
+    border-radius: 6px;
+    width: 100px;
+    height: 50vh;
+    top: 10px;
+    left: 5px;
+    right: 7px;
+    bottom: 9px;
+    position: fixed;
+    justify-content: center;
+    align-items: flex-end;
+    resize: both;
+    overflow: scroll;
+    cursor: pointer;
+    display: flex;
+    flex-direction: column;
+    unknown-prop: whatever;
+}
+.beta { position: relative; }
+.gamma { position: static; }
+.delta { position: sticky; }
+.eps { display: none; flex-direction: row; overflow: hidden; }
+.zeta { display: block; overflow: auto; cursor: text; }
+.eta { cursor: grab; }
+.theta { cursor: crosshair; }
+.iota { cursor: default; overflow: visible; }
+{ color: #ffffff; }
+";
+        let rules = parse_pss_stylesheet(css);
+        use pwb_core::spec::{
+            Alignment, CursorStyle, DisplayStyle, FlexDirection, OverflowStyle, PositionStyle,
+            ResizeStyle, UnitValue,
+        };
+
+        let alpha = &rules[".alpha"];
+        assert_eq!(
+            alpha[0],
+            StyleProperty::Color(Color {
+                r: 255,
+                g: 0,
+                b: 0,
+                a: 255
+            })
+        );
+        assert_eq!(
+            alpha[1],
+            StyleProperty::BackgroundColor(Color {
+                r: 0,
+                g: 255,
+                b: 0,
+                a: 255
+            })
+        );
+        assert_eq!(alpha[2], StyleProperty::Padding(UnitValue::Px(8.0)));
+        assert_eq!(alpha[3], StyleProperty::Margin(UnitValue::Percent(0.04)));
+        assert_eq!(alpha[4], StyleProperty::Gap(UnitValue::Vw(0.02)));
+        assert_eq!(alpha[5], StyleProperty::FontSize(UnitValue::Px(18.0)));
+        assert_eq!(alpha[6], StyleProperty::BorderRadius(6.0));
+        assert_eq!(alpha[7], StyleProperty::Width(UnitValue::Px(100.0)));
+        assert_eq!(alpha[8], StyleProperty::Height(UnitValue::Vh(0.5)));
+        assert_eq!(alpha[9], StyleProperty::Top(10.0));
+        assert_eq!(alpha[10], StyleProperty::Left(5.0));
+        assert_eq!(alpha[11], StyleProperty::Right(7.0));
+        assert_eq!(alpha[12], StyleProperty::Bottom(9.0));
+        assert_eq!(alpha[13], StyleProperty::Position(PositionStyle::Fixed));
+        assert_eq!(alpha[14], StyleProperty::JustifyContent(Alignment::Center));
+        assert_eq!(alpha[15], StyleProperty::AlignItems(Alignment::End));
+        assert_eq!(alpha[16], StyleProperty::Resize(ResizeStyle::Both));
+        assert_eq!(alpha[17], StyleProperty::Overflow(OverflowStyle::Scroll));
+        assert_eq!(alpha[18], StyleProperty::Cursor(CursorStyle::Pointer));
+        assert_eq!(alpha[19], StyleProperty::Display(DisplayStyle::Flex));
+        assert_eq!(alpha[20], StyleProperty::Direction(FlexDirection::Column));
+        assert_eq!(alpha.len(), 21, "unknown-prop must be ignored");
+
+        assert_eq!(
+            rules[".beta"][0],
+            StyleProperty::Position(PositionStyle::Relative)
+        );
+        assert_eq!(
+            rules[".gamma"][0],
+            StyleProperty::Position(PositionStyle::Static)
+        );
+        assert_eq!(
+            rules[".delta"][0],
+            StyleProperty::Position(PositionStyle::Sticky)
+        );
+        assert_eq!(
+            rules[".eps"],
+            vec![
+                StyleProperty::Display(DisplayStyle::None),
+                StyleProperty::Direction(FlexDirection::Row),
+                StyleProperty::Overflow(OverflowStyle::Hidden),
+            ]
+        );
+        assert_eq!(
+            rules[".zeta"],
+            vec![
+                StyleProperty::Display(DisplayStyle::Block),
+                StyleProperty::Overflow(OverflowStyle::Auto),
+                StyleProperty::Cursor(CursorStyle::Text),
+            ]
+        );
+        assert_eq!(rules[".eta"][0], StyleProperty::Cursor(CursorStyle::Grab));
+        assert_eq!(
+            rules[".theta"][0],
+            StyleProperty::Cursor(CursorStyle::Crosshair)
+        );
+        assert_eq!(
+            rules[".iota"],
+            vec![
+                StyleProperty::Cursor(CursorStyle::Default),
+                StyleProperty::Overflow(OverflowStyle::Visible),
+            ]
+        );
+        // The empty-selector block is dropped.
+        assert!(!rules.contains_key(""));
+    }
+
+    #[test]
+    fn test_apply_stylesheet_selector_kinds() {
+        let css = "\
+view { color: #ff0000; }
+.card { padding: 8px; }
+.card.active { border-radius: 4px; }
+#hero { margin: 2px; }
+";
+        let rules = parse_pss_stylesheet(css);
+        let mut root = parse_pml_markup(
+            "<view id='hero'><view class='card active'>x</view><view class='card'>y</view></view>",
+        )
+        .expect("parses");
+        apply_stylesheet(&mut root, &rules);
+
+        // Tag selector + id selector both hit the root view.
+        assert_eq!(
+            root.attributes.get("color").map(|s| s.as_str()),
+            Some("#ff0000")
+        );
+        assert_eq!(
+            root.attributes.get("margin").map(|s| s.as_str()),
+            Some("2px")
+        );
+
+        let active = &root.children[0];
+        assert_eq!(
+            active.attributes.get("padding").map(|s| s.as_str()),
+            Some("8px")
+        );
+        assert_eq!(
+            active.attributes.get("border-radius").map(|s| s.as_str()),
+            Some("4px"),
+            "compound .card.active matches only when both classes present"
+        );
+
+        let plain = &root.children[1];
+        assert_eq!(
+            plain.attributes.get("padding").map(|s| s.as_str()),
+            Some("8px")
+        );
+        assert!(
+            !plain.attributes.contains_key("border-radius"),
+            "single class must not match the compound selector"
+        );
+    }
 }

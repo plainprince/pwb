@@ -95,3 +95,103 @@ pub(crate) fn extract_terms(node: &pwb_core::spec::PlainNode, counts: &mut HashM
         extract_terms(child, counts);
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use pwb_core::spec::PlainNode;
+
+    fn text_node(id: usize, text: &str) -> PlainNode {
+        let mut node = PlainNode::new(id, Tag::Text);
+        node.text_content = Some(text.into());
+        node
+    }
+
+    fn title_node(id: usize, text: &str) -> PlainNode {
+        let mut node = PlainNode::new(id, Tag::Title);
+        node.text_content = Some(text.into());
+        node
+    }
+
+    fn bundle_with(root: PlainNode) -> Bundle {
+        Bundle {
+            version: pwb_core::wire::CURRENT_VERSION,
+            title: "Doc".into(),
+            author_pubkey: None,
+            root_node: root,
+            script_payload: None,
+            components: HashMap::new(),
+            modules: HashMap::new(),
+        }
+    }
+
+    #[test]
+    fn test_extract_terms_counts_words_and_strips_punctuation() {
+        let mut counts = HashMap::new();
+        let node = text_node(0, "hello, hello world! plain-web");
+        extract_terms(&node, &mut counts);
+        assert_eq!(counts.get("hello"), Some(&2));
+        assert_eq!(counts.get("world"), Some(&1));
+        // Interior hyphens are kept (trim only strips edges).
+        assert_eq!(counts.get("plain-web"), Some(&1));
+        assert!(!counts.contains_key(""));
+    }
+
+    #[test]
+    fn test_title_terms_get_five_x_boost() {
+        let mut counts = HashMap::new();
+        let mut doc = PlainNode::new(0, Tag::Document);
+        doc.children.push(title_node(1, "browser"));
+        doc.children.push(text_node(2, "browser engine"));
+        extract_terms(&doc, &mut counts);
+        // Title text is counted once generically (+1) plus the title boost
+        // (+5); the body adds one more for "browser".
+        assert_eq!(counts.get("browser"), Some(&7));
+        assert_eq!(counts.get("engine"), Some(&1));
+    }
+
+    #[test]
+    fn test_extract_terms_skips_empty_and_whitespace_only_text() {
+        let mut counts = HashMap::new();
+        let mut doc = PlainNode::new(0, Tag::Document);
+        doc.children.push(text_node(1, "   "));
+        doc.children.push(text_node(2, "!!!"));
+        extract_terms(&doc, &mut counts);
+        assert!(counts.is_empty());
+    }
+
+    #[test]
+    fn test_search_ranks_by_term_frequency() {
+        let mut engine = SearchEngine::new();
+        let low = ContentId([1; 32]);
+        let high = ContentId([2; 32]);
+        engine.index_bundle(low, &bundle_with(text_node(0, "rust")));
+        engine.index_bundle(
+            high,
+            &bundle_with({
+                let mut root = PlainNode::new(0, Tag::Document);
+                root.children.push(title_node(1, "rust rust rust"));
+                root
+            }),
+        );
+        let results = engine.search("rust");
+        assert_eq!(results.len(), 2);
+        assert_eq!(results[0].content_id, high, "title-boosted doc ranks first");
+        assert!(results[0].rank_score > results[1].rank_score);
+        assert_eq!(results[1].content_id, low);
+    }
+
+    #[test]
+    fn test_search_is_case_insensitive_and_misses_unknown_terms() {
+        let mut engine = SearchEngine::new();
+        engine.index_bundle(ContentId([3; 32]), &bundle_with(text_node(0, "Alpha beta")));
+        assert_eq!(engine.search("  ALPHA ").len(), 1);
+        assert!(engine.search("gamma").is_empty());
+    }
+
+    #[test]
+    fn test_default_engine_is_empty() {
+        let engine = SearchEngine::default();
+        assert!(engine.search("anything").is_empty());
+    }
+}

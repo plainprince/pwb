@@ -551,7 +551,7 @@ fn binding_sign_message(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::domain::{DomainRegistry, DOMAIN_CLAIM_COST};
+    use crate::domain::{DomainRegistry, PricingEpochStats};
     use pwb_core::crypto::VoucherSpendLog;
     use pwb_core::system::is_reserved_system_domain;
 
@@ -775,6 +775,89 @@ mod tests {
     }
 
     #[test]
+    fn test_spend_log_merge_blocks_double_redeem_after_partition_merge() {
+        // Two isolated clusters each redeem a different voucher for the same
+        // subject's attested balance. After the clusters gossip-merge their
+        // registries, both tokens are spent everywhere.
+        let subject = Keypair::generate().public;
+        let attestor = Keypair::generate();
+        let neighborhood = [attestor.public];
+        let pseudonym = Keypair::generate().public;
+
+        fn claim_voucher(
+            subject: PublicKey,
+            issuer: &mut BlindBalanceIssuer,
+            ledger: &mut AttestorLedger,
+            attestor: &Keypair,
+            pseudonym: PublicKey,
+            neighborhood: [PublicKey; 1],
+        ) -> (DomainRegistry, BlindClaim) {
+            let receipt = withdraw_attested(issuer, ledger, subject, 1, 50, 1).expect("withdraw");
+            let voucher_key = issuer.public_key(50).unwrap();
+            let binding = IssuerBinding::sign(attestor, 1, 50, voucher_key);
+            let claim = BlindClaim::build(&receipt.vouchers[0], &binding).expect("claim");
+            let mut registry = DomainRegistry::new();
+            assert!(registry
+                .register_blind(
+                    "site.pwb",
+                    ContentId([1; 32]),
+                    pseudonym,
+                    &claim,
+                    &neighborhood
+                )
+                .is_ok());
+            (registry, claim)
+        }
+
+        let mut issuer_a = make_issuer();
+        let mut ledger_a = funded_ledger(subject, 50);
+        let (mut registry_a, claim_a) = claim_voucher(
+            subject,
+            &mut issuer_a,
+            &mut ledger_a,
+            &attestor,
+            pseudonym,
+            neighborhood,
+        );
+
+        let mut issuer_b = make_issuer();
+        let mut ledger_b = funded_ledger(subject, 50);
+        let (registry_b, claim_b) = claim_voucher(
+            subject,
+            &mut issuer_b,
+            &mut ledger_b,
+            &attestor,
+            pseudonym,
+            neighborhood,
+        );
+
+        // Gossip-merge cluster B into cluster A.
+        registry_a.merge(&registry_b);
+
+        // Neither voucher can fund a second claim in the merged registry.
+        assert_eq!(
+            registry_a.register_blind(
+                "other-a.pwb",
+                ContentId([2; 32]),
+                pseudonym,
+                &claim_a,
+                &neighborhood,
+            ),
+            Err(BlindClaimError::AlreadySpent)
+        );
+        assert_eq!(
+            registry_a.register_blind(
+                "other-b.pwb",
+                ContentId([3; 32]),
+                pseudonym,
+                &claim_b,
+                &neighborhood,
+            ),
+            Err(BlindClaimError::AlreadySpent)
+        );
+    }
+
+    #[test]
     fn test_withdrawn_vouchers_are_unlinkable() {
         let subject = Keypair::generate().public;
         let mut issuer = make_issuer();
@@ -853,7 +936,6 @@ mod tests {
                 ContentId([1; 32]),
                 pseudonym,
                 &claim,
-                DOMAIN_CLAIM_COST,
                 &neighborhood,
             ),
             Ok(())
@@ -870,7 +952,6 @@ mod tests {
                 ContentId([1; 32]),
                 pseudonym,
                 &claim,
-                DOMAIN_CLAIM_COST,
                 &neighborhood,
             ),
             Err(BlindClaimError::ReservedSystemDomain)
@@ -881,7 +962,6 @@ mod tests {
                 ContentId([1; 32]),
                 pseudonym,
                 &claim,
-                DOMAIN_CLAIM_COST,
                 &neighborhood,
             ),
             Err(BlindClaimError::DomainAlreadyRegistered)
@@ -919,7 +999,7 @@ mod tests {
             binding: bad_binding,
         };
         assert_eq!(
-            registry.register_blind("a.pwb", cid, pseudonym, &claim, 10, &neighborhood),
+            registry.register_blind("a.pwb", cid, pseudonym, &claim, &neighborhood),
             Err(BlindClaimError::BadBinding)
         );
 
@@ -932,7 +1012,7 @@ mod tests {
             binding: stranger_binding,
         };
         assert_eq!(
-            registry.register_blind("b.pwb", cid, pseudonym, &claim, 10, &neighborhood),
+            registry.register_blind("b.pwb", cid, pseudonym, &claim, &neighborhood),
             Err(BlindClaimError::IssuerNotAttestor)
         );
 
@@ -946,35 +1026,67 @@ mod tests {
             binding: wrong_key_binding,
         };
         assert_eq!(
-            registry.register_blind("c.pwb", cid, pseudonym, &claim, 10, &neighborhood),
+            registry.register_blind("c.pwb", cid, pseudonym, &claim, &neighborhood),
             Err(BlindClaimError::BadVoucher)
         );
 
-        // Valid voucher but underfunded for the cost.
+        // Valid voucher, but a hot market has pushed the rolling claim
+        // price above the voucher's denomination.
         let claim = BlindClaim::build(voucher, &binding).unwrap();
+        for epoch in 1..=4 {
+            registry.record_pricing_epoch(PricingEpochStats {
+                epoch,
+                registrations: 40,
+                network_work: 1_000,
+                node_count: 1,
+            });
+        }
+        let hot_price = registry.claim_cost();
+        assert!(hot_price > 50, "price rose with demand");
         assert_eq!(
-            registry.register_blind("d.pwb", cid, pseudonym, &claim, 500, &neighborhood),
+            registry.register_blind("d.pwb", cid, pseudonym, &claim, &neighborhood),
             Err(BlindClaimError::Underfunded {
                 voucher: 50,
-                cost: 500
+                cost: hot_price
             })
         );
 
-        // Forged ownership proof.
+        // Forged ownership proof (at the still-elevated price).
         let mut forged = claim.clone();
         forged.proof.response[0] ^= 0xff;
         assert_eq!(
-            registry.register_blind("e.pwb", cid, pseudonym, &forged, 10, &neighborhood),
+            registry.register_blind("e.pwb", cid, pseudonym, &forged, &neighborhood),
             Err(BlindClaimError::NoOwnershipProof)
         );
 
-        // A real claim succeeds, then the same voucher cannot be replayed.
+        // The hot-market price now exceeds the voucher: even an honest claim
+        // is underfunded until the market cools or a bigger voucher arrives.
         assert_eq!(
-            registry.register_blind("f.pwb", cid, pseudonym, &claim, 10, &neighborhood),
+            registry.register_blind("f.pwb", cid, pseudonym, &claim, &neighborhood),
+            Err(BlindClaimError::Underfunded {
+                voucher: 50,
+                cost: hot_price
+            })
+        );
+
+        // Cool the market back below the voucher denomination, then the
+        // same claim succeeds and the token cannot be replayed.
+        for epoch in 5..=40 {
+            registry.record_pricing_epoch(PricingEpochStats {
+                epoch,
+                registrations: 0,
+                network_work: 100_000,
+                node_count: 100,
+            });
+        }
+        assert_eq!(registry.claim_cost(), crate::domain::MIN_CLAIM_PRICE);
+        assert!(registry.claim_cost() <= 50);
+        assert_eq!(
+            registry.register_blind("f.pwb", cid, pseudonym, &claim, &neighborhood),
             Ok(())
         );
         assert_eq!(
-            registry.register_blind("g.pwb", cid, pseudonym, &claim, 10, &neighborhood),
+            registry.register_blind("g.pwb", cid, pseudonym, &claim, &neighborhood),
             Err(BlindClaimError::AlreadySpent)
         );
     }

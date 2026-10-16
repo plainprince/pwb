@@ -42,3 +42,63 @@ impl Default for ArtifactHost {
         Self::new()
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use pwb_core::spec::{PlainNode, Tag};
+
+    fn sample_bundle_bytes() -> Vec<u8> {
+        Bundle {
+            version: pwb_core::wire::CURRENT_VERSION,
+            title: "Demo".into(),
+            author_pubkey: None,
+            root_node: PlainNode::new(0, Tag::Document),
+            script_payload: None,
+            components: std::collections::HashMap::new(),
+            modules: std::collections::HashMap::new(),
+        }
+        .serialize()
+    }
+
+    #[test]
+    fn test_store_valid_bundle_returns_content_id_and_gets_it_back() {
+        let mut host = ArtifactHost::new();
+        assert!(host.is_empty());
+        let bytes = sample_bundle_bytes();
+        let content_id = ContentId::compute(&bytes);
+        assert_eq!(host.store(bytes.clone()).unwrap(), content_id);
+        assert_eq!(host.get(&content_id), Some(&bytes));
+        assert_eq!(host.len(), 1);
+        assert!(!host.is_empty());
+    }
+
+    #[test]
+    fn test_store_rejects_invalid_bundle_payload() {
+        let mut host = ArtifactHost::new();
+        assert_eq!(host.store(vec![0xFF; 8]), Err("Invalid bundle payload"));
+        assert!(host.is_empty());
+    }
+
+    #[test]
+    fn test_store_is_content_addressed_and_deduplicates() {
+        let mut host = ArtifactHost::new();
+        let first = host.store(sample_bundle_bytes()).unwrap();
+        let second = host.store(sample_bundle_bytes()).unwrap();
+        assert_eq!(first, second, "same bytes → same content id");
+        assert_eq!(host.len(), 1, "re-stored content does not duplicate");
+    }
+
+    #[test]
+    fn test_get_unknown_content_id_is_none() {
+        let host = ArtifactHost::new();
+        assert_eq!(host.get(&ContentId([0; 32])), None);
+    }
+
+    #[test]
+    fn test_default_host_is_empty() {
+        let host = ArtifactHost::default();
+        assert!(host.is_empty());
+        assert_eq!(host.len(), 0);
+    }
+}

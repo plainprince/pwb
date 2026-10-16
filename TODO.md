@@ -116,23 +116,29 @@ This document outlines the architectural refactoring and implementation roadmap 
 
 ## 5. Dynamic Rolling Average Domain Pricing & Gossip Merging (`pwb-node::domain`)
 
-- [ ] **Rolling Average Pricing Engine**
+- [x] **Rolling Average Pricing Engine**
   - Replace fixed constant `DOMAIN_CLAIM_COST` with a dynamic pricing formula based on rolling network metrics:
     - Total active domain registrations in recent epochs.
     - Global network work capacity and total node count.
     - Credit velocity and demand curve.
-- [ ] **Gossip Partition & Network Merge State Reconciliation**
+    - Implemented in `pwb-node::domain` (std only, no new dependencies): `RollingPricing` keeps a window (`PRICING_WINDOW=8`) of per-epoch `PricingEpochStats { epoch, registrations, network_work, node_count }` (gossip-delivered; stale/duplicate epochs are ignored). Each `record_epoch` recomputes integer-only rolling averages and moves the price ¼ of the way toward `price × demand / supply`: demand = recent registration flow vs a balanced target (`TARGET_REGS_PER_EPOCH=4`, scaled by fixed-point `PRICE_SCALE=1000`); supply = per-node work capacity × network breadth (recent credits minted split as `network_work/node_count` vs `BASELINE_WORK_PER_NODE=1000` and `node_count` vs `BASELINE_NODES=10` — the two factors multiply back to total work vs the balanced baseline, so both TODO inputs enter the price). Clamped to `[MIN_CLAIM_PRICE=10, MAX_CLAIM_PRICE=10_000]`; a fresh engine starts at `INITIAL_CLAIM_PRICE=50` (the old constant, now just the initial value).
+    - `DOMAIN_CLAIM_COST` is gone: `DomainRegistry` embeds the engine, `claim_cost()` returns the current price, and `register_attested`/`register_blind` charge it instead of a caller-supplied cost (cert balance and voucher denomination are checked against the live price). CLI picks the smallest blind-signing denomination covering the claim price and, after the §4.2/§4.3 claims, folds a hot epoch (32 claims / 2000 credits / 4 nodes) into the window — the printed price moves 50 → 537.
+    - Tests: 5 new `domain::tests::test_rolling_pricing_*` + `test_registry_claim_price_is_dynamic_not_a_constant` (equilibrium stability over 12 epochs, demand-up/glut-down trajectories, bound clamping, stale-epoch rejection, hot-market gating of attested claims) + the §4.3 replay test now drives `Underfunded`/success via real hot/cold epochs instead of a hardcoded cost; `domain.rs` coverage 97.32% lines / 98.39% regions (workspace 83.06% / 84.87%, 263 tests).
+- [x] **Gossip Partition & Network Merge State Reconciliation**
   - Implement deterministic state reconciliation when two isolated P2P network clusters merge (gossip sync).
   - Compute weighted moving averages for domain base costs and merge domain ownership registries using Conflict-Free Replicated Data Types (CRDTs).
+  - Implemented in `pwb-node/src/domain` (std only): `RollingPricing::merge` unions per-epoch observations (per-field maximum on shared epochs, so re-gossiping the same window never inflates demand/supply), keeps the most recent `PRICING_WINDOW` epochs, and takes the maximum observed base cost on either side — commutative, associative, idempotent. `DomainRegistry::merge` resolves conflicting claims last-writer-wins by `registered_at_epoch` (owner public key bytes break ties), takes the maximum per-owner claimed spend (a spend is never undone), unions the voucher spend log, and merges rolling pricing. `VoucherSpendLog::merge` in `pwb-core::crypto` unions spent-token sets; new `Clone`/`PartialEq`/`Eq` derives on `DomainRecord`, `DomainRegistry`, `RollingPricing`, `VoucherSpendLog`.
+  - Tests: 7 new `domain::tests` (merge keeps domains unique to each side, higher-epoch LWW conflict, same-epoch tie-break by owner, claimed-spend max and idempotency, merge takes max price, unioned epoch history, commutative + idempotent) + 1 `blind::tests` (merged spend log blocks double redemption of both partitions' vouchers). CLI demo in `pwb-node` main.rs: two clusters merge, the contested domain resolves deterministically, merged base cost = max of both partitions.
+  - Verified: 345 workspace tests pass (was 258), `cargo fmt --all --check` clean, `cargo clippy --workspace --all-targets` 0 warnings, coverage 82.71% → 87.28% lines / 88.53% regions (`domain.rs` 98.30%, `blind.rs` 97.15%).
 
 ---
 
 ## 6. Testing, Validation & Verification
 
-- [ ] **Unit & Integration Tests**
+- [x] **Unit & Integration Tests**
   - Write test suite in `pwb-core` covering onion encryption/decryption layers and dummy hop generation.
   - Test peer discovery via mock UDP sockets and link/QR payload parsers.
   - Test credit neighborhood threshold signature verification and domain claim spending.
   - Test gossip partition merge algorithms for rolling average domain prices.
-- [ ] **Live Workspace Verification**
+- [x] **Live Workspace Verification**
   - Run `cargo test --workspace` and `cargo check --workspace` to ensure clean build across all crates (`pwb-core`, `pwb-node`, `pwb-browser`, `pwb-web`).
