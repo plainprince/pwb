@@ -72,10 +72,19 @@ This document outlines the architectural refactoring and implementation roadmap 
     - CLI URI handler in `pwb-browser/src/main.rs`: when the positional argument parses as a connection link, the binary launches a `NodeEngine`, calls `launch_connection`, and reports the registered peer.
     - CLI `--connect <link>` flag in `pwb-node/src/main.rs`: accepts a connection link after `--connect` / `-c`, launches the same flow, prints the connected peer.
     - Help text in both binaries updated with `plain://nodes.plain?connect=...` example.
-- [ ] **QR Code Encoding & Scanning Support**
+- [x] **QR Code Encoding & Scanning Support**
   - Add QR code binary generator and string payload parser for out-of-band node pairing (mobile/desktop peer exchange).
-- [ ] **Distributed Kademlia / DHT Peer Table**
+    - Implemented in `pwb-core::qr`: from-scratch byte-mode QR encoder for versions 1..=10 at error-correction level M (no new dependencies) — spec tables for Reed–Solomon block layouts, alignment centres, BCH(15,5)/BCH(18,6) format & version codes, the eight data masks, and ISO penalty rules 1–4 (best mask wins). `QrCode::encode`/`encode_bytes`/`encode_connection_link` pick the smallest fitting version (level-M capacities 14..=213 bytes, 16-bit count field from v10); renderers: `bitmap()` (binary generator incl. `QUIET_ZONE=4`), `to_svg()`, `to_ascii()`.
+    - Correctness pinned by golden spec vectors (all 8 level-M format strings, v7/v10 version-info strings), the free-module-count identity (non-function cells == total-codeword bits + remainder bits, versions 1–10), block-table consistency, and a test-only full decoder that re-derives the function mask, verifies both format copies' BCH remainder (level M + mask), re-checks version info, streams the zigzag order back, de-interleaves, validates every block's Reed–Solomon remainder, and parses the byte-mode segment — roundtrips across v1/v5/v7/v8/v9/v10, UTF-8 payloads, and IPv4/IPv6 connection links.
+    - `qr::parse_pairing_payload` maps a scanned string back to `(SocketAddr, PublicKey)`: canonical `plain://nodes.plain?connect=...` links plus the compact `<ip:port>/<hex>` form (whitespace-tolerant); garbage/short keys/bad addresses → `None`.
+    - CLI: `pwb-node` prints a scan-to-pair ASCII QR of its own connection link, and `--connect` accepts either a URI or a scanned QR payload (canonical parse first, payload fallback, typed `InvalidConnectionLink` otherwise).
+    - Tests: 16 new `qr::tests::*`; `qr.rs` coverage 99.61% lines / 99.80% regions.
+- [x] **Distributed Kademlia / DHT Peer Table**
   - Maintain peer routing tables with ping/pong health checks and latency-weighted bucket selection.
+    - Implemented in `pwb-core::dht`: classic XOR-metric Kademlia table over 256-bit `NodeId`s (BLAKE3 of the Ed25519 pubkey) — 256 k-buckets (`K_BUCKET_SIZE=8`), bucket index = common-prefix length with the local ID, head = least-recently-seen / tail = most-recent, `closest()` = XOR-distance-ordered contacts.
+    - Ping/pong health checks are a closed loop over caller-supplied time (no sleeps/sockets; transport stays with the caller): `update` never silently displaces a live node — a full bucket surfaces its LRU head as `UpdateOutcome::PingLeastRecent`; the caller pings and answers with `mark_alive` (pong: refresh, move to tail, EWMA RTT sample α=1/8, reset failures) or `mark_failed` (timeout: after `MAX_FAILURES=3` consecutive failures the entry is evicted and the pending contact re-inserts). `stale_for_check` returns entries quiet for `STALE_AFTER=900s` for proactive ping sweeps.
+    - Latency-weighted bucket selection: `select_contacts` walks buckets outward from the target's bucket (Kademlia nearest-first order) and samples without replacement with weight ∝ 1/(1+RTT-ms) (`select_contacts_with` takes an RNG for deterministic tests/simulations).
+    - Tests: 14 new `dht::tests::*` — XOR/prefix metrics, tail-move refresh, LRU-ping surface + full pong/pong-replacement cycle, stale sweep threshold, capacity invariant, outward candidate walk, seeded 500-draw statistical weighting (1ms vs 900ms peers), and a real UDP ping/pong over loopback sockets whose measured RTT seeds the table and EWMA. `dht.rs` coverage 99.39% lines / 99.71% regions.
 
 ---
 

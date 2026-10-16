@@ -109,20 +109,32 @@ fn main() {
     }
 
     // Display the connection link for this node
-    println!("\n[Network] Your connection link:");
-    println!(
-        "  {}",
-        pwb_core::net::NodeEngine::build_connection_link(
-            std::net::SocketAddr::new("127.0.0.1".parse().unwrap(), 8080),
-            identity.public_key(),
-        )
+    let own_link = pwb_core::net::NodeEngine::build_connection_link(
+        std::net::SocketAddr::new("127.0.0.1".parse().unwrap(), 8080),
+        identity.public_key(),
     );
+    println!("\n[Network] Your connection link:");
+    println!("  {}", own_link);
 
-    // Launch a connection to a peer described by a `nodes.plain` link (TODO §3.2).
-    if let Some(link) = connect_target {
+    // Render the link as a scannable QR code (TODO §3.3).
+    match pwb_core::qr::QrCode::encode(&own_link) {
+        Ok(qr) => {
+            println!(
+                "\n[Network] Scan-to-pair QR (version {}, mask {}):",
+                qr.version(),
+                qr.mask()
+            );
+            println!("{}", qr.to_ascii());
+        }
+        Err(e) => eprintln!("[Network] QR encode failed: {}", e),
+    }
+
+    // Launch a connection to a peer described by a `nodes.plain` link or a
+    // scanned QR pairing payload (TODO §3.2/§3.3).
+    if let Some(target) = connect_target {
         println!(
             "\n[Network] Launching connection to peer via link: {}",
-            link
+            target
         );
         let config = pwb_core::net::NodeConfig {
             listen_addr: std::net::SocketAddr::new("127.0.0.1".parse().unwrap(), 0),
@@ -132,7 +144,16 @@ fn main() {
             heartbeat_interval: std::time::Duration::from_secs(30),
         };
         let engine = pwb_core::net::NodeEngine::new(config);
-        match engine.launch_connection(&link) {
+        let result = engine.launch_connection(&target).or_else(|_| {
+            // Scanned QR payloads may use the compact `<ip:port>/<hex>` form.
+            match pwb_core::qr::parse_pairing_payload(&target) {
+                Some((addr, key)) => engine.connect_to(addr, key),
+                None => Err(pwb_core::net::NetworkError::InvalidConnectionLink(
+                    target.clone(),
+                )),
+            }
+        });
+        match result {
             Ok(peer) => println!(
                 "[Network] Connected to peer {} at {} (reputation 0)",
                 peer.public_key, peer.address

@@ -18,14 +18,21 @@
 //!                 connection-link codec.
 //!   discovery   — local peer discovery: signed LAN beacons over UDP
 //!                 broadcast + IP multicast (§3.1).
+//!   qr          — QR code encoding (byte mode v1-10, level M) and pairing
+//!                 payload parsing for out-of-band node exchange (§3.3).
+//!   dht         — Kademlia routing table: XOR-metric k-buckets with
+//!                 ping/pong health checks and latency-weighted contact
+//!                 selection (§3).
 //!   components  — reusable UI component primitives (sidebars, navbars, tabs)
 //!                 shared by both `pwb-web` and `pwb-browser`.
 
 pub mod components;
 pub mod crypto;
+pub mod dht;
 pub mod discovery;
 pub mod net;
 pub mod onion;
+pub mod qr;
 pub mod spec;
 pub mod system;
 pub mod wire;
