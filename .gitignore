@@ -4,3 +4,7 @@
 # editor / OS cruft
 *.rs.bk
 .DS_Store
+
+# generated demo artifacts (regenerate with `cargo run -p pwb-web`)
+/demo.pwb
+/demo_site/

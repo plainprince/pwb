@@ -63,18 +63,212 @@ fn main() {
                         "[Verifier] Peer verification check: {}",
                         if is_valid { "PASSED" } else { "FAILED" }
                     );
+                    // Mint credits for verified network services (TODO §4.1):
+                    // indexing the bundle, serving a requester query, and
+                    // relaying onion cells — each receipt is signed and
+                    // re-checkable, and every credit is backed by recorded
+                    // exchange traffic (anti-ASIC floor).
+                    let mut minter =
+                        pwb_node::credit::CreditMinter::with_default_policy(identity.public_key());
+                    let now = std::time::Instant::now();
+                    minter.record_traffic(bundle_bytes.len() as u64 + 16 * 1024);
 
-                    // Claim user domain under .pwb TLD (security enforced: .plain is reserved)
-                    let user_domain = "welcome.pwb";
-                    if identity.spend_credits(DOMAIN_CLAIM_COST).is_ok()
-                        && registry
-                            .register(user_domain, content_id, identity.public_key())
-                            .is_ok()
+                    let mut index_receipt = None;
+                    if let Some(receipt) =
+                        pwb_node::credit::IndexReceipt::sign(&identity.keypair, &bundle_bytes)
                     {
-                        println!(
-                            "[Domain] Claimed user domain '{}' -> {} (Spent {} credits)",
-                            user_domain, content_id, DOMAIN_CLAIM_COST
-                        );
+                        match minter.mint_index(&receipt, &bundle_bytes, now) {
+                            Ok(amount) => {
+                                identity.add_credits(amount);
+                                println!(
+                                    "[Credit] Indexing work verified: +{amount} credits ({} earned this session)",
+                                    minter.total_earned()
+                                );
+                            }
+                            Err(e) => println!("[Credit] Index mint refused: {e}"),
+                        }
+                        index_receipt = Some(receipt);
+                    }
+
+                    // Serve the demo query with a requester challenge.
+                    let challenge = [0xA7; 32];
+                    minter.issue_challenge(challenge, now);
+                    let query_receipt = pwb_node::credit::QueryReceipt::sign(
+                        &identity.keypair,
+                        "PlainWeb",
+                        vec![content_id],
+                        challenge,
+                    );
+                    match minter.mint_query(&query_receipt, now) {
+                        Ok(amount) => {
+                            identity.add_credits(amount);
+                            println!("[Credit] Query served to requester: +{amount} credits");
+                        }
+                        Err(e) => println!("[Credit] Query mint refused: {e}"),
+                    }
+
+                    // Relay a window of onion cells.
+                    for i in 0..35u8 {
+                        minter.relay_cell(&[i; 1024]);
+                    }
+                    let relay_receipt = minter
+                        .seal_relay_window(&identity.keypair)
+                        .expect("cells were relayed");
+                    match minter.mint_relay(&relay_receipt, now) {
+                        Ok(amount) => {
+                            identity.add_credits(amount);
+                            println!("[Credit] Relay window sealed: +{amount} credits");
+                        }
+                        Err(e) => println!("[Credit] Relay mint refused: {e}"),
+                    }
+
+                    // Claim user domain under .pwb TLD via the k-of-N
+                    // attested path (TODO §4.2): a simulated local
+                    // neighborhood of attestors independently re-verifies
+                    // each signed receipt, records the earnings on their
+                    // hash-chained ledgers, and attests this node's balance.
+                    // The registry accepts the claim only against the quorum
+                    // — never a self-declared balance.
+                    let user_domain = "welcome.pwb";
+                    let epoch = 1u64;
+                    let policy = minter.policy().clone();
+                    let attestor_keys: Vec<pwb_core::crypto::Keypair> = (0..3)
+                        .map(|_| pwb_core::crypto::Keypair::generate())
+                        .collect();
+                    let mut attestations = Vec::new();
+                    let mut attestor_ledgers = Vec::new();
+                    for key in &attestor_keys {
+                        let mut attester = pwb_node::ledger::AttestorLedger::new(key.public);
+                        let mut recorded = true;
+                        if let Some(receipt) = &index_receipt {
+                            recorded &= attester
+                                .record_index_earned(receipt, &bundle_bytes, epoch, &policy)
+                                .is_ok();
+                        }
+                        if query_receipt.verify() {
+                            recorded &= attester
+                                .record_earned(
+                                    identity.public_key(),
+                                    epoch,
+                                    policy.query_credits,
+                                    query_receipt.evidence_digest(),
+                                )
+                                .is_ok();
+                        } else {
+                            recorded = false;
+                        }
+                        if relay_receipt.verify() {
+                            let relay_credits =
+                                relay_receipt.bytes * policy.relay_credits_per_kib / 1024;
+                            recorded &= attester
+                                .record_earned(
+                                    identity.public_key(),
+                                    epoch,
+                                    relay_credits,
+                                    relay_receipt.evidence_digest(),
+                                )
+                                .is_ok();
+                        } else {
+                            recorded = false;
+                        }
+                        if recorded {
+                            if let Ok(attestation) =
+                                attester.attest(identity.public_key(), epoch, key)
+                            {
+                                attestations.push(attestation);
+                            }
+                        }
+                        attestor_ledgers.push(attester);
+                    }
+                    match pwb_node::ledger::QuorumCertificate::from_attestations(attestations) {
+                        Ok(certificate) => {
+                            let neighborhood: Vec<_> =
+                                attestor_keys.iter().map(|k| k.public).collect();
+                            match registry.register_attested(
+                                user_domain,
+                                content_id,
+                                &certificate,
+                                DOMAIN_CLAIM_COST,
+                                2,
+                                &neighborhood,
+                            ) {
+                                Ok(()) => println!(
+                                    "[Domain] Claimed '{user_domain}' -> {content_id} via 2-of-3 attestor quorum (attested balance {})",
+                                    certificate.balance
+                                ),
+                                Err(e) => println!("[Domain] Attested claim refused: {e}"),
+                            }
+
+                            // Private claim path (TODO §4.3): withdraw the
+                            // remaining attested credits as a blind voucher
+                            // from attestor 0's ledger — the issuer signs
+                            // blinded requests and never sees the tokens —
+                            // gossip the volume event to the sibling views,
+                            // then redeem the voucher under a fresh pseudonym
+                            // owner for a second domain. The registry sees
+                            // only the bearer token: the claim is unlinkable
+                            // to the earning identity and to the withdrawal.
+                            if !attestor_ledgers.is_empty() {
+                                let mut blind_issuer =
+                                    pwb_node::blind::BlindBalanceIssuer::with_defaults(&[0xB1; 32]);
+                                match pwb_node::blind::withdraw_attested(
+                                    &mut blind_issuer,
+                                    &mut attestor_ledgers[0],
+                                    identity.public_key(),
+                                    epoch,
+                                    DOMAIN_CLAIM_COST,
+                                    1,
+                                ) {
+                                    Ok(receipt) => {
+                                        // Cross-attestor inflation guard: the
+                                        // same spend event (same evidence
+                                        // digest) goes to every sibling view.
+                                        for ledger in &mut attestor_ledgers[1..] {
+                                            let _ = ledger.record_spent(
+                                                identity.public_key(),
+                                                epoch,
+                                                receipt.total,
+                                                receipt.evidence,
+                                            );
+                                        }
+                                        let voucher_key =
+                                            blind_issuer.public_key(DOMAIN_CLAIM_COST).unwrap();
+                                        let binding = pwb_node::blind::IssuerBinding::sign(
+                                            &attestor_keys[0],
+                                            epoch,
+                                            DOMAIN_CLAIM_COST,
+                                            voucher_key,
+                                        );
+                                        let claim = pwb_node::blind::BlindClaim::build(
+                                            &receipt.vouchers[0],
+                                            &binding,
+                                        )
+                                        .expect("voucher ownership");
+                                        // A fresh pseudonym key — not the
+                                        // earning identity — owns the claim.
+                                        let pseudonym =
+                                            pwb_core::crypto::Keypair::generate().public;
+                                        match registry.register_blind(
+                                            "private.pwb",
+                                            content_id,
+                                            pseudonym,
+                                            &claim,
+                                            DOMAIN_CLAIM_COST,
+                                            &neighborhood,
+                                        ) {
+                                            Ok(()) => println!(
+                                                "[Blind] Withdrew {total} credits as an unlinkable voucher (evidence {evidence:02x?}...) and claimed 'private.pwb' under pseudonym {pseudonym} — unlinkable to the earner",
+                                                total = receipt.total,
+                                                evidence = &receipt.evidence[..4],
+                                            ),
+                                            Err(e) => println!("[Blind] Private claim refused: {e}"),
+                                        }
+                                    }
+                                    Err(e) => println!("[Blind] Withdrawal refused: {e}"),
+                                }
+                            }
+                        }
+                        Err(e) => println!("[Domain] No attestor quorum: {e}"),
                     }
                 }
             }
@@ -105,6 +299,12 @@ fn main() {
         println!(
             "\n[Domain Resolver] 'welcome.pwb' resolved to Content ID: {}",
             record.target_content_id
+        );
+    }
+    if let Some(record) = registry.resolve("private.pwb") {
+        println!(
+            "[Domain Resolver] 'private.pwb' resolved to Content ID: {} (owner {})",
+            record.target_content_id, record.owner
         );
     }
 

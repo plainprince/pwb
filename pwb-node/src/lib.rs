@@ -4,9 +4,12 @@
 //! indexes and ranks search queries, verifies peers' work, manages identity,
 //! and handles system domain protocols (`search.plain`, `gossip.plain`, `nodes.plain`, `register.plain`).
 
+pub mod blind;
+pub mod credit;
 pub mod domain;
 pub mod host;
 pub mod identity;
+pub mod ledger;
 pub mod search;
 pub mod system;
 pub mod verifier;

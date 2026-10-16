@@ -193,8 +193,8 @@ impl Drop for DhKeypair {
 /// Bearer secret that defines a blind credit voucher's hidden token.
 ///
 /// The token point is derived from this secret, so the holder can prove
-/// ownership without revealing which issuance produced the voucher.
-#[derive(Clone, Zeroize, ZeroizeOnDrop)]
+/// ownership without revealing it.
+#[derive(Clone, PartialEq, Eq, Zeroize, ZeroizeOnDrop)]
 pub struct VoucherSecret(pub [u8; 32]);
 
 impl VoucherSecret {
@@ -399,6 +399,22 @@ impl BlindVoucherNonce {
     /// Issuer commitment sent to the requester.
     pub fn to_bytes(&self) -> [u8; 32] {
         self.point.compress().to_bytes()
+    }
+
+    /// Reconstruct the public commitment from its 32-byte wire encoding.
+    ///
+    /// The requester side of the protocol only needs the point (to build the
+    /// blinded challenge in [`BlindVoucher::blind_request`]); the secret
+    /// scalar stays with the issuer. The reconstructed nonce carries a
+    /// placeholder scalar and must never be passed to
+    /// [`BlindVoucherIssuer::sign_blind`] — only the issuer's own nonces from
+    /// [`BlindVoucherIssuer::signing_nonce`] may sign.
+    pub fn from_point(point: [u8; 32]) -> Option<Self> {
+        let decompressed = CompressedRistretto(point).decompress()?;
+        Some(BlindVoucherNonce {
+            point: decompressed,
+            nonce: ScalarBytes([0u8; 32]),
+        })
     }
 }
 
@@ -1114,6 +1130,31 @@ mod tests {
             &VoucherBlinding::random(),
         );
         assert!(!thousand_voucher.verify(&public));
+    }
+
+    #[test]
+    fn blind_voucher_nonce_point_roundtrip_is_requester_side() {
+        let issuer = BlindVoucherIssuer::generate();
+        let nonce = issuer.signing_nonce();
+        let point = nonce.to_bytes();
+
+        // The requester reconstructs the commitment from the wire bytes and
+        // can complete blind_request with it.
+        let restored = BlindVoucherNonce::from_point(point).expect("valid point");
+        assert_eq!(restored.to_bytes(), point);
+
+        let secret = VoucherSecret::random();
+        let blinding = VoucherBlinding::random();
+        let public = issuer.public_key();
+        let (state, request) =
+            BlindVoucher::blind_request(5, &secret, &blinding, &public, &restored)
+                .expect("blinded request");
+        let partial = issuer.sign_blind(nonce, &request).expect("sign");
+        let voucher = BlindVoucher::unblind(state, &partial).expect("unblind");
+        assert!(voucher.verify(&public));
+
+        // Garbage bytes do not decompress.
+        assert!(BlindVoucherNonce::from_point([0xff; 32]).is_none());
     }
 
     #[test]

@@ -68,7 +68,9 @@ impl Default for SearchEngine {
     }
 }
 
-fn extract_terms(node: &pwb_core::spec::PlainNode, counts: &mut HashMap<String, u32>) {
+/// Extract the indexed term multiset from a node tree — shared with
+/// `credit`'s canonical term hashing (TODO §4.1).
+pub(crate) fn extract_terms(node: &pwb_core::spec::PlainNode, counts: &mut HashMap<String, u32>) {
     if let Some(txt) = &node.text_content {
         for word in txt.split_whitespace() {
             let clean = word.trim_matches(|c: char| !c.is_alphanumeric());
