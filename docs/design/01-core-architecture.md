@@ -18,7 +18,7 @@ two crates.
 
 ### `pwb-core::crypto` — Cryptographic Primitives
 
-- Production keypairs: `Ed25519` for signatures, `X25519` for ECDH key exchange, `BLAKE3` for content hashing/IDs
+- Keypairs: `Ed25519` for signatures, `X25519` for ECDH key exchange, `BLAKE3` for content hashing/IDs
 - Zero-knowledge / blind signature vouchers for credit attestations:
   - Unlinkable Chaum-style blind Schnorr signatures over Ristretto
   - Types: `BlindVoucherIssuer`, `BlindVoucher`, `BlindVoucherPublicKey`, `VoucherSecret`, `VoucherBlinding`

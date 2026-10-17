@@ -1,6 +1,6 @@
 # Contributing to PlainWeb (pwb)
 
-PlainWeb is a serverless, onion-inspired web stack written in Rust
+PlainWeb is a serverless web stack written in Rust
 (`pwb-core` / `pwb-web` / `pwb-browser` / `pwb-node`). Contributions are
 welcome — bug fixes, features, docs, tests, and protocol clarifications.
 

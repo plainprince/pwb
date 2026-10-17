@@ -2,7 +2,7 @@
 
 ## Problem
 
-The PlainWeb Browser needs to support **browser-like text selection** with:
+The PlainWeb Browser needs to support **text selection** with:
 
 - Visual feedback during selection
 - `Ctrl+C`/`Cmd+C` clipboard copy

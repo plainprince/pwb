@@ -66,7 +66,7 @@ Everything is validated on loopback / tiny clusters. Real-world validation:
 
 ## Implemented: Network Join (P2P message transport)
 
-The network is now actually joinable. `pwb-core::net::NodeEngine` runs a full
+P2P message transport is implemented. `pwb-core::net::NodeEngine` runs a full
 UDP transport stack:
 
 - **NodeEngine::start** binds a UDP socket and spawns a sender loop, a

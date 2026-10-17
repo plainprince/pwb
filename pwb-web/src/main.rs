@@ -64,7 +64,7 @@ fn create_demo_site_directory(dir: &str) {
 
     let pml_content = r#"<plain>
     <head>
-        <title>Untrackable Plain Web Demo</title>
+        <title>Plain Web Demo</title>
     </head>
     <view class="hero">
         <text class="heading">Welcome to the PlainWeb!</text>

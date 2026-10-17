@@ -1,0 +1,184 @@
+//! Browser window entry point: bundle loading, devtools mount and event loop startup.
+
+use crate::bundler;
+use std::path::Path;
+
+use crate::context_menu::{self, ContextMenuActions};
+use crate::dom::Dom;
+use crate::js_runtime::{execute_script, DomHandle};
+use crate::render::{SelectionPoint, TextSelection};
+use pwb_core::wire::Bundle;
+
+use std::sync::{Arc, Mutex};
+use winit::event_loop::EventLoop;
+
+use super::app::BrowserApp;
+use super::devtools::DevToolsState;
+
+#[derive(Debug)]
+pub enum PipelineError {
+    Wire(pwb_core::wire::WireError),
+    Io(std::io::Error),
+    Windowing(String),
+}
+
+pub fn run_browser_window(bundle_bytes: &[u8]) -> Result<(), PipelineError> {
+    println!("Decompiling PlainWeb binary bundle...");
+    let bundle = Bundle::deserialize(bundle_bytes).map_err(PipelineError::Wire)?;
+
+    // Debug hooks: `PWB_DEVTOOLS_OPEN=1` starts with devtools open (default: closed);
+    // `PWB_DUMP_PNG=/path` writes the rendered frame to a PNG on every redraw.
+    let devtools_start_open = std::env::var("PWB_DEVTOOLS_OPEN")
+        .map(|v| v == "1")
+        .unwrap_or(false);
+    let dump_png_path = std::env::var("PWB_DUMP_PNG").ok();
+
+    let mut devtools_mounted = false;
+    let mut devtools_root_id = None;
+
+    let dom_handle = DomHandle::new(Dom::from_bundle(&bundle));
+
+    // `localStorage` persists per bundle to `~/.pwb/<bundle-hash>.json`, keyed
+    // by a short hash of the bundle bytes so different sites keep separate
+    // storage. Override with `PWB_STORAGE_DIR` for tests.
+    {
+        let mut hasher = std::collections::hash_map::DefaultHasher::new();
+        use std::hash::Hasher;
+        hasher.write(bundle_bytes);
+        let hash = hasher.finish();
+        let dir = std::env::var("PWB_STORAGE_DIR").unwrap_or_else(|_| {
+            std::env::var("HOME").unwrap_or_else(|_| ".".to_string()) + "/.pwb"
+        });
+        *dom_handle.web.storage_path.borrow_mut() =
+            Some(std::path::PathBuf::from(dir).join(format!("{:016x}.json", hash)));
+    }
+
+    // Load and mount devtools if enabled
+    let devtools_dir = [
+        Path::new("webpages").join("devtools"),
+        Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("webpages")
+            .join("devtools"),
+    ]
+    .into_iter()
+    .find(|p| p.exists());
+
+    if let Some(dir) = devtools_dir {
+        match bundler::bundle_from_dir(&dir) {
+            Ok(devtools_bundle) => {
+                let mut devtools_dom = Dom::from_bundle(&devtools_bundle);
+                // Mark the root so F12 / the close button can find and hide it.
+                devtools_root_id = Some(devtools_dom.root.id);
+                devtools_dom
+                    .root
+                    .attributes
+                    .insert("data-devtools".to_string(), "root".to_string());
+                // Devtools start closed by default: hide the mounted root via
+                // `display: none` (the DOM attribute is the source of truth for the
+                // F12 toggle). `PWB_DEVTOOLS_OPEN=1` overrides for debugging.
+                if !devtools_start_open {
+                    devtools_dom
+                        .root
+                        .attributes
+                        .insert("display".to_string(), "none".to_string());
+                }
+                if let Ok(mut dom) = dom_handle.dom.try_borrow_mut() {
+                    dom.add_child(devtools_dom.root);
+                }
+                devtools_mounted = true;
+                println!("[DevTools] Mounted devtools DOM as child of main document");
+
+                // Run the devtools script so its buttons/tabs register handlers.
+                if let Some(script_bytes) = &devtools_bundle.script_payload {
+                    if let Ok(script_str) = std::str::from_utf8(script_bytes) {
+                        if let Err(e) = execute_script(&dom_handle, script_str) {
+                            eprintln!("[DevTools JS Error] Devtools script failed: {:?}", e);
+                        }
+                    }
+                }
+            }
+            Err(e) => eprintln!("[DevTools] Failed to load devtools bundle: {:?}", e),
+        }
+    } else {
+        eprintln!("[DevTools] Warning: devtools directory not found at webpages/devtools");
+    }
+
+    let devtools_state = Arc::new(Mutex::new(DevToolsState {
+        is_open: devtools_start_open,
+    }));
+
+    // Mirror of the selected text, readable from the (static) context-menu Copy
+    // action without holding the event-loop's `selection` state.
+    let selected_text_shared: Arc<Mutex<String>> = Arc::new(Mutex::new(String::new()));
+    // Result channel from the (static) menu actions back to the event-loop
+    // handler: 0 = nothing, 1 = Copy, 2 = Inspect Element. The actions only
+    // record what was chosen (plus do the clipboard write for Copy); DOM state
+    // changes happen in the handler where `DomHandle` is reachable.
+    let menu_result: Arc<Mutex<u8>> = Arc::new(Mutex::new(0));
+
+    let copy_text = selected_text_shared.clone();
+    let copy_result = menu_result.clone();
+    let inspect_result = menu_result.clone();
+    context_menu::set_actions(ContextMenuActions {
+        on_copy: Box::new(move || {
+            *copy_result.lock().unwrap() = 1;
+            let text = copy_text.lock().unwrap().clone();
+            if text.is_empty() {
+                return;
+            }
+            match arboard::Clipboard::new() {
+                Ok(mut clipboard) => {
+                    if clipboard.set_text(text).is_ok() {
+                        println!("[Clipboard] Copied selection via context menu");
+                    }
+                }
+                Err(e) => eprintln!("[Clipboard] Failed to access clipboard: {}", e),
+            }
+        }),
+        on_inspect: Box::new(move || {
+            *inspect_result.lock().unwrap() = 2;
+            println!("[ContextMenu] Inspect Element chosen");
+        }),
+    });
+
+    if let Some(script_bytes) = &bundle.script_payload {
+        if let Ok(script_str) = std::str::from_utf8(script_bytes) {
+            println!("Executing QuickJS-NG PlainJS script payload...");
+            if let Err(e) = execute_script(&dom_handle, script_str) {
+                eprintln!("[DevTools JS Error] Execution failed: {:?}", e);
+            }
+        }
+    }
+    let event_loop = EventLoop::new().map_err(|e| PipelineError::Windowing(e.to_string()))?;
+
+    println!(
+        "Opening interactive Skia desktop window (Press F12 or Cmd+Shift+I for devtools.plain)..."
+    );
+    let mut app = BrowserApp {
+        window: None,
+        context: None,
+        surface: None,
+        dom_handle_render: dom_handle.clone(),
+        devtools_state,
+        selected_text_shared,
+        menu_result,
+        devtools_root_id,
+        devtools_mounted,
+        dump_png_path,
+        scroll_y: 0.0,
+        element_scrolls: std::collections::HashMap::new(),
+        selection: TextSelection::default(),
+        current_mouse_pos: SelectionPoint { x: 0.0, y: 0.0 },
+        last_tooltip: None,
+        hovered_title_candidate: None,
+        tooltip_hover_since: None,
+        modifiers_state: winit::keyboard::ModifiersState::default(),
+        resize_state: None,
+        pixmap: tiny_skia::Pixmap::new(1, 1).unwrap(),
+    };
+    event_loop
+        .run_app(&mut app)
+        .map_err(|e| PipelineError::Windowing(e.to_string()))?;
+
+    Ok(())
+}

@@ -1,0 +1,386 @@
+use super::*;
+use crate::crypto::PublicKey;
+use rand::rngs::StdRng;
+use rand::SeedableRng;
+use std::net::{Ipv4Addr, SocketAddr};
+use std::time::{Duration, Instant};
+
+fn key(byte: u8) -> PublicKey {
+    PublicKey([byte; 32])
+}
+
+fn addr(port: u16) -> SocketAddr {
+    SocketAddr::from((Ipv4Addr::LOCALHOST, port))
+}
+
+fn contact(byte: u8, port: u16) -> Contact {
+    Contact::new(key(byte), addr(port))
+}
+
+/// Contact with a crafted ID whose first bit is 1 — relative to the local
+/// ID `[0;32]` that places it deterministically in bucket 0 (BLAKE3
+/// hashes would scatter randomly across buckets).
+fn bucket0_contact(byte: u8, port: u16) -> Contact {
+    let mut bytes = [0u8; 32];
+    bytes[0] = 0x80 | byte;
+    Contact {
+        node_id: NodeId::from_bytes(bytes),
+        ..Contact::new(key(byte), addr(port))
+    }
+}
+
+/// Contact with a fully chosen ID (first two bytes set from `first`).
+fn id_contact(first: u8, port: u16) -> Contact {
+    let mut bytes = [0u8; 32];
+    bytes[0] = first;
+    bytes[1] = first;
+    Contact {
+        node_id: NodeId::from_bytes(bytes),
+        ..Contact::new(key(first), addr(port))
+    }
+}
+
+fn table() -> RoutingTable {
+    RoutingTable::new(NodeId::from_bytes([0u8; 32]))
+}
+
+#[test]
+fn test_node_id_metrics() {
+    let a = NodeId::from_bytes([0u8; 32]);
+    let mut bytes = [0u8; 32];
+    bytes[0] = 0b1000_0000; // differs in the very first bit
+    let b = NodeId::from_bytes(bytes);
+    assert_eq!(a.common_prefix_len(&a), 256);
+    assert_eq!(a.common_prefix_len(&b), 0);
+    assert_eq!(b.common_prefix_len(&a), 0);
+    assert_eq!(a.xor(&a), [0u8; 32]);
+    assert_eq!(a.xor(&b)[0], 0b1000_0000);
+    // XOR is symmetric and the metric is commutative.
+    assert_eq!(a.xor(&b), b.xor(&a));
+
+    bytes[0] = 0b0100_0000; // differs in the second bit only
+    let c = NodeId::from_bytes(bytes);
+    assert_eq!(a.common_prefix_len(&c), 1);
+
+    // Distance ordering matches lexicographic ID order for equal prefixes.
+    let far = NodeId::from_bytes([0xFF; 32]);
+    assert!(a.xor(&c) < a.xor(&far));
+}
+
+#[test]
+fn test_bucket_index_follows_common_prefix() {
+    let table = table();
+    let mut bytes = [0u8; 32];
+    bytes[0] = 0b0100_0000; // shares 1 bit with local [0;32]
+    assert_eq!(table.bucket_index(&NodeId::from_bytes(bytes)), 1);
+    bytes[0] = 0b1000_0000; // shares 0 bits
+    assert_eq!(table.bucket_index(&NodeId::from_bytes(bytes)), 0);
+    bytes[0] = 0b0000_0001; // differs in the 8th bit → shares 7
+    assert_eq!(table.bucket_index(&NodeId::from_bytes(bytes)), 7);
+    bytes[0] = 0;
+    bytes[31] = 0b0000_0001; // differs only in the very last bit
+    assert_eq!(table.bucket_index(&NodeId::from_bytes(bytes)), 255);
+    // The local ID clamps to the last bucket instead of 256.
+    assert_eq!(table.bucket_index(&table.local_id()), 255);
+}
+
+#[test]
+fn test_update_inserts_and_closest_orders_by_xor() {
+    let mut table = table();
+    for i in 1..=5u8 {
+        let outcome = table.update(id_contact(i, 9000 + u16::from(i)), Instant::now());
+        assert_eq!(outcome, UpdateOutcome::Inserted);
+    }
+    assert_eq!(table.len(), 5);
+
+    // IDs [i;i,0…0] all sit in bucket 8; nearest to [0;32] is the
+    // smallest first byte under XOR.
+    let target = NodeId::from_bytes([0u8; 32]);
+    let closest = table.closest(&target, 3);
+    assert_eq!(closest.len(), 3);
+    let first_bytes: Vec<u8> = closest.iter().map(|c| c.node_id.as_bytes()[0]).collect();
+    assert_eq!(first_bytes, vec![1, 2, 3]);
+    // Distances are non-decreasing.
+    let dists: Vec<[u8; 32]> = closest.iter().map(|c| c.node_id.xor(&target)).collect();
+    let mut sorted = dists.clone();
+    sorted.sort();
+    assert_eq!(dists, sorted);
+}
+
+#[test]
+fn test_update_refresh_moves_to_tail_and_resets_failures() {
+    let mut table = table();
+    let now = Instant::now();
+    let mut ids = Vec::new();
+    for i in 1..=3u8 {
+        let c = bucket0_contact(i, 9000);
+        ids.push(c.node_id);
+        table.update(c, now);
+    }
+    // Age the first entry so the tail move is observable.
+    table.mark_failed(&ids[0]);
+    assert_eq!(
+        table.iter().map(|c| c.failures).collect::<Vec<_>>(),
+        vec![1, 0, 0]
+    );
+
+    assert_eq!(
+        table.update(bucket0_contact(1, 9111), now + Duration::from_secs(1)),
+        UpdateOutcome::Refreshed
+    );
+    let order: Vec<NodeId> = table.iter().map(|c| c.node_id).collect();
+    assert_eq!(
+        order,
+        vec![ids[1], ids[2], ids[0]],
+        "refreshed contact moves to tail"
+    );
+    assert_eq!(table.iter().last().unwrap().failures, 0);
+    assert_eq!(table.iter().last().unwrap().address, addr(9111));
+    assert_eq!(table.len(), 3);
+}
+
+#[test]
+fn test_update_rejects_self() {
+    let mut table = table();
+    let mut self_contact = contact(0, 1);
+    self_contact.node_id = table.local_id();
+    assert_eq!(
+        table.update(self_contact, Instant::now()),
+        UpdateOutcome::RejectedSelf
+    );
+    assert_eq!(table.len(), 0);
+}
+
+#[test]
+fn test_full_bucket_surfaces_lru_for_ping() {
+    let mut table = table();
+    let now = Instant::now();
+    for i in 1..=K_BUCKET_SIZE as u8 {
+        table.update(bucket0_contact(i, 9000), now);
+    }
+    // Every crafted contact lands in bucket 0 (first bit set).
+    assert_eq!(table.buckets[0].len(), K_BUCKET_SIZE);
+
+    let outcome = table.update(bucket0_contact(99, 9999), now + Duration::from_secs(1));
+    let UpdateOutcome::PingLeastRecent { least_recent } = outcome else {
+        panic!("full bucket must surface the head, got {outcome:?}");
+    };
+    // Head = least-recently seen = the first inserted contact.
+    assert_eq!(least_recent.public_key, key(1));
+    assert_eq!(table.len(), K_BUCKET_SIZE, "pending contact not stored yet");
+}
+
+#[test]
+fn test_ping_pong_replacement_cycle() {
+    let mut table = table();
+    let t0 = Instant::now();
+    for i in 1..=K_BUCKET_SIZE as u8 {
+        table.update(bucket0_contact(i, 9000), t0);
+    }
+    let pending = bucket0_contact(99, 9999);
+    let pending_id = pending.node_id;
+    let UpdateOutcome::PingLeastRecent { least_recent } = table.update(pending, t0) else {
+        panic!("bucket must be full");
+    };
+
+    // Pong path: the head answers, folds its RTT, and stays.
+    let lru_id = least_recent.node_id;
+    assert!(table.mark_alive(&lru_id, Some(Duration::from_millis(7)), t0));
+    assert_eq!(table.iter().last().unwrap().node_id, lru_id);
+    assert_eq!(
+        table.iter().last().unwrap().rtt,
+        Duration::from_millis(219), // 250 − 250/8 + 7/8
+    );
+
+    // Timeout path: head never answers → evicted after max_failures,
+    // then the pending contact fits.
+    assert!(table.mark_failed(&lru_id).is_none());
+    assert!(table.mark_failed(&lru_id).is_none());
+    let evicted = table.mark_failed(&lru_id);
+    assert!(evicted.is_some(), "head evicted on final failure");
+    assert!(!table.contains(&lru_id));
+    assert_eq!(table.len(), K_BUCKET_SIZE - 1);
+    assert_eq!(
+        table.update(bucket0_contact(99, 9999), t0 + Duration::from_secs(2)),
+        UpdateOutcome::Inserted
+    );
+    assert_eq!(table.len(), K_BUCKET_SIZE);
+    assert!(table.contains(&pending_id));
+}
+
+#[test]
+fn test_stale_for_check_threshold() {
+    let mut table = table();
+    let t0 = Instant::now();
+    let first = bucket0_contact(1, 9000);
+    let first_id = first.node_id;
+    table.update(first, t0);
+    // The second entry is refreshed right at the threshold boundary.
+    table.update(bucket0_contact(2, 9000), t0 + STALE_AFTER);
+
+    let soon = t0 + STALE_AFTER - Duration::from_secs(1);
+    assert!(table.stale_for_check(soon).is_empty());
+
+    // Only the first entry has crossed the quiet threshold.
+    let later = t0 + STALE_AFTER + Duration::from_secs(1);
+    let mut stale = table.stale_for_check(later);
+    assert_eq!(stale.len(), 1);
+    assert_eq!(stale.pop().unwrap().public_key, key(1));
+
+    // A pong brings it back out of the sweep set.
+    assert!(table.mark_alive(&first_id, None, later));
+    assert!(table.stale_for_check(later).is_empty());
+}
+
+#[test]
+fn test_mark_alive_and_remove_unknown_ids() {
+    let mut table = table();
+    let ghost = NodeId::from_public_key(&key(42));
+    assert!(!table.mark_alive(&ghost, Some(Duration::from_millis(1)), Instant::now()));
+    assert!(table.mark_failed(&ghost).is_none());
+    assert!(table.remove(&ghost).is_none());
+    assert!(table.is_empty());
+
+    table.update(contact(42, 9000), Instant::now());
+    assert!(table.contains(&ghost));
+    assert!(table.remove(&ghost).is_some());
+    assert!(!table.contains(&ghost));
+}
+
+#[test]
+fn test_bucket_never_exceeds_capacity() {
+    let mut table = table();
+    let now = Instant::now();
+    for i in 0..64u8 {
+        table.update(bucket0_contact(i, 9000), now);
+        assert!(table.buckets[0].len() <= K_BUCKET_SIZE);
+    }
+    assert_eq!(table.len(), K_BUCKET_SIZE);
+}
+
+#[test]
+fn test_candidates_walk_buckets_outward() {
+    let mut table = table();
+    let t0 = Instant::now();
+    // X shares 1 bit with local [0;32] → bucket 1; Y shares 0 → bucket 0.
+    let mut x_bytes = [0u8; 32];
+    x_bytes[0] = 0b0100_0000;
+    let mut y_bytes = [0u8; 32];
+    y_bytes[0] = 0b1000_0000;
+    let x = Contact::new(key(7), addr(1));
+    let x = Contact {
+        node_id: NodeId::from_bytes(x_bytes),
+        ..x
+    };
+    let y = Contact::new(key(8), addr(2));
+    let y = Contact {
+        node_id: NodeId::from_bytes(y_bytes),
+        ..y
+    };
+    table.update(y, t0);
+    table.update(x, t0);
+
+    // Target in bucket 1: X (same bucket) must be gathered before Y.
+    let target = NodeId::from_bytes(x_bytes);
+    let candidates = table.candidates_for(&target, 2);
+    assert_eq!(candidates.len(), 2);
+    assert_eq!(candidates[0].node_id, NodeId::from_bytes(x_bytes));
+    assert_eq!(candidates[1].node_id, NodeId::from_bytes(y_bytes));
+}
+
+#[test]
+fn test_latency_weighted_selection_prefers_fast_nodes() {
+    let mut table = table();
+    let t0 = Instant::now();
+    // One fast responder and three slow ones, all in bucket 0 so the
+    // candidate walk gathers the whole set.
+    let mut fast = bucket0_contact(1, 9001);
+    fast.rtt = Duration::from_millis(1);
+    table.update(fast, t0);
+    for i in 2..=4u8 {
+        let mut slow = bucket0_contact(i, 9000 + u16::from(i));
+        slow.rtt = Duration::from_millis(900);
+        table.update(slow, t0);
+    }
+
+    let target = table.local_id();
+    let mut rng = StdRng::seed_from_u64(7);
+    let mut fast_wins = 0;
+    for _ in 0..500 {
+        let picked = table.select_contacts_with(&target, 1, &mut rng);
+        assert_eq!(picked.len(), 1);
+        if picked[0].rtt < Duration::from_millis(50) {
+            fast_wins += 1;
+        }
+    }
+    // Unweighted would win ~125/500; weighted is >99% at 1ms vs 900ms.
+    assert!(fast_wins > 400, "fast node won {fast_wins}/500 draws");
+}
+
+#[test]
+fn test_select_respects_count_and_uniqueness() {
+    let mut table = table();
+    let t0 = Instant::now();
+    for i in 1..=10u8 {
+        table.update(contact(i, 9000), t0);
+    }
+    let target = table.local_id();
+    let mut rng = StdRng::seed_from_u64(3);
+    let picked = table.select_contacts_with(&target, 4, &mut rng);
+    assert_eq!(picked.len(), 4);
+    let unique: std::collections::HashSet<_> = picked.iter().map(|c| c.node_id).collect();
+    assert_eq!(unique.len(), 4, "no duplicates without replacement");
+    // Selecting more than exist returns everyone exactly once.
+    let all = table.select_contacts_with(&target, 64, &mut rng);
+    assert_eq!(all.len(), table.len());
+}
+
+#[tokio::test]
+async fn test_udp_ping_pong_feeds_latency_health_check() {
+    use tokio::net::UdpSocket;
+
+    let a = UdpSocket::bind((Ipv4Addr::LOCALHOST, 0)).await.unwrap();
+    let b = UdpSocket::bind((Ipv4Addr::LOCALHOST, 0)).await.unwrap();
+    let b_addr = b.local_addr().unwrap();
+
+    // Ping.
+    let start = Instant::now();
+    a.send_to(b"ping", b_addr).await.unwrap();
+    let mut buf = [0u8; 8];
+    let (n, from) = b.recv_from(&mut buf).await.unwrap();
+    assert_eq!(&buf[..n], b"ping");
+
+    // Pong.
+    b.send_to(b"pong", from).await.unwrap();
+    let (n, _) = a.recv_from(&mut buf).await.unwrap();
+    let rtt = start.elapsed();
+    assert_eq!(&buf[..n], b"pong");
+
+    // The measured RTT seeds the contact; the table stores it verbatim
+    // on insert and the peer is immediately selectable.
+    let mut table = table();
+    let peer_key = key(9);
+    let mut peer = Contact::new(peer_key, b_addr);
+    peer.rtt = rtt;
+    assert_eq!(table.update(peer, Instant::now()), UpdateOutcome::Inserted);
+
+    let peer_id = NodeId::from_public_key(&peer_key);
+    let stored = table.closest(&peer_id, 1);
+    assert_eq!(stored.len(), 1);
+    assert_eq!(stored[0].rtt, rtt);
+    assert!(
+        rtt < UNKNOWN_RTT,
+        "loopback pong is faster than the placeholder"
+    );
+
+    // Pong refresh path folds a second sample through the EWMA.
+    let sample = Duration::from_millis(3);
+    assert!(table.mark_alive(&peer_id, Some(sample), Instant::now()));
+    let folded = table.closest(&peer_id, 1)[0].rtt;
+    assert!(folded < rtt + sample, "EWMA moves toward the new sample");
+
+    // And the latency-weighted selector returns the only peer.
+    let picked = table.select_contacts(&NodeId::from_bytes([0xFF; 32]), 4);
+    assert_eq!(picked.len(), 1);
+    assert_eq!(picked[0].node_id, peer_id);
+}

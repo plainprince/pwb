@@ -1,6 +1,6 @@
 <plain>
     <head>
-        <title>Untrackable Plain Web Demo</title>
+        <title>Plain Web Demo</title>
     </head>
     <view class="hero">
         <text class="heading">Welcome to the PlainWeb!</text>

@@ -50,7 +50,7 @@ the viewport height**.
 | **Thumb colour** | `rgba(120, 120, 140, 1.0)` | Visible but not distracting |
 | **Thumb height** | `(viewport / content) * viewport`, min 30 px | Proportional to content ratio |
 | **Thumb Y** | `(scroll_y / max_scroll) * (track - thumb)` | Linear mapping of scroll state |
-| **Position** | Right edge of viewport | Standard browser convention |
+| **Position** | Right edge of viewport | Conventional scrollbar position |
 
 #### Implementation
 

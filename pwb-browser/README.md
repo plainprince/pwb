@@ -1,6 +1,6 @@
 # pwb-browser — layer 2: runtime & tiny_skia renderer
 
-`pwb-browser` opens a `.pwb` binary bundle, decompiles it back into a Plain DOM AST, applies Plain Stylesheets (`.pss`) rules, executes PlainJS (`.pjs`) script payloads in the QuickJS-NG engine with `document` bindings, and renders the webpage directly in a native desktop window.
+`pwb-browser` opens a `.pwb` binary bundle, decompiles it back into a Plain DOM AST, applies Plain Stylesheets (`.pss`) rules, executes PlainJS (`.pjs`) script payloads in the QuickJS-NG engine with `document` bindings, and renders the page directly in a native desktop window.
 
 ## Renderer & typography features
 
@@ -10,13 +10,13 @@
 - **Dynamic content sizing**: Buttons and text views compute bounding boxes from text metrics and padding rather than fixed wide blocks.
 - **PlainJS runtime (`.pjs`)**: QuickJS-NG embedded engine executing `.pjs` scripts with custom `document` DOM manipulation APIs.
 - **Content-bound scrolling**: Scroll position capped to content height with a visual scrollbar.
-- **Text selection & clipboard**: Browser-like text selection with `Ctrl+C`/`Cmd+C` clipboard copy via `arboard`.
+- **Text selection & clipboard**: Text selection with `Ctrl+C`/`Cmd+C` clipboard copy via `arboard`.
 
 ## Native system domains
 
 | System domain | Protocol service role |
 |---------------|----------------------|
-| **`search.plain`** | Decentralized search engine API & dynamic interface handler (`plain://search?q=query`). Every node participates in indexing and ranking. |
+| **`search.plain`** | Decentralized search engine API & dynamic interface handler (`plain://search?q=query`). Nodes participate in indexing and ranking. |
 | **`devtools.plain`** | Built-in Developer Tools DOM & Style Inspector (`F12` or `Cmd/Ctrl + Shift/Opt + I/J`). |
 | **`register.plain`** | Sparse credit domain registry dashboard (`plain://register.plain`). Claims domain names mapped to Content IDs. |
 | **`gossip.plain`** | P2P gossip announcements for artifact propagation across peers. |
@@ -54,9 +54,9 @@ btn2.addEventHandler("contextmenu", function(evt) {
 });
 ```
 
-## JavaScript web APIs
+## Script globals
 
-The page script (and devtools) get browser-style globals backed by Rust:
+The page script (and devtools) get these globals, backed by Rust:
 
 - `fetch(url, {method, headers, body})` — async HTTP on a background thread; returns a Promise with `ok`, `status`, `statusText`, `headers`, `text()`, `json()`, `arrayBuffer()`. CORS is not enforced by default; build with `--features strict-cors` to require `Access-Control-Allow-Origin: *` on cross-origin responses.
 - `setTimeout` / `setInterval` / `clearTimeout` / `clearInterval` — driven by the winit event loop.
@@ -89,10 +89,9 @@ cargo run -p pwb-browser -- --help
 
 ## Documentation
 
-Detailed design decisions and architecture documentation are in the [`docs/`](docs/) folder:
+Detailed design decisions and architecture documentation live in the [`docs/`](../docs/) folder. Browse everything from the [docs index](../docs/README.md):
 
-- [Architecture Overview](docs/architecture.md) — High-level design and components
-- [URI Resolution & `file.pwb`](docs/uri-resolution.md) — How local file access and domain resolution work
-- [Scrolling & Viewport](docs/scrolling-viewport.md) — Content-bound scrolling and the visual scrollbar
-- [Text Selection & Clipboard](docs/text-selection.md) — Browser-like text selection
-- [Building & Running](docs/development.md) — Setup and usage instructions
+- [Protocol Reference](../docs/protocol.md) — pinned wire/onion/discovery constants and the `.plain` security rule.
+- [§1 Core Architecture](../docs/design/01-core-architecture.md) — the shared `pwb-core::net::NodeEngine` both this browser and `pwb-node` instantiate.
+- [§2 Onion Routing & Encryption](../docs/design/02-onion-routing.md) — fixed-size cells, path rules, and cover traffic.
+- [§3 Decentralized Node Discovery](../docs/design/03-node-discovery.md) — beacons, `plain://nodes.plain?connect=...` links, and QR pairing.

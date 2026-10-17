@@ -7,7 +7,7 @@
             <view class="chip"><text>{label}</text></view>
         </component>
         <text class="title">Welcome to PlainWeb</text>
-        <text class="subtitle">A plain, untrackable web — built from PML, PSS, and JS.</text>
+        <text class="subtitle">A plain web — built from PML, PSS, and JS.</text>
         <view class="card">
             <text class="card-title">Right-click the button below</text>
             <text class="card-hint">A context menu handler shows new text and calls preventDefault() to suppress the native menu.</text>

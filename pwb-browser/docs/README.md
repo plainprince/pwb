@@ -10,7 +10,7 @@ Welcome to the PlainWeb Browser documentation. This directory contains detailed 
 ### Feature-Specific Design
 - [URI Resolution & `file.pwb`](uri-resolution.md) - Local file access and domain resolution
 - [Scrolling & Viewport](scrolling-viewport.md) - Content-bound scrolling and visual scrollbar
-- [Text Selection & Clipboard](text-selection.md) - Browser-like text selection and copy
+- [Text Selection & Clipboard](text-selection.md) - Text selection and copy
 
 ### Development
 - [Building & Running](development.md) - Setup and usage instructions

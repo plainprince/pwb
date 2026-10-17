@@ -1,10 +1,10 @@
 # Text Selection System Update
 
 ## Problem
-The previous text selection system used box selection, where clicking and dragging would select a rectangular area based on mouse position. This is not how normal browsers work - users expect text range selection like in any standard web browser.
+The previous text selection system used box selection, where clicking and dragging would select a rectangular area based on mouse position. Users expect text range selection.
 
 ## Solution
-Implemented proper text range selection that works like standard browsers:
+Implemented proper text range selection:
 
 ### Changes Made
 

@@ -12,3 +12,7 @@ and compiles them into a single, compact, losslessly compressed binary **`.pwb`*
 ```sh
 cargo run -p pwb-web -- <site_directory> [output.pwb]
 ```
+
+## Documentation
+
+The `spec` and `wire` formats this layer compiles against are defined by the [`pwb-core` shared primitives](../pwb-core/README.md). For the protocol constants and full design set, browse the [documentation index](../docs/README.md) — start with the [Protocol Reference](../docs/protocol.md).

@@ -48,7 +48,7 @@ history is attested and stored by $N$ deterministic peer nodes
 - `record_index_earned` re-verifies the §4.1 index receipt end-to-end (signature, content id, canonical term hash) against the actual bundle bytes before extending the chain
 - `attest` signs a `BalanceAttestation` (subject, epoch, balance, chain head) with the attestor's key
 
-#### Threshold signatures ($k$-of-$N$)
+#### Quorum certificates ($k$-of-$N$)
 
 `QuorumCertificate` aggregates $k$ attestations over one identical statement;
 `verify` enforces:
