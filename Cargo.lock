@@ -2182,6 +2182,7 @@ version = "0.0.0"
 dependencies = [
  "pwb-core",
  "pwb-web",
+ "tokio",
 ]
 
 [[package]]

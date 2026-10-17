@@ -2,7 +2,7 @@
 name = "pwb-web"
 version = "0.0.0"
 edition = "2021"
-license = "MIT OR Apache-2.0"
+license = "GPL-3.0-only"
 description = "PlainWeb layer 1: author, parse, bundle, and losslessly compress sites into plain artifacts."
 
 [lib]

@@ -6,6 +6,7 @@
 
 use blake3;
 use ed25519_dalek::{Signature as Ed25519Signature, Signer, SigningKey, Verifier, VerifyingKey};
+use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
 use std::fmt;
 
@@ -19,7 +20,7 @@ use x25519_dalek::{PublicKey as X25519PublicKey, StaticSecret};
 use zeroize::{Zeroize, ZeroizeOnDrop};
 
 /// 256-bit Identity Public Key (Ed25519).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct PublicKey(pub [u8; 32]);
 
 impl PublicKey {
@@ -70,6 +71,28 @@ impl Keypair {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Signature(pub [u8; 64]);
 
+impl Serialize for Signature {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.serialize_str(&self.to_hex())
+    }
+}
+
+impl<'de> Deserialize<'de> for Signature {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let s = String::deserialize(deserializer)?;
+        let bytes = hex::decode(&s).map_err(serde::de::Error::custom)?;
+        if bytes.len() != 64 {
+            return Err(serde::de::Error::invalid_length(
+                bytes.len(),
+                &"64 hex bytes (32-byte Ed25519 signature)",
+            ));
+        }
+        let mut arr = [0u8; 64];
+        arr.copy_from_slice(&bytes);
+        Ok(Signature(arr))
+    }
+}
+
 impl Signature {
     /// Verify a signature against the public key and message.
     pub fn verify(&self, public: &PublicKey, message: &[u8]) -> bool {
@@ -96,7 +119,7 @@ impl Signature {
 }
 
 /// 256-bit Content Digest / Hash (BLAKE3/SHA256).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct ContentId(pub [u8; 32]);
 
 impl ContentId {

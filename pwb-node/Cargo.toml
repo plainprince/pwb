@@ -2,7 +2,7 @@
 name = "pwb-node"
 version = "0.0.0"
 edition = "2021"
-license = "MIT OR Apache-2.0"
+license = "GPL-3.0-only"
 description = "PlainWeb layer 3: a serverless network node — host, search, verify, identity, and system domains."
 
 [lib]
@@ -16,3 +16,4 @@ path = "src/main.rs"
 [dependencies]
 pwb-core = { path = "../pwb-core" }
 pwb-web = { path = "../pwb-web" }
+tokio = { version = "1.0", features = ["full"] }

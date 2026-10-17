@@ -24,10 +24,12 @@ use tokio::sync::mpsc;
 use tokio::time::interval;
 
 use crate::crypto::{ContentId, DhPublicKey, Keypair, PublicKey, Signature};
+use crate::discovery::{DiscoveryConfig, DiscoveryService};
 use crate::onion::{OnionCell, OnionError, CELL_SIZE};
+use serde::{Deserialize, Serialize};
 
 /// Wire format representation of a search result.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct SearchResultWire {
     pub content_id: ContentId,
     pub title: String,
@@ -36,7 +38,7 @@ pub struct SearchResultWire {
 }
 
 /// Message protocol framing for PlainWeb P2P communication and System Domain APIs.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum NetworkMessage {
     /// System Domain search.plain API Request.
     SearchQuery { query: String, sender: PublicKey },
@@ -105,6 +107,9 @@ pub trait Transport {
     fn broadcast(&mut self, msg: NetworkMessage) -> Result<(), Self::Error>;
     fn send_to(&mut self, peer: &PublicKey, msg: NetworkMessage) -> Result<(), Self::Error>;
 }
+
+/// A queued outbound datagram: the destination address plus serialized bytes.
+type OutgoingDatagram = (SocketAddr, Vec<u8>);
 
 /// Errors that can occur in network operations.
 #[derive(Debug, Error)]
@@ -246,38 +251,50 @@ pub struct NodeEngine {
     peer_table: Arc<Mutex<HashMap<PublicKey, PeerInfo>>>,
     message_sender: mpsc::UnboundedSender<NetworkMessage>,
     message_receiver: Mutex<Option<mpsc::UnboundedReceiver<NetworkMessage>>>,
+    outgoing_tx: mpsc::UnboundedSender<(SocketAddr, Vec<u8>)>,
+    outgoing_rx: Mutex<Option<mpsc::UnboundedReceiver<OutgoingDatagram>>>,
+    socket: Mutex<Option<Arc<UdpSocket>>>,
     running: Arc<Mutex<bool>>,
+    discovery_handle: Mutex<Option<tokio::task::JoinHandle<()>>>,
 }
 
 impl NodeEngine {
     /// Create a new NodeEngine with the given configuration.
     pub fn new(config: NodeConfig) -> Self {
         let (tx, rx) = mpsc::unbounded_channel();
+        let (outgoing_tx, outgoing_rx) = mpsc::unbounded_channel();
 
         Self {
             config,
             peer_table: Arc::new(Mutex::new(HashMap::new())),
             message_sender: tx,
             message_receiver: Mutex::new(Some(rx)),
+            outgoing_tx,
+            outgoing_rx: Mutex::new(Some(outgoing_rx)),
+            socket: Mutex::new(None),
             running: Arc::new(Mutex::new(false)),
+            discovery_handle: Mutex::new(None),
         }
     }
 
     /// Start the network engine (spawns background tasks).
+    ///
+    /// Binds the UDP listen socket, spawns the message receiver loop (deserializes
+    /// inbound `NetworkMessage` datagrams and hands them to the handler), the
+    /// outgoing sender loop (transmits queued datagrams to peers), the peer
+    /// maintenance loop, and a [`DiscoveryService`] that shares this engine's
+    /// peer table so LAN beacons immediately populate the peer table. Bootstrap
+    /// peers are contacted via [`connect_to`](Self::connect_to) once their
+    /// addresses are learned (discovery or an explicit connection link).
     pub async fn start(&self) -> Result<(), NetworkError> {
-        let mut running = self.running.lock().unwrap();
-        if *running {
+        if self.is_running() {
             return Ok(());
         }
-        *running = true;
+        self.set_running();
 
-        // Clone Arc references for async tasks - clone everything we need first
-        let peer_table = Arc::clone(&self.peer_table);
-        let peer_table_for_maintenance = Arc::clone(&self.peer_table);
-        let config = self.config.clone();
-        let config_for_maintenance = self.config.clone();
-        let running_clone = Arc::clone(&self.running);
-        let running_clone2 = Arc::clone(&self.running);
+        // Bind the UDP listen socket for all network I/O.
+        let socket = Arc::new(UdpSocket::bind(self.config.listen_addr).await?);
+        *self.socket.lock().unwrap() = Some(Arc::clone(&socket));
 
         // Take the receiver so we can move it into the async task
         let message_receiver = self
@@ -287,40 +304,117 @@ impl NodeEngine {
             .take()
             .expect("NodeEngine already started");
 
-        // Spawn message handler task
+        // Take the outgoing receiver for the sender loop.
+        let outgoing_rx = self
+            .outgoing_rx
+            .lock()
+            .unwrap()
+            .take()
+            .expect("NodeEngine already started");
+
+        let peer_table = Arc::clone(&self.peer_table);
+        let peer_table_for_maintenance = Arc::clone(&self.peer_table);
+        let peer_table_for_discovery = Arc::clone(&self.peer_table);
+        let config = self.config.clone();
+        let config_for_maintenance = self.config.clone();
+        let running_clone = Arc::clone(&self.running);
+        let running_clone2 = Arc::clone(&self.running);
+        let running_clone3 = Arc::clone(&self.running);
+        let running_clone4 = Arc::clone(&self.running);
+        let message_sender = self.message_sender.clone();
+
+        // Spawn message handler loop (processes inbound messages).
         tokio::spawn(async move {
             Self::message_handler_loop(message_receiver, peer_table, config, running_clone).await;
         });
 
-        // Spawn peer maintenance task
+        // Spawn outgoing sender loop (transmits queued datagrams to peers).
+        tokio::spawn(async move {
+            Self::sender_loop(socket, outgoing_rx, running_clone2).await;
+        });
+
+        // Spawn inbound receiver loop (deserializes datagrams into messages).
+        let receiver_socket = self.socket.lock().unwrap().as_ref().unwrap().clone();
+        tokio::spawn(async move {
+            Self::receiver_loop(receiver_socket, message_sender, running_clone3).await;
+        });
+
+        // Spawn peer maintenance loop.
         tokio::spawn(async move {
             Self::peer_maintenance_loop(
                 peer_table_for_maintenance,
                 config_for_maintenance,
-                running_clone2,
+                running_clone4,
             )
             .await;
         });
+
+        // Start discovery sharing this engine's peer table.
+        let discovery = DiscoveryService::bind_with_table(
+            DiscoveryConfig {
+                listen_port: self.config.listen_addr.port(),
+                bind_port: 0, // ephemeral discovery port so multiple nodes can co-exist
+                beacon_interval: self.config.heartbeat_interval,
+                max_age: crate::discovery::BEACON_MAX_AGE,
+            },
+            self.config.keypair.clone(),
+            peer_table_for_discovery,
+        )
+        .await
+        .map_err(|e| NetworkError::Io(std::io::Error::other(e)))?;
+        let handle = discovery.spawn();
+        *self.discovery_handle.lock().unwrap() = Some(handle);
 
         Ok(())
     }
 
     /// Stop the network engine.
     pub async fn stop(&self) {
-        let mut running = self.running.lock().unwrap();
-        *running = false;
+        *self.running.lock().unwrap() = false;
+        // Abort the discovery background task.
+        if let Some(handle) = self.discovery_handle.lock().unwrap().take() {
+            handle.abort();
+        }
+    }
+
+    /// Whether the engine has been started.
+    fn is_running(&self) -> bool {
+        *self.running.lock().unwrap()
+    }
+
+    /// Mark the engine as running.
+    fn set_running(&self) {
+        *self.running.lock().unwrap() = true;
+    }
+
+    /// This engine's bound UDP socket address (the address peers observe as
+    /// the source of this node's datagrams). Returns `None` before `start()`
+    /// has bound the socket.
+    pub fn local_addr(&self) -> Option<std::io::Result<SocketAddr>> {
+        self.socket.lock().unwrap().as_ref().map(|s| s.local_addr())
     }
 
     /// Send a message to a specific peer.
+    ///
+    /// Serializes the [`NetworkMessage`] as JSON and transmits it to the
+    /// peer's registered UDP address. Also enqueues the message locally so
+    /// the handler loop can process it (preserving existing in-process
+    /// behavior). Returns [`NetworkError::PeerNotFound`] when the peer is
+    /// not in the peer table.
     pub fn send_to(&self, peer: &PublicKey, message: NetworkMessage) -> Result<(), NetworkError> {
         // Check if peer exists
         let peer_table = self.peer_table.lock().unwrap();
-        if !peer_table.contains_key(peer) {
+        let Some(addr) = peer_table.get(peer).map(|p| p.address) else {
             return Err(NetworkError::PeerNotFound(peer.to_hex()));
-        }
+        };
+        drop(peer_table);
 
-        // In a real implementation, we would serialize and send the message
-        // For now, we just pass it through the message channel for local processing
+        let bytes = serde_json::to_vec(&message).map_err(NetworkError::Serialization)?;
+
+        // Transmit over the wire if the engine is started.
+        let _ = self.outgoing_tx.send((addr, bytes));
+
+        // Also enqueue locally for the handler loop (in-process delivery).
         self.message_sender
             .send(message)
             .map_err(|_| NetworkError::InvalidMessage)?;
@@ -328,9 +422,20 @@ impl NodeEngine {
     }
 
     /// Broadcast a message to all connected peers.
+    ///
+    /// Serializes the [`NetworkMessage`] as JSON and transmits it to every
+    /// peer's registered UDP address. Also enqueues the message locally.
     pub fn broadcast(&self, message: NetworkMessage) -> Result<(), NetworkError> {
-        // In a real implementation, we would send to all peers
-        // For now, we just pass it through the message channel for local processing
+        let bytes = serde_json::to_vec(&message).map_err(NetworkError::Serialization)?;
+        let peers = {
+            let peer_table = self.peer_table.lock().unwrap();
+            peer_table.values().map(|p| p.address).collect::<Vec<_>>()
+        };
+        for addr in peers {
+            let _ = self.outgoing_tx.send((addr, bytes.clone()));
+        }
+
+        // Also enqueue locally for the handler loop (in-process delivery).
         self.message_sender
             .send(message)
             .map_err(|_| NetworkError::InvalidMessage)?;
@@ -366,9 +471,15 @@ impl NodeEngine {
     /// that scans it will peer with us, and when two such networks merge,
     /// peers from both sides are recognized and connected.
     ///
+    /// Uses the *actual* bound socket address when the engine has been
+    /// started; falls back to [`NodeConfig::listen_addr`] before `start()`.
+    ///
     /// Format: `plain://nodes.plain?connect=<ip:port>/<pubkey_hex>`
     pub fn generate_connection_link(&self) -> String {
-        Self::build_connection_link(self.config.listen_addr, self.config.keypair.public)
+        match self.local_addr() {
+            Some(Ok(addr)) => Self::build_connection_link(addr, self.config.keypair.public),
+            _ => Self::build_connection_link(self.config.listen_addr, self.config.keypair.public),
+        }
     }
 
     /// Static method to build a connection link from address and public key.
@@ -478,7 +589,10 @@ impl NodeEngine {
     ) {
         let mut interval = interval(config.heartbeat_interval);
 
-        while *running.lock().unwrap() {
+        loop {
+            if !*running.lock().unwrap() {
+                break;
+            }
             interval.tick().await;
 
             // Remove stale peers
@@ -488,6 +602,56 @@ impl NodeEngine {
                 now.duration_since(peer_info.last_seen) < Duration::from_secs(300)
                 // 5 minutes
             });
+        }
+    }
+
+    /// Outgoing sender loop: dequeues `(SocketAddr, Vec<u8>)` datagrams and
+    /// transmits them over the bound UDP socket. Runs until `running` is false.
+    async fn sender_loop(
+        socket: Arc<UdpSocket>,
+        mut receiver: mpsc::UnboundedReceiver<OutgoingDatagram>,
+        running: Arc<Mutex<bool>>,
+    ) {
+        while *running.lock().unwrap() {
+            tokio::select! {
+                Some((addr, bytes)) = receiver.recv() => {
+                    let _ = socket.send_to(&bytes, addr).await;
+                }
+                _ = tokio::time::sleep(Duration::from_millis(10)) => {
+                    // Small sleep to prevent busy loop when channel is empty
+                }
+            }
+        }
+    }
+
+    /// Inbound receiver loop: reads UDP datagrams, deserializes them as
+    /// [`NetworkMessage`], and enqueues them for the handler loop. Invalid
+    /// framing is silently dropped. Runs until `running` is false.
+    async fn receiver_loop(
+        socket: Arc<UdpSocket>,
+        sender: mpsc::UnboundedSender<NetworkMessage>,
+        running: Arc<Mutex<bool>>,
+    ) {
+        let mut buf = [0u8; 65535];
+        while *running.lock().unwrap() {
+            tokio::select! {
+                result = socket.recv_from(&mut buf) => {
+                    match result {
+                        Ok((len, _from)) => {
+                            if let Ok(message) = serde_json::from_slice::<NetworkMessage>(&buf[..len]) {
+                                let _ = sender.send(message);
+                            }
+                            // Invalid JSON framing is silently dropped.
+                        }
+                        Err(_) => {
+                            // Transient socket error; keep listening.
+                        }
+                    }
+                }
+                _ = tokio::time::sleep(Duration::from_millis(10)) => {
+                    // Small sleep to prevent busy loop
+                }
+            }
         }
     }
 

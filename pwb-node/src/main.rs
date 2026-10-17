@@ -1,6 +1,12 @@
-//! `pwb-node` CLI node launcher.
+//! `pwb-node` CLI node launcher — runs a live PlainWeb network node.
+//!
+//! The node binds a UDP socket, starts the [`pwb_core::net::NodeEngine`]
+//! (sender loop, receiver loop, peer maintenance, and LAN discovery), and can
+//! connect to peers via `plain://nodes.plain?connect=<ip:port>/<pubkey>`
+//! links or scanned QR pairing payloads.
 
 use pwb_core::crypto::{ContentId, PublicKey};
+use pwb_core::net::NodeEngine;
 use pwb_core::wire::Bundle;
 use pwb_node::domain::{DomainRegistry, PricingEpochStats};
 use pwb_node::host::ArtifactHost;
@@ -8,12 +14,15 @@ use pwb_node::identity::IdentityManager;
 use pwb_node::search::SearchEngine;
 use pwb_node::verifier::{IndexProof, PeerVerifier};
 use std::fs;
+use std::net::SocketAddr;
+use std::time::Duration;
 
-fn main() {
+#[tokio::main]
+async fn main() {
     println!("PlainWeb Layer 3 Serverless Node (pwb-node)");
     println!("Starting node process...");
 
-    // Parse CLI arguments (TODO §3.2 Connection Links & URI Handlers)
+    // Parse CLI arguments (Connection Links & URI Handlers).
     let args: Vec<String> = std::env::args().collect();
     let mut arg_index = 1;
     let mut connect_target: Option<String> = None;
@@ -37,6 +46,51 @@ fn main() {
     let mut identity = IdentityManager::new();
     println!("  Node Identity Public Key : {}", identity.public_key());
     println!("  Starting Credit Balance  : {} credits", identity.credits);
+
+    // --- Network stack: start the NodeEngine with live UDP transport -------
+    //
+    // This binds a UDP socket, spawns the sender/receiver loops, the peer
+    // maintenance loop, and a DiscoveryService that shares the engine's peer
+    // table. LAN beacons (broadcast + multicast on port 7922) will populate
+    // the peer table automatically, and the engine can send/receive
+    // NetworkMessage datagrams to/from any registered peer.
+    let listen_addr: SocketAddr = "127.0.0.1:0".parse().unwrap();
+    let config = pwb_core::net::NodeConfig {
+        listen_addr,
+        keypair: identity.keypair.clone(),
+        bootstrap_peers: Vec::new(),
+        max_peers: 100,
+        heartbeat_interval: Duration::from_secs(30),
+    };
+    let engine = NodeEngine::new(config);
+    engine.start().await.expect("node engine start");
+
+    let own_addr = engine
+        .local_addr()
+        .expect("engine socket bound after start")
+        .expect("local socket address");
+    println!("  Network Listen Address   : {}", own_addr);
+
+    // Generate the connection link using the *actual* bound address so peers
+    // can dial us.
+    let own_link = NodeEngine::build_connection_link(own_addr, identity.public_key());
+    println!("\n[Network] Your connection link:");
+    println!("  {}", own_link);
+
+    // Render the link as a scannable QR code (§3.3).
+    match pwb_core::qr::QrCode::encode(&own_link) {
+        Ok(qr) => {
+            println!(
+                "\n[Network] Scan-to-pair QR (version {}, mask {}):",
+                qr.version(),
+                qr.mask()
+            );
+            println!("{}", qr.to_ascii());
+        }
+        Err(e) => eprintln!("[Network] QR encode failed: {}", e),
+    }
+
+    // --- Existing demo workload -------------------------------------------
 
     let mut host = ArtifactHost::new();
     let mut search = SearchEngine::new();
@@ -64,11 +118,7 @@ fn main() {
                         "[Verifier] Peer verification check: {}",
                         if is_valid { "PASSED" } else { "FAILED" }
                     );
-                    // Mint credits for verified network services (TODO §4.1):
-                    // indexing the bundle, serving a requester query, and
-                    // relaying onion cells — each receipt is signed and
-                    // re-checkable, and every credit is backed by recorded
-                    // exchange traffic (anti-ASIC floor).
+
                     let mut minter =
                         pwb_node::credit::CreditMinter::with_default_policy(identity.public_key());
                     let now = std::time::Instant::now();
@@ -91,7 +141,6 @@ fn main() {
                         index_receipt = Some(receipt);
                     }
 
-                    // Serve the demo query with a requester challenge.
                     let challenge = [0xA7; 32];
                     minter.issue_challenge(challenge, now);
                     let query_receipt = pwb_node::credit::QueryReceipt::sign(
@@ -108,7 +157,6 @@ fn main() {
                         Err(e) => println!("[Credit] Query mint refused: {e}"),
                     }
 
-                    // Relay a window of onion cells.
                     for i in 0..35u8 {
                         minter.relay_cell(&[i; 1024]);
                     }
@@ -123,13 +171,6 @@ fn main() {
                         Err(e) => println!("[Credit] Relay mint refused: {e}"),
                     }
 
-                    // Claim user domain under .pwb TLD via the k-of-N
-                    // attested path (TODO §4.2): a simulated local
-                    // neighborhood of attestors independently re-verifies
-                    // each signed receipt, records the earnings on their
-                    // hash-chained ledgers, and attests this node's balance.
-                    // The registry accepts the claim only against the quorum
-                    // — never a self-declared balance.
                     let user_domain = "welcome.pwb";
                     let epoch = 1u64;
                     let policy = minter.policy().clone();
@@ -200,18 +241,7 @@ fn main() {
                                 Err(e) => println!("[Domain] Attested claim refused: {e}"),
                             }
 
-                            // Private claim path (TODO §4.3): withdraw the
-                            // remaining attested credits as a blind voucher
-                            // from attestor 0's ledger — the issuer signs
-                            // blinded requests and never sees the tokens —
-                            // gossip the volume event to the sibling views,
-                            // then redeem the voucher under a fresh pseudonym
-                            // owner for a second domain. The registry sees
-                            // only the bearer token: the claim is unlinkable
-                            // to the earning identity and to the withdrawal.
                             if !attestor_ledgers.is_empty() {
-                                // Pick the smallest default denomination that
-                                // covers the current claim price.
                                 let denomination = pwb_node::blind::DEFAULT_DENOMINATIONS
                                     .iter()
                                     .copied()
@@ -230,9 +260,6 @@ fn main() {
                                     1,
                                 ) {
                                     Ok(receipt) => {
-                                        // Cross-attestor inflation guard: the
-                                        // same spend event (same evidence
-                                        // digest) goes to every sibling view.
                                         for ledger in &mut attestor_ledgers[1..] {
                                             let _ = ledger.record_spent(
                                                 identity.public_key(),
@@ -254,8 +281,6 @@ fn main() {
                                             &binding,
                                         )
                                         .expect("voucher ownership");
-                                        // A fresh pseudonym key — not the
-                                        // earning identity — owns the claim.
                                         let pseudonym =
                                             pwb_core::crypto::Keypair::generate().public;
                                         match registry.register_blind(
@@ -317,10 +342,8 @@ fn main() {
         );
     }
 
-    // Live pricing demo (TODO §5): fold a hot epoch of network stats into
-    // the rolling window and watch the claim price leave its initial value.
     let price_before = registry.claim_cost();
-    registry.record_pricing_epoch(pwb_node::domain::PricingEpochStats {
+    registry.record_pricing_epoch(PricingEpochStats {
         epoch: 2,
         registrations: 32,
         network_work: 2_000,
@@ -331,10 +354,6 @@ fn main() {
         registry.claim_cost()
     );
 
-    // Gossip partition merge demo (TODO §5.2): two isolated clusters evolve
-    // independently, then reconcile their registries and pricing
-    // deterministically (CRDT merge: last-writer-wins domains, max claimed
-    // spend, unioned spend log, max base cost).
     let mut cluster_a = DomainRegistry::new();
     let mut cluster_b = DomainRegistry::new();
     let alice = PublicKey([11; 32]);
@@ -343,12 +362,9 @@ fn main() {
 
     let _ = cluster_a.register("alpha.pwb", cid, alice);
     let _ = cluster_b.register("beta.pwb", cid, bob);
-    // Both partitions claim the same domain at the same epoch; the merge
-    // tie-breaks deterministically by owner public key bytes.
     let _ = cluster_a.register("contested.pwb", cid, alice);
     let _ = cluster_b.register("contested.pwb", cid, bob);
 
-    // Each cluster observes a disjoint pricing epoch.
     cluster_a.record_pricing_epoch(PricingEpochStats {
         epoch: 1,
         registrations: 40,
@@ -380,42 +396,17 @@ fn main() {
         cluster_b.claim_cost()
     );
 
-    // Display the connection link for this node
-    let own_link = pwb_core::net::NodeEngine::build_connection_link(
-        std::net::SocketAddr::new("127.0.0.1".parse().unwrap(), 8080),
-        identity.public_key(),
-    );
-    println!("\n[Network] Your connection link:");
-    println!("  {}", own_link);
-
-    // Render the link as a scannable QR code (TODO §3.3).
-    match pwb_core::qr::QrCode::encode(&own_link) {
-        Ok(qr) => {
-            println!(
-                "\n[Network] Scan-to-pair QR (version {}, mask {}):",
-                qr.version(),
-                qr.mask()
-            );
-            println!("{}", qr.to_ascii());
-        }
-        Err(e) => eprintln!("[Network] QR encode failed: {}", e),
-    }
-
-    // Launch a connection to a peer described by a `nodes.plain` link or a
-    // scanned QR pairing payload (TODO §3.2/§3.3).
+    // --- Network: connect to a peer via connection link -------------------
+    //
+    // Launching a connection registers the peer in the engine's peer table
+    // and sends a `PeerDiscovery` announcement over UDP so the remote node
+    // learns about us too. The discovery service (already running) will also
+    // begin exchanging beacons with any peers on the LAN.
     if let Some(target) = connect_target {
         println!(
             "\n[Network] Launching connection to peer via link: {}",
             target
         );
-        let config = pwb_core::net::NodeConfig {
-            listen_addr: std::net::SocketAddr::new("127.0.0.1".parse().unwrap(), 0),
-            keypair: identity.keypair.clone(),
-            bootstrap_peers: Vec::new(),
-            max_peers: 100,
-            heartbeat_interval: std::time::Duration::from_secs(30),
-        };
-        let engine = pwb_core::net::NodeEngine::new(config);
         let result = engine.launch_connection(&target).or_else(|_| {
             // Scanned QR payloads may use the compact `<ip:port>/<hex>` form.
             match pwb_core::qr::parse_pairing_payload(&target) {
@@ -425,15 +416,39 @@ fn main() {
                 )),
             }
         });
-        match result {
-            Ok(peer) => println!(
-                "[Network] Connected to peer {} at {} (reputation 0)",
-                peer.public_key, peer.address
-            ),
+        match &result {
+            Ok(peer) => {
+                println!(
+                    "[Network] Connected to peer {} at {} (reputation 0)",
+                    peer.public_key, peer.address
+                );
+                // Announce ourselves to the new peer so the connection is
+                // bidirectional: they learn our address and public key.
+                let _ = engine.send_to(
+                    &peer.public_key,
+                    pwb_core::net::NetworkMessage::PeerDiscovery {
+                        known_peers: engine
+                            .peer_table()
+                            .lock()
+                            .unwrap()
+                            .keys()
+                            .copied()
+                            .collect(),
+                        sender_pubkey: identity.public_key(),
+                    },
+                );
+            }
             Err(e) => eprintln!("[Network] Could not launch connection: {:?}", e),
         }
     }
 
     println!("\nNode remaining balance: {} credits.", identity.credits);
-    println!("Node daemon active.");
+    println!("Node daemon active. Press Ctrl+C to stop.");
+
+    // Keep the node alive so it can send/receive network traffic.
+    // Discovery beacons continue announcing on the LAN; inbound messages are
+    // dispatched to the handler loop by the receiver loop.
+    tokio::signal::ctrl_c().await.expect("wait for Ctrl+C");
+    engine.stop().await;
+    println!("[Network] Node stopped.");
 }
