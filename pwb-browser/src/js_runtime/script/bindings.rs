@@ -255,6 +255,20 @@ pub(super) fn install<'js>(dom_handle: &DomHandle, ctx: &Ctx<'js>, global: &Obje
         )
         .unwrap();
 
+    // `__pwb_navigate(url)`: signals the browser pipeline to navigate to the
+    // given URL (e.g. `search.plain?q=foo`). The pipeline exits the event loop
+    // and main re-runs `run_browser_window` with the resolved bundle.
+    let nav = dom_handle.clone();
+    global
+        .set(
+            "__pwb_navigate",
+            Function::new(ctx.clone(), move |url: String| {
+                *nav.pending_navigate.borrow_mut() = Some(url);
+            })
+            .unwrap(),
+        )
+        .unwrap();
+
     // DevTools management APIs
     let dom_c8 = dom_handle.clone();
     global

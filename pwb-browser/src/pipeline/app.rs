@@ -5,6 +5,7 @@ use super::dom::{
     ancestor_node_ids, compute_selected_text, element_node_id, find_node_by_id,
     find_node_with_attr, hovered_title, node_id_attr, node_in_subtree, TOOLTIP_DELAY,
 };
+use crate::dom::Dom;
 use super::resize::{resize_bounds, resize_new_dimensions, ResizeDrag};
 use crate::context_menu;
 use crate::js_runtime::{
@@ -22,6 +23,10 @@ use crate::render::{
 };
 use arboard::Clipboard;
 use pwb_core::spec::Tag;
+use pwb_node::domain::DomainRegistry;
+use pwb_node::host::ArtifactHost;
+use pwb_node::identity::IdentityManager;
+use pwb_node::search::SearchEngine;
 use std::num::NonZeroU32;
 use std::rc::Rc;
 use std::sync::atomic::Ordering;
@@ -37,7 +42,7 @@ use winit::window::{CursorIcon, Window, WindowAttributes, WindowId};
 /// `EventLoop::run` + `EventLoop::create_window`), and the interactive session state
 /// (scroll, selection, drag-resize, cursor tracking, modifier shortcuts) lives here
 /// so it persists between events.
-pub(super) struct BrowserApp {
+pub struct BrowserApp {
     pub(super) window: Option<Rc<Window>>,
     pub(super) context: Option<softbuffer::Context<Rc<Window>>>,
     pub(super) surface: Option<softbuffer::Surface<Rc<Window>, Rc<Window>>>,
@@ -67,6 +72,79 @@ pub(super) struct BrowserApp {
     pub(super) modifiers_state: winit::keyboard::ModifiersState,
     pub(super) resize_state: Option<ResizeDrag>,
     pub(super) pixmap: tiny_skia::Pixmap,
+    /// Resolver dependencies for in-place navigation swaps.
+    pub(super) search: Arc<SearchEngine>,
+    pub(super) host: Arc<ArtifactHost>,
+    pub(super) registry: Arc<DomainRegistry>,
+    pub(super) identity: Arc<IdentityManager>,
+}
+
+impl BrowserApp {
+    /// Hot-swap the DOM bundle for `url` within the same event loop: resolve
+    /// the URL to a `.pwb` bundle, replace the DOM handle, re-run the page
+    /// script, and re-mount devtools. Returns `true` on success.
+    pub(super) fn navigate_to(&mut self, url: &str) -> bool {
+        use crate::resolver::resolve_url_or_file;
+
+        let bytes: Vec<u8> = match resolve_url_or_file(
+            url,
+            &self.search,
+            &self.host,
+            &self.registry,
+            &self.identity,
+        ) {
+            Ok(b) => b,
+            Err(e) => {
+                eprintln!("[Browser] Navigation failed to resolve '{}': {:?}", url, e);
+                return false;
+            }
+        };
+
+        let bundle = match pwb_core::wire::Bundle::deserialize(&bytes) {
+            Ok(b) => b,
+            Err(e) => {
+                eprintln!("[Browser] Navigation failed to deserialize bundle: {:?}", e);
+                return false;
+            }
+        };
+
+        // Replace the DOM in place (the JS context shares this DomHandle, so
+        // it will see the new tree on the next script call).
+        *self.dom_handle_render.dom.borrow_mut() = Dom::from_bundle(&bundle);
+
+        // Set localStorage path for the new bundle.
+        {
+            let mut hasher = std::collections::hash_map::DefaultHasher::new();
+            use std::hash::Hasher;
+            hasher.write(&bytes);
+            let hash = hasher.finish();
+            let dir = std::env::var("PWB_STORAGE_DIR").unwrap_or_else(|_| {
+                std::env::var("HOME").unwrap_or_else(|_| ".".to_string()) + "/.pwb"
+            });
+            *self.dom_handle_render.web.storage_path.borrow_mut() =
+                Some(std::path::PathBuf::from(dir).join(format!("{:016x}.json", hash)));
+        }
+
+        // Re-run the page script so handlers are registered for the new DOM.
+        if let Some(script_bytes) = &bundle.script_payload {
+            if let Ok(script_str) = std::str::from_utf8(script_bytes) {
+                if let Err(e) = execute_script(&self.dom_handle_render, script_str) {
+                    eprintln!("[Browser] Navigation script failed: {:?}", e);
+                }
+            }
+        }
+
+        // Update window title.
+        if let Some(w) = self.window.as_ref() {
+            w.set_title(&format!(
+                "PlainWeb Browser — {}",
+                self.dom_handle_render.dom.borrow().title
+            ));
+        }
+
+        println!("[Browser] Navigated to {}", url);
+        true
+    }
 }
 
 impl ApplicationHandler for BrowserApp {
@@ -131,6 +209,21 @@ impl ApplicationHandler for BrowserApp {
         if let Some(deadline) = crate::webapi::next_timer_deadline() {
             event_loop.set_control_flow(ControlFlow::WaitUntil(deadline));
         }
+
+        // In-place navigation swap: when a JS handler set pending_navigate on
+        // the DomHandle, resolve the URL and swap the DOM bundle without
+        // recreating the winit EventLoop (which cannot be recreated in the
+        // same process).
+        let pending_url = self.dom_handle_render.pending_navigate.borrow_mut().take();
+        if let Some(url) = pending_url {
+            if self.window.is_some() {
+                self.navigate_to(&url);
+            }
+            if let Some(w) = self.window.as_ref() {
+                w.request_redraw();
+            }
+        }
+
         // Tooltip dwell: a still pointer produces no events, so wake the loop
         // at the dwell deadline (or immediately, once it has passed and the
         // tooltip still hasn't been drawn).
@@ -316,6 +409,15 @@ impl ApplicationHandler for BrowserApp {
                             *self.dom_handle_render.focused_input.borrow_mut() =
                                 Some((node_id, caret));
                         }
+
+                        // If an "enter" handler requested navigation (via
+                        // `__pwb_navigate`), request redraw so `about_to_wait`
+                        // hot-swaps the DOM without recreating the EventLoop.
+                        if self.dom_handle_render.pending_navigate.borrow().is_some() {
+                            window.request_redraw();
+                            return;
+                        }
+
                         if consumed {
                             let size = window.inner_size();
                             refresh_devtools(&self.dom_handle_render, (size.width, size.height));
@@ -832,6 +934,14 @@ impl ApplicationHandler for BrowserApp {
                         // The handlers may have mutated the DOM (text/styles):
                         // refresh the devtools Elements tree and styles panel.
                         refresh_devtools(&self.dom_handle_render, (width, height));
+
+                        // If a click handler requested navigation (via
+                        // `__pwb_navigate`), set pending so `about_to_wait`
+                        // hot-swaps the DOM without recreating the EventLoop.
+                        if self.dom_handle_render.pending_navigate.borrow().is_some() {
+                            window.request_redraw();
+                            return;
+                        }
 
                         window.request_redraw();
                     }

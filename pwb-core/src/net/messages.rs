@@ -77,6 +77,14 @@ pub enum NetworkMessage {
         credits_spent: u64,
         signature: Signature,
     },
+
+    /// Peer exchange gossip: a node (typically a bootstrap/rendezvous node)
+    /// advertises a set of known peers with their dialable addresses so the
+    /// receiver can join the swarm without an out-of-band introduction.
+    PeerExchange {
+        peers: Vec<(SocketAddr, PublicKey)>,
+        sender_pubkey: PublicKey,
+    },
 }
 
 /// Transport abstraction trait for PlainWeb network implementations.

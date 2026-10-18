@@ -6,6 +6,9 @@
 //! Modules:
 //!   spec        — the "plain" markup/style/document-API surface (tag model,
 //!                 selector model, document functions).
+//!   stun        — minimal STUN Binding Request client (RFC 5389) for NAT
+//!                 traversal: discovers a node's public IP:port so connection
+//!                 links are dialable from the internet.
 //!   wire        — the versioned *plain* bundle format + the zip-style compression
 //!                 (per-bundle element/selector symbol tables).
 //!   crypto      — keypair identity, signatures, and packet encryption.
@@ -34,5 +37,6 @@ pub mod net;
 pub mod onion;
 pub mod qr;
 pub mod spec;
+pub mod stun;
 pub mod system;
 pub mod wire;

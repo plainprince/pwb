@@ -2138,6 +2138,7 @@ dependencies = [
  "ab_glyph",
  "arboard",
  "base64",
+ "hex",
  "objc2 0.5.2",
  "objc2-app-kit 0.2.2",
  "objc2-foundation 0.2.2",
@@ -2150,6 +2151,7 @@ dependencies = [
  "serde_json",
  "softbuffer",
  "tiny-skia 0.12.0",
+ "tokio",
  "toml",
  "tungstenite",
  "ureq",
@@ -2180,6 +2182,7 @@ dependencies = [
 name = "pwb-node"
 version = "0.0.0"
 dependencies = [
+ "hex",
  "pwb-core",
  "pwb-web",
  "tokio",

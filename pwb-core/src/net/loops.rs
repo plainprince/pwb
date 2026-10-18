@@ -113,11 +113,11 @@ pub(super) async fn receiver_loop(
 ///
 /// `sender_addr` is the real UDP source address of the datagram; it is used
 /// (instead of a placeholder) so the receiving node can reply to the peer.
-async fn process_message(
+    async fn process_message(
     message: NetworkMessage,
     sender_addr: SocketAddr,
     peer_table: &Arc<Mutex<HashMap<PublicKey, PeerInfo>>>,
-    _config: &NodeConfig,
+    config: &NodeConfig,
 ) {
     // In a full implementation, this would handle different message types
     // and potentially generate responses
@@ -172,6 +172,29 @@ async fn process_message(
             // by updating the publisher's last_seen timestamp, indicating activity
             if let Some(peer_info) = pt.get_mut(&publisher) {
                 peer_info.last_seen = Instant::now();
+            }
+        }
+
+        // PeerExchange: a bootstrap or rendezvous node advertises known peers
+        // with their dialable addresses so the receiver can join the swarm
+        // without an out-of-band introduction. Each advertised peer is merged
+        // into the peer table using its advertised address (not the sender's).
+        NetworkMessage::PeerExchange {
+            peers,
+            sender_pubkey: _,
+        } => {
+            let local_key = config.keypair.public;
+            let mut pt = peer_table.lock().unwrap();
+            for (addr, pubkey) in peers {
+                if pubkey == local_key {
+                    continue; // never register oneself
+                }
+                pt.entry(pubkey).or_insert_with(|| PeerInfo {
+                    public_key: pubkey,
+                    last_seen: Instant::now(),
+                    address: addr,
+                    reputation: 0,
+                });
             }
         }
 

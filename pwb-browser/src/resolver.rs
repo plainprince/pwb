@@ -49,9 +49,7 @@ pub fn resolve_url_or_file(
         let handler = SystemDomainHandler::new(search, host, registry, identity);
         let bundle = match system_url.domain() {
             SystemDomain::Search => {
-                let query = system_url
-                    .search_query()
-                    .unwrap_or_else(|| "PlainWeb".to_string());
+                let query = system_url.search_query().unwrap_or_default();
                 handler.render_system_search_page(&query)
             }
             SystemDomain::Register => handler.render_system_register_page(identity.public_key()),
@@ -116,6 +114,18 @@ mod tests {
 
         assert!(bytes.len() > 50);
         assert_eq!(&bytes[0..4], b"PWB1");
+
+        // search.plain with no query should resolve to the search home screen
+        let bytes = resolve_url_or_file(
+            "search.plain",
+            &search,
+            &host,
+            &registry,
+            &identity,
+        )
+        .unwrap();
+        assert!(bytes.len() > 50);
+        assert_eq!(&bytes[0..4], b"PWB1");
     }
 
     #[test]
@@ -141,6 +151,7 @@ mod tests {
 
         for target in [
             "search.plain?q=untrackable",
+            "search.plain",
             "register.plain",
             "gossip.plain",
             "nodes.plain",

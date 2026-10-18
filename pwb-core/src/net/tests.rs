@@ -13,6 +13,7 @@ async fn test_node_engine_creation() {
         listen_addr: SocketAddr::from_str("127.0.0.1:0").unwrap(),
         keypair: kp.clone(),
         bootstrap_peers: Vec::new(),
+        stun_server: None,
         max_peers: 100,
         heartbeat_interval: Duration::from_secs(30),
     };
@@ -36,6 +37,7 @@ async fn test_peer_management() {
         listen_addr: SocketAddr::from_str("127.0.0.1:0").unwrap(),
         keypair: Keypair::generate(),
         bootstrap_peers: Vec::new(),
+        stun_server: None,
         max_peers: 100,
         heartbeat_interval: Duration::from_secs(30),
     };
@@ -72,6 +74,7 @@ async fn test_send_and_broadcast() {
         listen_addr: SocketAddr::from_str("127.0.0.1:0").unwrap(),
         keypair: kp.clone(),
         bootstrap_peers: Vec::new(),
+        stun_server: None,
         max_peers: 100,
         heartbeat_interval: Duration::from_secs(30),
     };
@@ -112,6 +115,7 @@ async fn test_message_processing_peer_discovery() {
         listen_addr: SocketAddr::from_str("127.0.0.1:0").unwrap(),
         keypair: kp.clone(),
         bootstrap_peers: Vec::new(),
+        stun_server: None,
         max_peers: 100,
         heartbeat_interval: Duration::from_secs(30),
     };
@@ -150,6 +154,7 @@ async fn test_message_processing_with_known_peers() {
         listen_addr: SocketAddr::from_str("127.0.0.1:0").unwrap(),
         keypair: kp.clone(),
         bootstrap_peers: Vec::new(),
+        stun_server: None,
         max_peers: 100,
         heartbeat_interval: Duration::from_secs(30),
     };
@@ -206,6 +211,7 @@ async fn test_connection_link_generation_and_parsing() {
         listen_addr: SocketAddr::from_str("127.0.0.1:8080").unwrap(),
         keypair: kp.clone(),
         bootstrap_peers: Vec::new(),
+        stun_server: None,
         max_peers: 100,
         heartbeat_interval: Duration::from_secs(30),
     };
@@ -251,6 +257,7 @@ async fn test_multi_node_link_compatibility() {
         listen_addr: "192.168.1.1:8081".parse::<SocketAddr>().unwrap(),
         keypair: kp1.clone(),
         bootstrap_peers: Vec::new(),
+        stun_server: None,
         max_peers: 100,
         heartbeat_interval: Duration::from_secs(30),
     };
@@ -263,6 +270,7 @@ async fn test_multi_node_link_compatibility() {
         listen_addr: "192.168.1.2:8082".parse::<SocketAddr>().unwrap(),
         keypair: kp2.clone(),
         bootstrap_peers: Vec::new(),
+        stun_server: None,
         max_peers: 100,
         heartbeat_interval: Duration::from_secs(30),
     };
@@ -484,6 +492,7 @@ async fn test_node_engine_error_paths_and_gossip_registration() {
         listen_addr: SocketAddr::from_str("127.0.0.1:0").unwrap(),
         keypair: Keypair::generate(),
         bootstrap_peers: Vec::new(),
+        stun_server: None,
         max_peers: 100,
         heartbeat_interval: Duration::from_secs(30),
     };
@@ -545,6 +554,7 @@ async fn test_launch_connection_valid_link() {
         listen_addr: SocketAddr::from_str("127.0.0.1:0").unwrap(),
         keypair: kp.clone(),
         bootstrap_peers: Vec::new(),
+        stun_server: None,
         max_peers: 100,
         heartbeat_interval: Duration::from_secs(30),
     };
@@ -573,6 +583,7 @@ async fn test_launch_connection_invalid_link() {
         listen_addr: SocketAddr::from_str("127.0.0.1:0").unwrap(),
         keypair: kp.clone(),
         bootstrap_peers: Vec::new(),
+        stun_server: None,
         max_peers: 100,
         heartbeat_interval: Duration::from_secs(30),
     };
@@ -593,6 +604,7 @@ async fn test_launch_connection_self_link() {
         listen_addr: SocketAddr::from_str("127.0.0.1:0").unwrap(),
         keypair: kp.clone(),
         bootstrap_peers: Vec::new(),
+        stun_server: None,
         max_peers: 100,
         heartbeat_interval: Duration::from_secs(30),
     };
@@ -617,6 +629,7 @@ async fn test_launch_connection_port_zero() {
         listen_addr: SocketAddr::from_str("127.0.0.1:0").unwrap(),
         keypair: kp.clone(),
         bootstrap_peers: Vec::new(),
+        stun_server: None,
         max_peers: 100,
         heartbeat_interval: Duration::from_secs(30),
     };
@@ -642,6 +655,7 @@ async fn test_launch_connection_unspecified_address() {
         listen_addr: SocketAddr::from_str("127.0.0.1:0").unwrap(),
         keypair: kp.clone(),
         bootstrap_peers: Vec::new(),
+        stun_server: None,
         max_peers: 100,
         heartbeat_interval: Duration::from_secs(30),
     };
@@ -667,6 +681,7 @@ async fn test_launch_connection_refresh_preserves_reputation() {
         listen_addr: SocketAddr::from_str("127.0.0.1:0").unwrap(),
         keypair: kp.clone(),
         bootstrap_peers: Vec::new(),
+        stun_server: None,
         max_peers: 100,
         heartbeat_interval: Duration::from_secs(30),
     };
@@ -702,6 +717,7 @@ async fn test_connect_to_valid() {
         listen_addr: SocketAddr::from_str("127.0.0.1:0").unwrap(),
         keypair: kp.clone(),
         bootstrap_peers: Vec::new(),
+        stun_server: None,
         max_peers: 100,
         heartbeat_interval: Duration::from_secs(30),
     };
@@ -724,6 +740,7 @@ async fn test_connect_to_invalid_address() {
         listen_addr: SocketAddr::from_str("127.0.0.1:0").unwrap(),
         keypair: kp.clone(),
         bootstrap_peers: Vec::new(),
+        stun_server: None,
         max_peers: 100,
         heartbeat_interval: Duration::from_secs(30),
     };
@@ -746,6 +763,7 @@ async fn test_connect_to_self_rejection() {
         listen_addr: SocketAddr::from_str("127.0.0.1:0").unwrap(),
         keypair: kp.clone(),
         bootstrap_peers: Vec::new(),
+        stun_server: None,
         max_peers: 100,
         heartbeat_interval: Duration::from_secs(30),
     };
@@ -767,6 +785,7 @@ async fn test_connect_to_port_zero_rejection() {
         listen_addr: SocketAddr::from_str("127.0.0.1:0").unwrap(),
         keypair: kp.clone(),
         bootstrap_peers: Vec::new(),
+        stun_server: None,
         max_peers: 100,
         heartbeat_interval: Duration::from_secs(30),
     };
@@ -789,6 +808,7 @@ async fn test_connect_to_refresh_preserves_reputation() {
         listen_addr: SocketAddr::from_str("127.0.0.1:0").unwrap(),
         keypair: kp.clone(),
         bootstrap_peers: Vec::new(),
+        stun_server: None,
         max_peers: 100,
         heartbeat_interval: Duration::from_secs(30),
     };
@@ -807,5 +827,112 @@ async fn test_connect_to_refresh_preserves_reputation() {
     let final_info = engine.get_peer(&peer_kp.public).unwrap();
     assert_eq!(final_info.address, addr2);
     assert_eq!(final_info.reputation, 0);
+    engine.stop().await;
+}
+
+/// Setting `public_addr` (via STUN) makes `generate_connection_link` advertise
+/// the public address instead of the local bound address — NAT traversal so
+/// peers on the internet can dial the link.
+#[tokio::test]
+async fn test_connection_link_uses_public_addr_when_stun_available() {
+    let kp = Keypair::generate();
+    let config = NodeConfig {
+        listen_addr: "127.0.0.1:0".parse::<SocketAddr>().unwrap(),
+        keypair: kp.clone(),
+        bootstrap_peers: Vec::new(),
+        stun_server: None,
+        max_peers: 100,
+        heartbeat_interval: Duration::from_secs(30),
+    };
+    let engine = NodeEngine::new(config);
+    let _ = engine.start().await;
+
+    let local_addr = engine.local_addr().expect("bound").expect("addr");
+    let link_before = engine.generate_connection_link();
+    let parsed_before = NodeEngine::parse_connection_link(&link_before).unwrap();
+    assert_eq!(parsed_before.0, local_addr, "link uses local addr before STUN");
+
+    // Simulate STUN having discovered a public address.
+    let public_addr: SocketAddr = "203.0.113.45:19302".parse().unwrap();
+    *engine.public_addr.lock().unwrap() = Some(public_addr);
+
+    let link_after = engine.generate_connection_link();
+    let parsed_after = NodeEngine::parse_connection_link(&link_after).unwrap();
+    assert_eq!(parsed_after.0, public_addr, "link uses public addr after STUN");
+    assert_ne!(parsed_after.0, local_addr, "public addr differs from local addr");
+
+    engine.stop().await;
+}
+
+/// `connect_bootstrap` dials every configured bootstrap peer and registers them
+/// in the peer table — this is how a new node joins the swarm without an
+/// out-of-band introduction.
+#[tokio::test]
+async fn test_connect_bootstrap_registers_peers() {
+    let kp = Keypair::generate();
+    let bootstrap_kp = Keypair::generate();
+    let config = NodeConfig {
+        listen_addr: "127.0.0.1:0".parse::<SocketAddr>().unwrap(),
+        keypair: kp.clone(),
+        bootstrap_peers: vec![BootstrapPeer {
+            address: "127.0.0.1:9000".parse().unwrap(),
+            public_key: bootstrap_kp.public,
+        }],
+        stun_server: None,
+        max_peers: 100,
+        heartbeat_interval: Duration::from_secs(30),
+    };
+    let engine = NodeEngine::new(config);
+    let _ = engine.start().await;
+
+    let connected = engine.connect_bootstrap();
+    assert_eq!(connected.len(), 1, "connected to one bootstrap peer");
+    assert_eq!(connected[0].public_key, bootstrap_kp.public);
+    assert_eq!(
+        connected[0].address,
+        "127.0.0.1:9000".parse::<SocketAddr>().unwrap()
+    );
+
+    let peer = engine.get_peer(&bootstrap_kp.public).unwrap();
+    assert_eq!(peer.address, "127.0.0.1:9000".parse::<SocketAddr>().unwrap());
+
+    engine.stop().await;
+}
+
+/// `PeerExchange` gossip adds advertised peers to the peer table using their
+/// advertised addresses, so bootstrap/rendezvous nodes can teach newcomers
+/// about the rest of the swarm.
+#[tokio::test]
+async fn test_peer_exchange_adds_peers_with_advertised_addresses() {
+    let kp = Keypair::generate();
+    let config = NodeConfig {
+        listen_addr: "127.0.0.1:0".parse::<SocketAddr>().unwrap(),
+        keypair: kp.clone(),
+        bootstrap_peers: Vec::new(),
+        stun_server: None,
+        max_peers: 100,
+        heartbeat_interval: Duration::from_secs(30),
+    };
+    let engine = NodeEngine::new(config);
+    let _ = engine.start().await;
+
+    let peer1 = Keypair::generate();
+    let peer2 = Keypair::generate();
+    let addr1: SocketAddr = "10.0.0.1:5000".parse().unwrap();
+    let addr2: SocketAddr = "10.0.0.2:6000".parse().unwrap();
+
+    engine.broadcast(NetworkMessage::PeerExchange {
+        peers: vec![(addr1, peer1.public), (addr2, peer2.public)],
+        sender_pubkey: kp.public,
+    })
+    .expect("broadcast enqueues");
+
+    tokio::time::sleep(Duration::from_millis(100)).await;
+
+    let p1 = engine.get_peer(&peer1.public).expect("peer1 learned");
+    assert_eq!(p1.address, addr1, "peer1 uses advertised address");
+    let p2 = engine.get_peer(&peer2.public).expect("peer2 learned");
+    assert_eq!(p2.address, addr2, "peer2 uses advertised address");
+
     engine.stop().await;
 }

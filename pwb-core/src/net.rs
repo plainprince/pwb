@@ -23,5 +23,5 @@ mod messages;
 mod tests;
 
 pub use cell_channel::CellChannel;
-pub use engine::{NodeConfig, NodeEngine, PeerInfo};
+pub use engine::{BootstrapPeer, NodeConfig, NodeEngine, PeerInfo};
 pub use messages::{NetworkError, NetworkMessage, SearchResultWire, Transport};

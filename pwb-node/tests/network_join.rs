@@ -12,6 +12,7 @@ fn engine_config(keypair: Keypair) -> NodeConfig {
         listen_addr: "127.0.0.1:0".parse::<SocketAddr>().unwrap(),
         keypair,
         bootstrap_peers: Vec::new(),
+        stun_server: None,
         max_peers: 100,
         heartbeat_interval: Duration::from_secs(30),
     }

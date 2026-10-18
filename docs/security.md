@@ -183,7 +183,27 @@ Failures in RNG, key handling, or these invariants invalidate the guarantees
 above. Weakened or misconfigured cover traffic (e.g. `mean_interval` set to zero)
 reduces timing resistance.
 
-### 11. Out of scope
+### 11. NAT traversal reveals your public IP to the STUN server
+
+PlainWeb uses STUN (RFC 5389 Binding Request) so a node behind a router can
+advertise its public IP:port in connection links instead of an unreachable
+private LAN address. The default STUN server is Google's public STUN service
+(`stun.l.google.com:19302`), overridable with `--stun-server`.
+
+This means the STUN server learns this node's public IP address and the fact
+that it is participating in PlainWeb. That is inherent to how STUN works: the
+server sees the source IP:port of the Binding Request and echoes it back in the
+`XOR-MAPPED-ADDRESS` attribute. There is no way to discover your public address
+through NAT without telling *some* server what it is.
+
+Trade-off: without STUN, connection links contain private (RFC 1918) addresses
+and the node is only reachable on its LAN, defeating internet join. With STUN,
+the node is dialable from the internet at the cost of disclosing its public IP
+to the STUN operator. Operators who do not want this disclosure can run their
+own STUN server (or none) and accept LAN-only reachability.
+
+
+### 12. Out of scope
 
 This document covers the onion transport only. Content authenticity and
 verification of `.pwb` bundles, domain/credit Sybil resistance, search-ranking
@@ -214,5 +234,6 @@ their own design docs.
 | DoS / rate limiting | No |
 | Multi-cell bulk-transfer correlation | No (framing future) |
 | LAN beacons & connection links | No (out-of-band by design) |
+| Public IP disclosed to STUN server for NAT traversal | No (trade-off: dialable from internet) |
 
 [`OnionCell`]: ../pwb-core/src/onion/cell.rs

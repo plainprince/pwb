@@ -22,6 +22,7 @@ async fn spawn() -> Node {
         listen_addr: "127.0.0.1:0".parse().unwrap(),
         keypair: keypair.clone(),
         bootstrap_peers: Vec::new(),
+        stun_server: None,
         max_peers: 100,
         heartbeat_interval: Duration::from_secs(30),
     };

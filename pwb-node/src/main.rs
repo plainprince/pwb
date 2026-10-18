@@ -6,7 +6,7 @@
 //! links or scanned QR pairing payloads.
 
 use pwb_core::crypto::{ContentId, PublicKey};
-use pwb_core::net::NodeEngine;
+use pwb_core::net::{BootstrapPeer, NodeConfig, NodeEngine};
 use pwb_core::wire::Bundle;
 use pwb_node::domain::{DomainRegistry, PricingEpochStats};
 use pwb_node::host::ArtifactHost;
@@ -17,6 +17,49 @@ use std::fs;
 use std::net::SocketAddr;
 use std::time::Duration;
 
+/// Parse a `--bootstrap` argument of the form `<ip:port>/<hex_pubkey>` into a
+/// [`BootstrapPeer`]. Returns `None` for malformed input.
+fn parse_bootstrap_peer(s: &str) -> Option<BootstrapPeer> {
+    let (addr_part, pubkey_hex) = s.rsplit_once('/')?;
+    let addr: SocketAddr = addr_part.parse().ok()?;
+    let pubkey_bytes = hex::decode(pubkey_hex).ok()?;
+    if pubkey_bytes.len() != 32 {
+        return None;
+    }
+    let mut bytes = [0u8; 32];
+    bytes.copy_from_slice(&pubkey_bytes);
+    Some(BootstrapPeer {
+        address: addr,
+        public_key: PublicKey(bytes),
+    })
+}
+
+/// Periodically broadcast the engine's peer table as a [`NetworkMessage::PeerExchange`]
+/// so bootstrap/rendezvous nodes share their known peers and any connected
+/// node can learn about the rest of the swarm without an out-of-band
+/// introduction.
+async fn peer_exchange_loop(
+    engine: NodeEngine,
+    sender_pubkey: PublicKey,
+    interval: Duration,
+) {
+    let mut ticker = tokio::time::interval(interval);
+    loop {
+        ticker.tick().await;
+        let peers: Vec<(SocketAddr, PublicKey)> = {
+            let table = engine.peer_table();
+            let guard = table.lock().unwrap();
+            guard.values().map(|p| (p.address, p.public_key)).collect()
+        };
+        if !peers.is_empty() {
+            let _ = engine.broadcast(pwb_core::net::NetworkMessage::PeerExchange {
+                peers,
+                sender_pubkey,
+            });
+        }
+    }
+}
+
 #[tokio::main]
 async fn main() {
     println!("PlainWeb Layer 3 Serverless Node (pwb-node)");
@@ -26,6 +69,8 @@ async fn main() {
     let args: Vec<String> = std::env::args().collect();
     let mut arg_index = 1;
     let mut connect_target: Option<String> = None;
+    let mut stun_server: Option<SocketAddr> = None;
+    let mut bootstrap_peers: Vec<BootstrapPeer> = Vec::new();
     while arg_index < args.len() {
         match args[arg_index].as_str() {
             "-c" | "--connect" => {
@@ -34,6 +79,39 @@ async fn main() {
                     arg_index += 2;
                 } else {
                     eprintln!("Error: --connect requires a link argument");
+                    std::process::exit(1);
+                }
+            }
+            "--stun-server" => {
+                if arg_index + 1 < args.len() {
+                    match args[arg_index + 1].parse::<SocketAddr>() {
+                        Ok(addr) => stun_server = Some(addr),
+                        Err(e) => {
+                            eprintln!("Error: --stun-server requires a valid host:port: {e}");
+                            std::process::exit(1);
+                        }
+                    }
+                    arg_index += 2;
+                } else {
+                    eprintln!("Error: --stun-server requires a host:port argument");
+                    std::process::exit(1);
+                }
+            }
+            "--bootstrap" => {
+                if arg_index + 1 < args.len() {
+                    match parse_bootstrap_peer(&args[arg_index + 1]) {
+                        Some(peer) => bootstrap_peers.push(peer),
+                        None => {
+                            eprintln!(
+                                "Error: --bootstrap requires <ip:port>/<hex_pubkey>, got {}",
+                                args[arg_index + 1]
+                            );
+                            std::process::exit(1);
+                        }
+                    }
+                    arg_index += 2;
+                } else {
+                    eprintln!("Error: --bootstrap requires a peer argument");
                     std::process::exit(1);
                 }
             }
@@ -54,11 +132,38 @@ async fn main() {
     // table. LAN beacons (broadcast + multicast on port 7922) will populate
     // the peer table automatically, and the engine can send/receive
     // NetworkMessage datagrams to/from any registered peer.
+    //
+    // STUN discovers this node's public IP:port through NAT so connection
+    // links are dialable from the internet. Defaults to Google's public STUN
+    // server so a node behind a router is reachable without any flags.
+    let default_stun_server: SocketAddr = "stun.l.google.com:19302"
+        .parse()
+        .expect("default STUN server address");
+    let effective_stun_server = stun_server.or(Some(default_stun_server));
+
+    // Bootstrap peers (--bootstrap or the default rendezvous list) are dialed
+    // on startup so a new node can join the swarm without an out-of-band
+    // introduction.
+    let default_bootstrap: Vec<BootstrapPeer> = vec![
+        // Well-known PlainWeb rendezvous nodes. Operators run these on public
+        // IPs; new nodes dial them to learn about the swarm. The addresses
+        // below are placeholders — replace with live bootstrap nodes.
+        BootstrapPeer {
+            address: "127.0.0.1:7922".parse().unwrap(),
+            public_key: PublicKey([0x42; 32]),
+        },
+    ];
+    let effective_bootstrap = if bootstrap_peers.is_empty() {
+        default_bootstrap
+    } else {
+        bootstrap_peers
+    };
     let listen_addr: SocketAddr = "127.0.0.1:0".parse().unwrap();
-    let config = pwb_core::net::NodeConfig {
+    let config = NodeConfig {
         listen_addr,
         keypair: identity.keypair.clone(),
-        bootstrap_peers: Vec::new(),
+        bootstrap_peers: effective_bootstrap.clone(),
+        stun_server: effective_stun_server,
         max_peers: 100,
         heartbeat_interval: Duration::from_secs(30),
     };
@@ -71,9 +176,47 @@ async fn main() {
         .expect("local socket address");
     println!("  Network Listen Address   : {}", own_addr);
 
-    // Generate the connection link using the *actual* bound address so peers
-    // can dial us.
-    let own_link = NodeEngine::build_connection_link(own_addr, identity.public_key());
+    // Report the STUN-discovered public address (NAT traversal) so the
+    // operator knows what address peers on the internet will dial.
+    if let Some(public_addr) = engine.public_addr() {
+        println!("  Network Public Address   : {}  (via STUN)", public_addr);
+    } else if effective_stun_server.is_some() {
+        println!("  Network Public Address   : (STUN query failed; using local address)");
+    }
+
+    // Join the swarm: dial every configured bootstrap/rendezvous peer.
+    // Bootstrap nodes share their peer tables via PeerExchange gossip, so a
+    // new node learns about the rest of the network automatically.
+    let connected = engine.connect_bootstrap();
+    if !connected.is_empty() {
+        println!(
+            "[Network] Joined via {} bootstrap peer(s)",
+            connected.len()
+        );
+        for peer in &connected {
+            println!(
+                "    -> {} at {}",
+                &peer.public_key.to_hex()[..8],
+                peer.address
+            );
+        }
+    } else if !effective_bootstrap.is_empty() {
+        println!("[Network] No bootstrap peers reachable; running standalone.");
+    }
+
+    // Background task: periodically gossip the peer table as PeerExchange so
+    // bootstrap/rendezvous nodes advertise known peers and the swarm stays
+    // discoverable. Aborted on shutdown below.
+    let px_handle = tokio::spawn(peer_exchange_loop(
+        engine.clone(),
+        identity.public_key(),
+        Duration::from_secs(30),
+    ));
+
+    // Generate the connection link using the public (STUN'd) address when
+    // available, falling back to the actual bound address. Peers on the
+    // internet can dial this link directly.
+    let own_link = engine.generate_connection_link();
     println!("\n[Network] Your connection link:");
     println!("  {}", own_link);
 
@@ -449,6 +592,7 @@ async fn main() {
     // Discovery beacons continue announcing on the LAN; inbound messages are
     // dispatched to the handler loop by the receiver loop.
     tokio::signal::ctrl_c().await.expect("wait for Ctrl+C");
+    px_handle.abort();
     engine.stop().await;
     println!("[Network] Node stopped.");
 }

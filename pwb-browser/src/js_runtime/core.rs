@@ -43,6 +43,10 @@ pub struct DomHandle {
     /// the pipeline (click-to-focus, typing) and JS (`element.focus()`); the
     /// renderer draws the caret for this element.
     pub focused_input: Rc<RefCell<Option<(usize, usize)>>>,
+    /// A URL the page wants to navigate to (set by `__pwb_navigate(url)` from
+    /// JS event handlers). The pipeline checks this after event dispatch and
+    /// restarts the browser with the new bundle.
+    pub pending_navigate: Rc<RefCell<Option<String>>>,
     /// Web API state: `localStorage`/`sessionStorage` maps and detached DOM
     /// nodes (`document.createElement` before they are appended).
     pub web: WebApiState,
@@ -60,6 +64,7 @@ impl DomHandle {
             suppress_context_menu: Arc::new(AtomicBool::new(false)),
             selected_node_id: Rc::new(RefCell::new(None)),
             focused_input: Rc::new(RefCell::new(None)),
+            pending_navigate: Rc::new(RefCell::new(None)),
             web: WebApiState::new(),
             scroll_to_bottom: Rc::new(RefCell::new(Vec::new())),
         }

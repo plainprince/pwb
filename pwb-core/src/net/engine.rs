@@ -10,9 +10,21 @@ use tokio::sync::mpsc;
 
 use crate::crypto::{Keypair, PublicKey};
 use crate::discovery::{DiscoveryConfig, DiscoveryService};
+use crate::stun::discover_mapped_address;
 
 use super::loops;
 use super::messages::{NetworkError, NetworkMessage, OutgoingDatagram};
+
+/// A bootstrap (rendezvous) peer: a well-known node whose address and public
+/// key are known in advance so new nodes can dial into the swarm without an
+/// out-of-band introduction.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BootstrapPeer {
+    /// The bootstrap node's dialable UDP address.
+    pub address: SocketAddr,
+    /// The bootstrap node's Ed25519 public key.
+    pub public_key: PublicKey,
+}
 
 /// Peer information for the peer table.
 #[derive(Debug, Clone)]
@@ -28,7 +40,13 @@ pub struct PeerInfo {
 pub struct NodeConfig {
     pub listen_addr: SocketAddr,
     pub keypair: Keypair,
-    pub bootstrap_peers: Vec<PublicKey>,
+    /// Well-known bootstrap peers this node dials on startup to join the
+    /// swarm. Each entry carries both a dialable address and public key.
+    pub bootstrap_peers: Vec<BootstrapPeer>,
+    /// Optional STUN server (host:port) used to discover this node's public
+    /// IP:port through NAT, so connection links contain a dialable public
+    /// address instead of a private LAN address. `None` disables STUN.
+    pub stun_server: Option<SocketAddr>,
     pub max_peers: usize,
     pub heartbeat_interval: Duration,
 }
@@ -42,6 +60,10 @@ pub struct NodeEngine {
     outgoing_tx: mpsc::UnboundedSender<(SocketAddr, Vec<u8>)>,
     outgoing_rx: Mutex<Option<mpsc::UnboundedReceiver<OutgoingDatagram>>>,
     socket: Mutex<Option<Arc<UdpSocket>>>,
+    /// This node's public IP:port as learned via STUN (NAT traversal). `None`
+    /// when STUN is disabled or the query failed; connection links fall back
+    /// to the local bound address in that case.
+    pub(crate) public_addr: Mutex<Option<SocketAddr>>,
     pub(super) running: Arc<Mutex<bool>>,
     discovery_handle: Mutex<Option<tokio::task::JoinHandle<()>>>,
 }
@@ -60,6 +82,7 @@ impl NodeEngine {
             outgoing_tx,
             outgoing_rx: Mutex::new(Some(outgoing_rx)),
             socket: Mutex::new(None),
+            public_addr: Mutex::new(None),
             running: Arc::new(Mutex::new(false)),
             discovery_handle: Mutex::new(None),
         }
@@ -83,6 +106,16 @@ impl NodeEngine {
         // Bind the UDP listen socket for all network I/O.
         let socket = Arc::new(UdpSocket::bind(self.config.listen_addr).await?);
         *self.socket.lock().unwrap() = Some(Arc::clone(&socket));
+
+        // NAT traversal: ask the STUN server for our public IP:port so
+        // connection links advertise a dialable public address instead of a
+        // private LAN address. Best-effort: a failed STUN query falls back to
+        // the local bound address.
+        if let Some(stun_server) = self.config.stun_server {
+            if let Some(mapped) = discover_mapped_address(&socket, stun_server, Duration::from_secs(5)).await {
+                *self.public_addr.lock().unwrap() = Some(mapped);
+            }
+        }
 
         // Take the receiver so we can move it into the async task
         let message_receiver = self
@@ -262,14 +295,18 @@ impl NodeEngine {
     /// that scans it will peer with us, and when two such networks merge,
     /// peers from both sides are recognized and connected.
     ///
-    /// Uses the *actual* bound socket address when the engine has been
+    /// Uses the STUN-discovered public address (NAT traversal) when available,
+    /// otherwise the *actual* bound socket address when the engine has been
     /// started; falls back to [`NodeConfig::listen_addr`] before `start()`.
     ///
     /// Format: `plain://nodes.plain?connect=<ip:port>/<pubkey_hex>`
     pub fn generate_connection_link(&self) -> String {
-        match self.local_addr() {
-            Some(Ok(addr)) => Self::build_connection_link(addr, self.config.keypair.public),
-            _ => Self::build_connection_link(self.config.listen_addr, self.config.keypair.public),
+        let guard = self.public_addr.lock().unwrap();
+        let addr = (*guard).or_else(|| self.local_addr().and_then(|r| r.ok()));
+        drop(guard);
+        match addr {
+            Some(addr) => Self::build_connection_link(addr, self.config.keypair.public),
+            None => Self::build_connection_link(self.config.listen_addr, self.config.keypair.public),
         }
     }
 
@@ -350,6 +387,54 @@ impl NodeEngine {
     /// Returns Some((SocketAddr, PublicKey)) if the link is valid.
     pub fn parse_connection_link(link: &str) -> Option<(SocketAddr, PublicKey)> {
         crate::system::parse_connection_link(link)
+    }
+
+    /// This node's STUN-discovered public IP:port, if available. `None` when
+    /// STUN is disabled, the query failed, or the engine has not started yet.
+    /// Connection links prefer this address over the local bound address so
+    /// peers behind a NAT remain dialable from the internet.
+    pub fn public_addr(&self) -> Option<SocketAddr> {
+        *self.public_addr.lock().unwrap()
+    }
+
+    /// Dial every configured bootstrap peer and register them in the peer
+    /// table. This is how a new node joins the swarm without an out-of-band
+    /// introduction: bootstrap nodes are well-known rendezvous points.
+    ///
+    /// Returns the list of peers successfully registered. Failures for
+    /// individual bootstrap peers are skipped (one unreachable bootstrap
+    /// does not block joining via another).
+    pub fn connect_bootstrap(&self) -> Vec<PeerInfo> {
+        let mut connected = Vec::new();
+        for bootstrap in &self.config.bootstrap_peers {
+            if let Ok(peer) = self.connect_to(bootstrap.address, bootstrap.public_key) {
+                connected.push(peer);
+            } // skip unreachable bootstrap peers
+        }
+        connected
+    }
+}
+
+impl Clone for NodeEngine {
+    fn clone(&self) -> Self {
+        Self {
+            config: self.config.clone(),
+            peer_table: Arc::clone(&self.peer_table),
+            message_sender: self.message_sender.clone(),
+            message_receiver: Mutex::new(None), // taken by the sender loop after start()
+            outgoing_tx: self.outgoing_tx.clone(),
+            outgoing_rx: Mutex::new(None), // taken by the receiver loop after start()
+            socket: Mutex::new(
+                self.socket
+                    .lock()
+                    .unwrap()
+                    .as_ref()
+                    .map(Arc::clone)
+            ),
+            public_addr: Mutex::new(*self.public_addr.lock().unwrap()),
+            running: Arc::clone(&self.running),
+            discovery_handle: Mutex::new(None), // join handle is not cloned
+        }
     }
 }
 

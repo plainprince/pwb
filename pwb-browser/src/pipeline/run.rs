@@ -1,4 +1,9 @@
 //! Browser window entry point: bundle loading, devtools mount and event loop startup.
+//!
+//! The winit `EventLoop` is created exactly once per process (it cannot be
+//! recreated). Navigation therefore hot-swaps the DOM bundle inside the same
+//! event loop: `about_to_wait` checks `pending_navigate`, resolves the URL,
+//! replaces the DOM handle, re-runs the page script, and keeps rendering.
 
 use crate::bundler;
 use std::path::Path;
@@ -8,6 +13,10 @@ use crate::dom::Dom;
 use crate::js_runtime::{execute_script, DomHandle};
 use crate::render::{SelectionPoint, TextSelection};
 use pwb_core::wire::Bundle;
+use pwb_node::domain::DomainRegistry;
+use pwb_node::host::ArtifactHost;
+use pwb_node::identity::IdentityManager;
+use pwb_node::search::SearchEngine;
 
 use std::sync::{Arc, Mutex};
 use winit::event_loop::EventLoop;
@@ -22,7 +31,16 @@ pub enum PipelineError {
     Windowing(String),
 }
 
-pub fn run_browser_window(bundle_bytes: &[u8]) -> Result<(), PipelineError> {
+/// Build a `BrowserApp` for `bundle_bytes` without running the event loop.
+/// Callers (main.rs) own the `EventLoop` and drive `run_app` once; navigation
+/// swaps the DOM in place via `BrowserApp::navigate_to`.
+pub fn build_browser_app(
+    bundle_bytes: &[u8],
+    search: Arc<SearchEngine>,
+    host: Arc<ArtifactHost>,
+    registry: Arc<DomainRegistry>,
+    identity: Arc<IdentityManager>,
+) -> Result<BrowserApp, PipelineError> {
     println!("Decompiling PlainWeb binary bundle...");
     let bundle = Bundle::deserialize(bundle_bytes).map_err(PipelineError::Wire)?;
 
@@ -149,16 +167,12 @@ pub fn run_browser_window(bundle_bytes: &[u8]) -> Result<(), PipelineError> {
             }
         }
     }
-    let event_loop = EventLoop::new().map_err(|e| PipelineError::Windowing(e.to_string()))?;
 
-    println!(
-        "Opening interactive Skia desktop window (Press F12 or Cmd+Shift+I for devtools.plain)..."
-    );
-    let mut app = BrowserApp {
+    Ok(BrowserApp {
         window: None,
         context: None,
         surface: None,
-        dom_handle_render: dom_handle.clone(),
+        dom_handle_render: dom_handle,
         devtools_state,
         selected_text_shared,
         menu_result,
@@ -175,7 +189,24 @@ pub fn run_browser_window(bundle_bytes: &[u8]) -> Result<(), PipelineError> {
         modifiers_state: winit::keyboard::ModifiersState::default(),
         resize_state: None,
         pixmap: tiny_skia::Pixmap::new(1, 1).unwrap(),
-    };
+        search,
+        host,
+        registry,
+        identity,
+    })
+}
+
+/// Run the browser event loop for `app`, handling in-place navigation swaps.
+///
+/// `about_to_wait` (in app.rs) checks `pending_navigate` and hot-swaps the DOM
+/// bundle within the same event loop. This function returns only when the
+/// window is closed.
+pub fn run_event_loop(mut app: BrowserApp) -> Result<(), PipelineError> {
+    let event_loop = EventLoop::new().map_err(|e| PipelineError::Windowing(e.to_string()))?;
+
+    println!(
+        "Opening interactive Skia desktop window (Press F12 or Cmd+Shift+I for devtools.plain)..."
+    );
     event_loop
         .run_app(&mut app)
         .map_err(|e| PipelineError::Windowing(e.to_string()))?;
