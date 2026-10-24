@@ -167,6 +167,11 @@ impl DiscoveryService {
     /// [`Beacon::listen_port`]. An address change for a recently seen key is
     /// held back until [`ADDR_REBIND_GRACE`] passes (see module docs).
     fn merge(&self, beacon: &Beacon, from: SocketAddr, now: Instant) {
+        // Never let a node discover itself, and ignore beacons that advertise
+        // the placeholder port 0 (such a peer is not dialable).
+        if beacon.public_key == self.keypair.public || beacon.listen_port == 0 {
+            return;
+        }
         let addr = SocketAddr::new(from.ip(), beacon.listen_port);
         let mut table = self.peer_table.lock().unwrap();
         match table.entry(beacon.public_key) {

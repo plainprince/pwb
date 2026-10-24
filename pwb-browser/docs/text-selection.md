@@ -5,8 +5,9 @@
 The PlainWeb Browser needs to support **text selection** with:
 
 - Visual feedback during selection
-- `Ctrl+C`/`Cmd+C` clipboard copy
-- Cross-platform compatibility
+- `Ctrl+C`/`Cmd+C` copy, `Ctrl+X`/`Cmd+X` cut, `Ctrl+V`/`Cmd+V` paste
+- Cross-platform clipboard support (including Linux clipboard managers)
+- Right-click context menu with Copy
 
 ## Solution
 
@@ -39,24 +40,44 @@ pub struct TextSelection {
    window.request_redraw();
    ```
 
-3. **Mouse Up**: Finalize selection and copy to clipboard
+3. **Mouse Up**: Finalize the selected text buffer
    ```rust
    selection.is_selecting = false;
+   selection.selected_text_buffer = compute_selected_text(...);
    ```
 
 ### Clipboard Integration
 
-The browser uses the `arboard` crate for cross-platform clipboard support:
+The browser uses the `arboard` crate for cross-platform clipboard support.
+`BrowserApp` owns **one** `Clipboard` for the whole process lifetime instead of
+creating and dropping one per operation:
 
 ```rust
-if key_event.modifiers.state().control_key() && code == KeyCode::KeyC {
-    if !selection.selected_text_buffer.is_empty() {
-        if let Ok(mut clipboard) = Clipboard::new() {
-            let _ = clipboard.set_text(selection.selected_text_buffer.clone());
-        }
+pub struct BrowserApp {
+    // Kept alive so the X11/Wayland clipboard owner thread survives the copy.
+    clipboard: Option<arboard::Clipboard>,
+}
+
+fn clipboard(&mut self) -> Option<&mut Clipboard> {
+    if self.clipboard.is_none() {
+        self.clipboard = Clipboard::new().ok();
     }
+    self.clipboard.as_mut()
 }
 ```
+
+Keyboard shortcuts are handled in the first `KeyboardInput` arm (later arms
+for pressed keys are unreachable):
+
+- **Copy** (`Ctrl+C` / `Cmd+C`): copies page text selection, or the focused
+  input's value.
+- **Cut** (`Ctrl+X` / `Cmd+X`): copies then deletes the selection (or clears the
+  focused input).
+- **Paste** (`Ctrl+V` / `Cmd+V`): inserts clipboard text at the focused input's
+  caret.
+
+The same long-lived handle backs the right-click **Copy** action. The in-window
+menu repaints on every pointer move, so the row under the cursor is highlighted.
 
 ### Visual Feedback
 
@@ -69,13 +90,13 @@ The renderer highlights selected text by:
 ### Security Considerations
 
 - **No arbitrary data**: Only text can be copied, no DOM nodes or scripts
-- **Explicit opt-in**: Requires `Ctrl+C`/`Cmd+C` key combination
-- **Read-only**: Clipboard access is write-only (set text)
+- **Explicit opt-in**: Clipboard reads happen only for a paste request
+- **Small surface**: Paste text is inserted into the focused `<input>` only
 
 ### Performance
 
 - Selection state is lightweight (just coordinates and flags)
-- Clipboard operations are non-blocking
+- Clipboard calls happen only on an explicit shortcut or menu action
 - Visual feedback is rendered efficiently with Skia
 
 ## Future Directions
@@ -83,4 +104,4 @@ The renderer highlights selected text by:
 1. **Double-click word selection**: Extend to support word-level selection
 2. **Drag-to-select**: Add mouse drag support for selection
 3. **Touch support**: Implement touch-based selection for mobile
-4. **Context menu**: Add right-click context menu with copy option
+4. ~~**Context menu**: Add right-click context menu with copy option~~ — implemented (native on macOS, in-window elsewhere)

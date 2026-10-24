@@ -25,6 +25,8 @@ pub struct MintPolicy {
     pub relay_credits_per_kib: u64,
     /// Verified traffic bytes required per credit minted (the anti-ASIC
     /// floor: issuance rate is bounded by network flow, not compute).
+    /// A shard response is small, so this is set at 64 bytes rather than a
+    /// full KiB or serving a search result could never clear the floor.
     pub traffic_per_credit: u64,
     /// Minimum spacing between mints of the *same* service kind (proof of
     /// time: services must be spread over real time, not burst-computed).
@@ -43,7 +45,7 @@ impl Default for MintPolicy {
             query_credits: 5,
             index_credits: 10,
             relay_credits_per_kib: 1,
-            traffic_per_credit: 1024,
+            traffic_per_credit: 64,
             per_service_cooldown: Duration::from_secs(1),
             epoch: Duration::from_secs(3600),
             epoch_cap: 10_000,

@@ -15,5 +15,6 @@ pub mod layout;
 pub mod pipeline;
 pub mod render;
 pub mod resolver;
+pub mod shell;
 pub mod style;
 pub mod webapi;

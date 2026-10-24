@@ -3,9 +3,18 @@
 use crate::spec::{PlainNode, Tag};
 use std::collections::HashMap;
 
-use super::constants::{CURRENT_VERSION, MAGIC};
+use super::constants::{
+    COMPRESSED_MAGIC, COMPRESSION_VERSION, CURRENT_VERSION, MAGIC, MAX_DECOMPRESSED_BYTES,
+};
 use super::error::WireError;
 use super::symbol::SymbolTable;
+use flate2::read::ZlibDecoder;
+use flate2::write::ZlibEncoder;
+use flate2::Compression;
+use std::io::{Read, Write};
+
+/// `PWBZ` header: magic (4) + version (1) + length (4) + BLAKE3 digest (32).
+const COMPRESSED_HEADER_LEN: usize = 41;
 
 /// A complete compiled PlainWeb bundle.
 #[derive(Debug, Clone, PartialEq)]
@@ -106,7 +115,112 @@ impl Bundle {
         out
     }
 
+    /// Compress the serialized bundle into the `PWBZ` container: magic,
+    /// compression version, uncompressed length (u32 LE), BLAKE3 digest of the
+    /// uncompressed bytes, then a zlib stream.
+    ///
+    /// The digest makes decompression fail closed even when a truncated zlib
+    /// checksum happens to inflate cleanly. The content id of an artifact is
+    /// computed over these bytes, so the compressed form is the canonical
+    /// on-disk/wire representation; uncompressed `PWB1` bytes are still
+    /// accepted by [`Self::deserialize`].
+    pub fn serialize_compressed(&self) -> Vec<u8> {
+        let raw = self.serialize();
+        let mut encoder = ZlibEncoder::new(Vec::new(), Compression::default());
+        encoder
+            .write_all(&raw)
+            .expect("in-memory zlib compression cannot fail");
+        let body = encoder
+            .finish()
+            .expect("in-memory zlib compression cannot fail");
+        let mut out = Vec::with_capacity(COMPRESSED_HEADER_LEN + body.len());
+        out.extend_from_slice(COMPRESSED_MAGIC);
+        out.push(COMPRESSION_VERSION);
+        out.extend_from_slice(&(raw.len() as u32).to_le_bytes());
+        out.extend_from_slice(blake3::hash(&raw).as_bytes());
+        out.extend_from_slice(&body);
+        out
+    }
+
+    /// Whether `src` is a compressed `PWBZ` container (rather than a legacy
+    /// uncompressed `PWB1` bundle).
+    pub fn is_compressed(src: &[u8]) -> bool {
+        src.starts_with(COMPRESSED_MAGIC)
+    }
+
+    /// Inflate a `PWBZ` container, enforcing the declared length and the
+    /// [`MAX_DECOMPRESSED_BYTES`] cap so a hostile artifact cannot expand
+    /// without bound.
+    fn decompress_container(src: &[u8]) -> Result<Vec<u8>, WireError> {
+        if src.len() < COMPRESSED_HEADER_LEN {
+            return Err(WireError::UnexpectedEof);
+        }
+        if src[4] != COMPRESSION_VERSION {
+            return Err(WireError::CompressionFailed(format!(
+                "unsupported compression version {}",
+                src[4]
+            )));
+        }
+        let expected = u32::from_le_bytes([src[5], src[6], src[7], src[8]]) as usize;
+        if expected > MAX_DECOMPRESSED_BYTES {
+            return Err(WireError::CompressionFailed(format!(
+                "declared bundle size {expected} exceeds the {MAX_DECOMPRESSED_BYTES}-byte limit"
+            )));
+        }
+        let mut decoder = ZlibDecoder::new(&src[COMPRESSED_HEADER_LEN..]);
+        // Grow on demand instead of trusting the declared size for an
+        // up-front allocation, but read through the end of the stream so the
+        // zlib checksum is actually verified (a truncated stream must fail).
+        let mut out = Vec::new();
+        let mut chunk = [0u8; 8192];
+        loop {
+            let read = decoder
+                .read(&mut chunk)
+                .map_err(|e| WireError::CompressionFailed(e.to_string()))?;
+            if read == 0 {
+                break;
+            }
+            if out.len() + read > expected {
+                return Err(WireError::CompressionFailed(format!(
+                    "inflated stream exceeds the declared {expected} bytes"
+                )));
+            }
+            out.extend_from_slice(&chunk[..read]);
+        }
+        if out.len() != expected {
+            return Err(WireError::CompressionFailed(format!(
+                "declared {expected} bytes, inflated {}",
+                out.len()
+            )));
+        }
+        // The zlib stream must consume the whole body: trailing garbage
+        // after the stream would otherwise be silently ignored while the
+        // content ID (over the exact bytes) changes.
+        let consumed = decoder.total_in() as usize;
+        let body_len = src.len() - COMPRESSED_HEADER_LEN;
+        if consumed != body_len {
+            return Err(WireError::TrailingBytes(body_len - consumed));
+        }
+        let digest = &src[9..COMPRESSED_HEADER_LEN];
+        if blake3::hash(&out).as_bytes() != digest {
+            return Err(WireError::CompressionFailed(
+                "bundle digest does not match the decompressed bytes".to_string(),
+            ));
+        }
+        Ok(out)
+    }
+
     pub fn deserialize(src: &[u8]) -> Result<Self, WireError> {
+        // Accept both the compressed container and legacy raw `PWB1` bytes, so
+        // every existing artifact and peer keeps working after compression
+        // lands. Decompression is bounded by the declared length.
+        let decompressed;
+        let src = if Self::is_compressed(src) {
+            decompressed = Self::decompress_container(src)?;
+            decompressed.as_slice()
+        } else {
+            src
+        };
         if src.len() < 7 {
             return Err(WireError::UnexpectedEof);
         }
@@ -274,6 +388,9 @@ impl Bundle {
             modules.insert(name, script);
         }
 
+        if cursor != src.len() {
+            return Err(WireError::TrailingBytes(src.len() - cursor));
+        }
         Ok(Bundle {
             version,
             title,

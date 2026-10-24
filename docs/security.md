@@ -5,6 +5,22 @@ does **not**. This document scopes the onion layer only; see
 [§2 Onion Routing & Encryption](design/02-onion-routing.md) for the design and
 [Protocol Reference](protocol.md) for pinned constants.
 
+> **Status (updated 2026-10-19): the onion layer is wired into `NodeEngine`.**
+> Ordinary `NetworkMessage`s travel in signed, encrypted envelopes
+> (`pwb-core/src/net/envelope.rs`): ephemeral X25519 + ChaCha20-Poly1305, an
+> Ed25519 signature over the header and ciphertext, replay protection, and
+> fragmentation to 1200-byte datagrams. A 512-byte onion cell is recognised
+> ahead of envelope decoding and relayed hop-by-hop from the relay's own
+> socket; its payload is chunked across cells, reassembled at the exit, and
+> delivered with the originator's signature. Requests can attach a return path
+> (the relays back to the originator plus the entry relay's dial address), so
+> an exit answers through the same circuit with [`NodeEngine::send_onion_reply`]
+> without ever learning the requester's address. The guarantees below apply to
+> messages sent through [`NodeEngine::send_onion`] or
+> [`NodeEngine::send_onion_request`]; an ordinary envelope still reveals the
+> sender's real address to its directly-connected recipient, which is the point
+> of the separate onion path.
+
 The onion layer is a Sphinx-style fixed-size cell network: every request travels
 as a **512-byte** [`OnionCell`] whose routing slots and payload are encrypted in
 independent layers, one per relay. Each hop peels its layer, shifts the slot
@@ -58,6 +74,11 @@ spoof, or strip. A receiving hop therefore observes only the previous relay's IP
 the originator's address stops at the entry hop. `recv_cell` accepts only
 exactly-`CELL_SIZE` datagrams.
 
+`pwb-browser` uses this for `search.plain` queries, `.pwb` registry resolution,
+and content/artifact fetches by default. `--direct` switches those lookups to
+the authenticated direct transport, where the peer sees this machine's address;
+there is no silent direct fallback when a circuit cannot be built.
+
 ### 5. Destination / path-length inference resistance
 
 `randomize_path` builds each request's path from the caller's active route plus a
@@ -75,7 +96,10 @@ randomized paths with uniformly random payloads of random length. Dispatch is
 scheduled at **exponentially distributed, clamped intervals** (memoryless,
 re-sampled every firing) so there is no fixed period for an analyst to lock onto.
 This makes a single relay's traffic harder to characterize, but see the
-counterpart in "not protect against" §4.
+counterpart in "not protect against" §4. The engine dispatches cover cells
+only when started with `--cover-traffic` (default schedule: exponential,
+clamped to 5-120 s with a 30 s mean), so the protection is opt-in and costs
+bandwidth.
 
 ### 7. Recorded-cell forward secrecy
 
@@ -122,8 +146,9 @@ A network-wide adversary that observes **both** ends of a link can correlate the
 distinctive timing (and count/rate) of a cell entering one relay with a cell
 leaving another. Fixed cell sizes, path randomization, and cover traffic defeat
 *content* and *length* analysis and raise the cost of timing analysis, but they
-do not defeat a global observer that sees enough links. Cover traffic is also
-optional and costs bandwidth; it only helps where it is actually running.
+do not defeat a global observer that sees enough links. Cover traffic also costs
+bandwidth and only helps where it is actually running: pass `--cover-traffic`
+to enable it.
 
 ### 5. Colluding relays and Sybil path capture
 
@@ -143,17 +168,31 @@ There is no access control at the onion layer.
 
 ### 7. Replay and denial of service
 
-Cells carry **no circuit id, counter, or replay cache** (header bytes 2..8 are
-reserved zero, "future: circuit id, cover epoch, flags"). A captured cell can be
-re-injected, and relays perform an ECDH + AEAD per cell with no onion-layer rate
-limiting — a malicious relay or observer can drop, delay, reorder, replay, or
-selectively forward cells. There are no delivery guarantees.
+Cells carry **no circuit id or counter** (header bytes 2..8 are reserved zero,
+"future: circuit id, cover epoch, flags"), but every relay keeps a bounded
+cache of the exact cell ciphertext it recently accepted and drops duplicates
+for five minutes. Re-injecting a captured cell therefore cannot repeat a peel
+or a delivery; an attacker would need to re-encrypt it, which requires the
+relay's key. The cache holds 65,536 digests with oldest-first eviction, and is
+checked after the rate limits: a per-source-IP bucket (128 cells/s, 1024 burst)
+and a global peel budget (4096/s, 8192 burst) still run before any
+X25519/ChaCha work. Because a legitimate retransmission builds fresh cells,
+rejecting identical bytes does not drop normal traffic. A malicious relay or
+observer can still drop, delay, reorder, or selectively forward cells, and
+there are no delivery guarantees.
 
 ### 8. Multi-cell correlation for bulk transfers
 
-`PAYLOAD_MAX` is 118 bytes per cell; larger transfers will fragment into
-multi-cell streams above this layer (future work). Until that framing is defined,
-volume-based correlation across the cells of one logical request is not addressed.
+`PAYLOAD_MAX` is 118 bytes per cell. `NodeEngine` fragments one logical
+message into `PON1` cells and reassembles them at the exit. Before
+fragmentation the signed `PON4` envelope is padded to a fixed 4 KiB size, or
+to the 48 KiB maximum when it does not fit, so every transfer in a size class
+produces the same cell count and an observer cannot fingerprint a bulk
+transfer by its exact length. The framing still does **not** hide that the
+cells belong to one message: they share a fragment id, leave the originator at
+the same time, and traverse the same path. An observer that sees both ends can
+correlate timing (and distinguish the two envelope classes) even though
+payloads, exact sizes, and path lengths stay hidden.
 
 ### 9. Non-onion metadata
 
@@ -188,7 +227,8 @@ reduces timing resistance.
 PlainWeb uses STUN (RFC 5389 Binding Request) so a node behind a router can
 advertise its public IP:port in connection links instead of an unreachable
 private LAN address. The default STUN server is Google's public STUN service
-(`stun.l.google.com:19302`), overridable with `--stun-server`.
+(`stun.l.google.com:19302`); use `--stun-server` to point at another one or
+`--no-stun` to disable the query entirely.
 
 This means the STUN server learns this node's public IP address and the fact
 that it is participating in PlainWeb. That is inherent to how STUN works: the
@@ -221,7 +261,9 @@ their own design docs.
 | Distinguishing the final hop from an intermediate hop | Yes |
 | Origin IP revealed to downstream relays | Yes |
 | Length-based linkability across requests | Yes (randomized paths) |
-| Timing characterization of one relay | Mitigated (cover traffic) |
+| Origin address revealed to the exit when replying | Yes (reply enters at the previous hop) |
+| Correlating the cells of one multi-cell message | Partial (fixed envelope classes hide exact size; shared fragment id and timing remain) |
+| Timing characterization of one relay | Mitigated (cover traffic when enabled) |
 | Recorded cells decrypted after a relay key leaks | Yes (per-cell forward secrecy) |
 | Tampered directives surviving to the next hop | Yes (AEAD) |
 | Exit hop learning the request | No (add end-to-end encryption above) |
@@ -229,10 +271,10 @@ their own design docs.
 | Compromised originator/destination endpoint | No |
 | Global passive timing correlation | No |
 | Colluding/Sybil relays, no guard nodes | No |
-| Sender authentication / access control | No |
-| Replay protection | No (planned circuit id) |
-| DoS / rate limiting | No |
-| Multi-cell bulk-transfer correlation | No (framing future) |
+| Sender authentication / access control | Yes for the originator (signed inner message); no access control |
+| Replay protection | Partial (exact-cell cache; no circuit id for re-encrypted replays) |
+| DoS / rate limiting | Partial (authenticated messages are per-peer token-bucketed; onion cells are per-source token-bucketed with a global peel budget, so spoofed sources cannot exceed a fixed peel rate) |
+| Multi-cell bulk-transfer correlation | Partial (fixed 4 KiB/48 KiB envelopes; fragment id and timing remain) |
 | LAN beacons & connection links | No (out-of-band by design) |
 | Public IP disclosed to STUN server for NAT traversal | No (trade-off: dialable from internet) |
 

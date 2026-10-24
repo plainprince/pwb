@@ -31,6 +31,7 @@
 mod claim;
 mod error;
 mod issuer;
+mod wire;
 mod withdraw;
 
 #[cfg(test)]
@@ -46,6 +47,15 @@ pub const DEFAULT_DENOMINATIONS: &[u64] = &[1, 5, 10, 25, 50];
 pub use claim::BlindClaim;
 pub use error::{BlindClaimError, BlindError};
 pub use issuer::{BlindBalanceIssuer, IssuerBinding};
+pub(crate) use wire::{
+    binding_to_wire, claim_from_wire, claim_to_wire, request_from_wire, request_to_wire,
+    sign_binding, verified_binding,
+};
+
+/// Serialize a built blind claim for the wire (`ClaimDomainBlind`).
+pub fn blind_claim_wire(claim: &BlindClaim) -> pwb_core::net::BlindClaimWire {
+    wire::claim_to_wire(claim)
+}
 pub use withdraw::{
     withdraw_attested, withdrawal_evidence, BlindWithdrawal, WithdrawalReceipt, WithdrawnVoucher,
 };

@@ -1,0 +1,46 @@
+[package]
+name = "pwb-fuzz"
+version = "0.0.0"
+edition = "2021"
+publish = false
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+pwb-core = { path = "../pwb-core" }
+pwb-web = { path = "../pwb-web" }
+serde_json = "1.0"
+
+[[bin]]
+name = "onion_cell"
+path = "fuzz_targets/onion_cell.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "network_message"
+path = "fuzz_targets/network_message.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "bundle"
+path = "fuzz_targets/bundle.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "pml"
+path = "fuzz_targets/pml.rs"
+test = false
+doc = false
+bench = false
+
+# Keep the fuzzers out of the main workspace; they need a nightly toolchain and
+# cargo-fuzz, while ordinary builds stay on stable.
+[workspace]

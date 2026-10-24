@@ -58,7 +58,16 @@ history is attested and stored by $N$ deterministic peer nodes
 - No self-vouching
 - Every signature (a verifiable $k$-of-$N$ quorum of per-attestor Ed25519 signatures — any $k$ members must independently vouch; no new dependencies)
 
-`DomainRegistry::register_attested` claims a `.pwb` domain only against a verified certificate, checks reserved/duplicate rules, and tracks per-owner claimed spend so one certificate cannot fund multiple claims (`InsufficientAttestedBalance` on overdraw).
+By default the neighborhood is the deterministic attestor set derived from the
+receiver's live peers (`DEFAULT_QUORUM_K = 5`, shrinking to the known peer
+count). That is circular for a fresh node: its only peer could supply a
+self-consistent certificate. `DomainService::new_with_trust` replaces the peer
+view with operator-pinned anchors (`--trust-anchor` / `PWB_TRUST_ANCHORS`); the
+threshold becomes `min(5, anchors)`, and both gossip and registry sync verify
+against that fixed set. The anchor identities must be published independently
+of the seed link for the pin to mean anything.
+
+`DomainRegistry::register_attested` claims a `.pwb` domain only against a verified certificate, checks reserved/duplicate rules, and enforces the attested budget against spend derived from the live funded records (`InsufficientAttestedBalance` on overdraw). Every attested record cites its funding — the certificate's `(head, balance)` — and the owner's signature commits to that citation (`PWBDOMAIN2`), so the citation cannot be stripped or swapped without invalidating the record. The engine's payload check and every claim path (`claim_attested`, `on_attested_claim`, registry sync) enforce the same funding-bound verification, and merges repair overdrawn funding groups (see §5). The per-owner `claimed` side table is gone: because funding travels on the records, spend accounting survives restarts and converges on merge (one record counts once, however many partitions gossiped it).
 
 ### `pwb-node::blind` — Blind Balance & Privacy Preservation
 

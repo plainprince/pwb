@@ -1,6 +1,6 @@
 use super::*;
-use crate::crypto::{ContentId, DhPublicKey, Keypair, Signature};
-use crate::onion::{OnionCell, OnionError, CELL_SIZE};
+use crate::crypto::{ContentId, DhPublicKey, Keypair};
+use crate::onion::{CoverConfig, OnionCell, OnionError, CELL_SIZE};
 use std::net::SocketAddr;
 use std::str::FromStr;
 use std::time::{Duration, Instant};
@@ -110,96 +110,113 @@ async fn test_send_and_broadcast() {
 
 #[tokio::test]
 async fn test_message_processing_peer_discovery() {
-    let kp = Keypair::generate();
-    let config = NodeConfig {
+    let kp_a = Keypair::generate();
+    let engine_a = NodeEngine::new(NodeConfig {
         listen_addr: SocketAddr::from_str("127.0.0.1:0").unwrap(),
-        keypair: kp.clone(),
+        keypair: kp_a.clone(),
         bootstrap_peers: Vec::new(),
         stun_server: None,
         max_peers: 100,
         heartbeat_interval: Duration::from_secs(30),
-    };
+    });
+    engine_a.start().await.expect("A starts");
+    let addr_a = engine_a.local_addr().unwrap().unwrap();
 
-    let engine = NodeEngine::new(config);
-    let _ = engine.start().await;
+    let kp_b = Keypair::generate();
+    let engine_b = NodeEngine::new(NodeConfig {
+        listen_addr: SocketAddr::from_str("127.0.0.1:0").unwrap(),
+        keypair: kp_b.clone(),
+        bootstrap_peers: Vec::new(),
+        stun_server: None,
+        max_peers: 100,
+        heartbeat_interval: Duration::from_secs(30),
+    });
+    engine_b.start().await.expect("B starts");
+    let addr_b = engine_b.local_addr().unwrap().unwrap();
 
-    // Create a peer discovery message from our own keypair
-    let message = NetworkMessage::PeerDiscovery {
-        known_peers: Vec::new(),
-        sender_pubkey: kp.public,
-    };
+    engine_b.connect_to(addr_a, kp_a.public).expect("B knows A");
+    engine_b
+        .send_to(
+            &kp_a.public,
+            NetworkMessage::PeerDiscovery {
+                known_peers: Vec::new(),
+                sender_pubkey: kp_b.public,
+            },
+        )
+        .expect("B sends PeerDiscovery to A");
 
-    // Note: The send_to method requires the peer to be in the peer table first
-    // So we'll use the broadcast method instead for testing message processing
-    // Since both send_to and broadcast use the same message channel, this tests
-    // that messages are properly processed through the handler loop
-    let send_result = engine.broadcast(message);
-    assert!(send_result.is_ok());
+    tokio::time::sleep(Duration::from_millis(150)).await;
 
-    // Give the message handler a moment to process the message
-    tokio::time::sleep(Duration::from_millis(50)).await;
+    // A attributes the datagram to the key that signed it and uses the real
+    // source address — never the destination address the sender wrote to.
+    let peer = engine_a
+        .get_peer(&kp_b.public)
+        .expect("A learned B from B's signed datagram");
+    assert_eq!(peer.public_key, kp_b.public);
+    assert_eq!(peer.address, addr_b);
 
-    // Our own peer is automatically added to the peer table when the engine starts
-    let peer = engine.get_peer(&kp.public);
-    assert!(peer.is_some());
-    assert_eq!(peer.unwrap().public_key, kp.public);
+    // A never registers itself, even though it sent the original message.
+    assert!(
+        engine_a.get_peer(&kp_a.public).is_none(),
+        "a node must never appear in its own peer table"
+    );
 
-    engine.stop().await;
+    engine_a.stop().await;
+    engine_b.stop().await;
 }
 
 #[tokio::test]
 async fn test_message_processing_with_known_peers() {
-    let kp = Keypair::generate();
-    let config = NodeConfig {
+    let kp_a = Keypair::generate();
+    let engine_a = NodeEngine::new(NodeConfig {
         listen_addr: SocketAddr::from_str("127.0.0.1:0").unwrap(),
-        keypair: kp.clone(),
+        keypair: kp_a.clone(),
         bootstrap_peers: Vec::new(),
         stun_server: None,
         max_peers: 100,
         heartbeat_interval: Duration::from_secs(30),
-    };
+    });
+    engine_a.start().await.expect("A starts");
+    let addr_a = engine_a.local_addr().unwrap().unwrap();
 
-    let engine = NodeEngine::new(config);
-    let _ = engine.start().await;
+    let kp_b = Keypair::generate();
+    let engine_b = NodeEngine::new(NodeConfig {
+        listen_addr: SocketAddr::from_str("127.0.0.1:0").unwrap(),
+        keypair: kp_b.clone(),
+        bootstrap_peers: Vec::new(),
+        stun_server: None,
+        max_peers: 100,
+        heartbeat_interval: Duration::from_secs(30),
+    });
+    engine_b.start().await.expect("B starts");
 
-    // Create two additional peer keypairs
+    // Keys with no dialable address must not be registered at the sender's
+    // address: doing so tells the network that someone else's key lives here.
     let peer1_kp = Keypair::generate();
     let peer2_kp = Keypair::generate();
+    engine_b.connect_to(addr_a, kp_a.public).expect("B knows A");
+    engine_b
+        .send_to(
+            &kp_a.public,
+            NetworkMessage::PeerDiscovery {
+                known_peers: vec![peer1_kp.public, peer2_kp.public],
+                sender_pubkey: kp_b.public,
+            },
+        )
+        .expect("B sends PeerDiscovery to A");
 
-    // Create a peer discovery message that includes known peers
-    let message = NetworkMessage::PeerDiscovery {
-        known_peers: vec![peer1_kp.public, peer2_kp.public],
-        sender_pubkey: kp.public,
-    };
+    tokio::time::sleep(Duration::from_millis(150)).await;
 
-    // Broadcast the message to test processing
-    let send_result = engine.broadcast(message);
-    assert!(send_result.is_ok());
+    assert!(engine_a.get_peer(&kp_b.public).is_some());
+    assert!(
+        engine_a.get_peer(&peer1_kp.public).is_none(),
+        "address-less peers are not registered at the sender's address"
+    );
+    assert!(engine_a.get_peer(&peer2_kp.public).is_none());
+    assert!(engine_a.get_peer(&kp_a.public).is_none());
 
-    // Give the message handler a moment to process the message
-    tokio::time::sleep(Duration::from_millis(50)).await;
-
-    // Now all three peers should be in the peer table
-    let peer1 = engine.get_peer(&peer1_kp.public);
-    let peer2 = engine.get_peer(&peer2_kp.public);
-    let self_peer = engine.get_peer(&kp.public);
-
-    assert!(peer1.is_some());
-    assert!(peer2.is_some());
-    assert!(self_peer.is_some());
-
-    // Check that they have the correct public keys and default reputation
-    let peer1_info = peer1.unwrap();
-    let peer2_info = peer2.unwrap();
-    let self_peer_info = self_peer.unwrap();
-    assert_eq!(peer1_info.public_key, peer1_kp.public);
-    assert_eq!(peer1_info.reputation, 0);
-    assert_eq!(peer2_info.public_key, peer2_kp.public);
-    assert_eq!(peer2_info.reputation, 0);
-    assert_eq!(self_peer_info.public_key, kp.public);
-    assert_eq!(self_peer_info.reputation, 0);
-
-    engine.stop().await;
+    engine_a.stop().await;
+    engine_b.stop().await;
 }
 
 /// Test generating and parsing a connection link.
@@ -485,66 +502,80 @@ async fn test_cover_decoy_dispatched_over_cell_channel() {
 
 /// Engine error paths: double-start is a no-op, `peer_table()` exposes
 /// the shared table, unknown-peer sends fail before touching the
-/// channel, and gossip announcements register/refresh the publisher.
+/// channel, and inbound traffic registers/refreshes the authenticated
+/// sender without ever registering the local node itself.
 #[tokio::test]
 async fn test_node_engine_error_paths_and_gossip_registration() {
-    let config = NodeConfig {
+    let kp_a = Keypair::generate();
+    let engine_a = NodeEngine::new(NodeConfig {
         listen_addr: SocketAddr::from_str("127.0.0.1:0").unwrap(),
-        keypair: Keypair::generate(),
+        keypair: kp_a.clone(),
         bootstrap_peers: Vec::new(),
         stun_server: None,
         max_peers: 100,
         heartbeat_interval: Duration::from_secs(30),
-    };
-    let engine = NodeEngine::new(config);
+    });
 
-    engine.start().await.expect("first start");
-    engine.start().await.expect("second start is a no-op");
+    engine_a.start().await.expect("first start");
+    engine_a.start().await.expect("second start is a no-op");
     assert!(
-        engine.peer_table().lock().unwrap().is_empty(),
+        engine_a.peer_table().lock().unwrap().is_empty(),
         "no peers registered before any traffic"
     );
 
     // Unknown peer → PeerNotFound before anything is queued.
     let stranger = Keypair::generate().public;
-    let err = engine
+    let err = engine_a
         .send_to(
             &stranger,
             NetworkMessage::SearchQuery {
                 query: "x".to_string(),
-                sender: Keypair::generate().public,
+                sender: kp_a.public,
             },
         )
         .unwrap_err();
     assert!(matches!(err, NetworkError::PeerNotFound(_)));
 
-    // A gossip announcement registers the publisher and refreshes it.
-    let publisher = Keypair::generate().public;
-    engine
-        .broadcast(NetworkMessage::GossipAnnounce {
-            content_id: ContentId([1u8; 32]),
-            title: "artifact".to_string(),
-            publisher,
-            signature: Signature([2u8; 64]),
-        })
-        .expect("broadcast enqueues");
-    tokio::time::sleep(Duration::from_millis(50)).await;
-    let seen = engine.get_peer(&publisher).expect("publisher registered");
-    assert_eq!(seen.public_key, publisher);
+    let addr_a = engine_a.local_addr().unwrap().unwrap();
+    let kp_b = Keypair::generate();
+    let engine_b = NodeEngine::new(NodeConfig {
+        listen_addr: SocketAddr::from_str("127.0.0.1:0").unwrap(),
+        keypair: kp_b.clone(),
+        bootstrap_peers: Vec::new(),
+        stun_server: None,
+        max_peers: 100,
+        heartbeat_interval: Duration::from_secs(30),
+    });
+    engine_b.start().await.expect("B starts");
+    engine_b.connect_to(addr_a, kp_a.public).expect("B knows A");
 
-    // Second announcement refreshes last_seen on the existing entry.
-    engine
-        .broadcast(NetworkMessage::GossipAnnounce {
-            content_id: ContentId([3u8; 32]),
-            title: "artifact 2".to_string(),
-            publisher,
-            signature: Signature([4u8; 64]),
-        })
-        .expect("broadcast enqueues");
-    tokio::time::sleep(Duration::from_millis(50)).await;
-    assert!(engine.get_peer(&publisher).is_some());
+    // A gossip announcement from B registers B and stamps `last_seen`.
+    engine_b
+        .send_to(
+            &kp_a.public,
+            NetworkMessage::gossip_announce(&kp_b, ContentId([1u8; 32]), "artifact"),
+        )
+        .expect("B sends gossip");
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    let first = engine_a.get_peer(&kp_b.public).expect("B registered");
+    assert_eq!(first.public_key, kp_b.public);
 
-    engine.stop().await;
+    // A later announcement refreshes the existing entry rather than
+    // registering a duplicate.
+    tokio::time::sleep(Duration::from_millis(30)).await;
+    engine_b
+        .send_to(
+            &kp_a.public,
+            NetworkMessage::gossip_announce(&kp_b, ContentId([3u8; 32]), "artifact 2"),
+        )
+        .expect("B sends gossip");
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    let second = engine_a.get_peer(&kp_b.public).expect("B still registered");
+    assert!(second.last_seen > first.last_seen, "last_seen refreshed");
+    assert!(engine_a.get_peer(&kp_a.public).is_none());
+
+    engine_a.stop().await;
+    engine_b.stop().await;
 }
 
 #[tokio::test]
@@ -850,7 +881,10 @@ async fn test_connection_link_uses_public_addr_when_stun_available() {
     let local_addr = engine.local_addr().expect("bound").expect("addr");
     let link_before = engine.generate_connection_link();
     let parsed_before = NodeEngine::parse_connection_link(&link_before).unwrap();
-    assert_eq!(parsed_before.0, local_addr, "link uses local addr before STUN");
+    assert_eq!(
+        parsed_before.0, local_addr,
+        "link uses local addr before STUN"
+    );
 
     // Simulate STUN having discovered a public address.
     let public_addr: SocketAddr = "203.0.113.45:19302".parse().unwrap();
@@ -858,8 +892,14 @@ async fn test_connection_link_uses_public_addr_when_stun_available() {
 
     let link_after = engine.generate_connection_link();
     let parsed_after = NodeEngine::parse_connection_link(&link_after).unwrap();
-    assert_eq!(parsed_after.0, public_addr, "link uses public addr after STUN");
-    assert_ne!(parsed_after.0, local_addr, "public addr differs from local addr");
+    assert_eq!(
+        parsed_after.0, public_addr,
+        "link uses public addr after STUN"
+    );
+    assert_ne!(
+        parsed_after.0, local_addr,
+        "public addr differs from local addr"
+    );
 
     engine.stop().await;
 }
@@ -894,7 +934,10 @@ async fn test_connect_bootstrap_registers_peers() {
     );
 
     let peer = engine.get_peer(&bootstrap_kp.public).unwrap();
-    assert_eq!(peer.address, "127.0.0.1:9000".parse::<SocketAddr>().unwrap());
+    assert_eq!(
+        peer.address,
+        "127.0.0.1:9000".parse::<SocketAddr>().unwrap()
+    );
 
     engine.stop().await;
 }
@@ -904,35 +947,622 @@ async fn test_connect_bootstrap_registers_peers() {
 /// about the rest of the swarm.
 #[tokio::test]
 async fn test_peer_exchange_adds_peers_with_advertised_addresses() {
-    let kp = Keypair::generate();
-    let config = NodeConfig {
+    let kp_a = Keypair::generate();
+    let engine_a = NodeEngine::new(NodeConfig {
         listen_addr: "127.0.0.1:0".parse::<SocketAddr>().unwrap(),
-        keypair: kp.clone(),
+        keypair: kp_a.clone(),
         bootstrap_peers: Vec::new(),
         stun_server: None,
         max_peers: 100,
         heartbeat_interval: Duration::from_secs(30),
-    };
-    let engine = NodeEngine::new(config);
-    let _ = engine.start().await;
+    });
+    engine_a.start().await.expect("A starts");
+    let addr_a = engine_a.local_addr().unwrap().unwrap();
+
+    // A second node receives the exchange; A must not teach itself.
+    let kp_b = Keypair::generate();
+    let engine_b = NodeEngine::new(NodeConfig {
+        listen_addr: "127.0.0.1:0".parse::<SocketAddr>().unwrap(),
+        keypair: kp_b.clone(),
+        bootstrap_peers: Vec::new(),
+        stun_server: None,
+        max_peers: 100,
+        heartbeat_interval: Duration::from_secs(30),
+    });
+    engine_b.start().await.expect("B starts");
+    engine_b.connect_to(addr_a, kp_a.public).expect("B knows A");
 
     let peer1 = Keypair::generate();
     let peer2 = Keypair::generate();
     let addr1: SocketAddr = "10.0.0.1:5000".parse().unwrap();
     let addr2: SocketAddr = "10.0.0.2:6000".parse().unwrap();
 
-    engine.broadcast(NetworkMessage::PeerExchange {
-        peers: vec![(addr1, peer1.public), (addr2, peer2.public)],
-        sender_pubkey: kp.public,
-    })
-    .expect("broadcast enqueues");
+    engine_b
+        .send_to(
+            &kp_a.public,
+            NetworkMessage::PeerExchange {
+                peers: vec![(addr1, peer1.public), (addr2, peer2.public)],
+                sender_pubkey: kp_b.public,
+            },
+        )
+        .expect("B sends exchange to A");
 
-    tokio::time::sleep(Duration::from_millis(100)).await;
+    tokio::time::sleep(Duration::from_millis(150)).await;
 
-    let p1 = engine.get_peer(&peer1.public).expect("peer1 learned");
+    let p1 = engine_a.get_peer(&peer1.public).expect("peer1 learned");
     assert_eq!(p1.address, addr1, "peer1 uses advertised address");
-    let p2 = engine.get_peer(&peer2.public).expect("peer2 learned");
+    let p2 = engine_a.get_peer(&peer2.public).expect("peer2 learned");
     assert_eq!(p2.address, addr2, "peer2 uses advertised address");
+    assert!(engine_a.get_peer(&kp_a.public).is_none());
+
+    engine_a.stop().await;
+    engine_b.stop().await;
+}
+
+/// The heartbeat is a real liveness probe, not just a timer: a peer that
+/// answers a Ping has its `last_seen` refreshed, so an actively talking peer
+/// never expires from the table.
+#[tokio::test]
+async fn test_heartbeat_refreshes_peer_liveness() {
+    let kp_b = Keypair::generate();
+    let engine_b = NodeEngine::new(NodeConfig {
+        listen_addr: SocketAddr::from_str("127.0.0.1:0").unwrap(),
+        keypair: kp_b.clone(),
+        bootstrap_peers: Vec::new(),
+        stun_server: None,
+        max_peers: 100,
+        heartbeat_interval: Duration::from_millis(80),
+    });
+    engine_b.start().await.expect("B starts");
+    let addr_b = engine_b.local_addr().unwrap().unwrap();
+
+    let kp_a = Keypair::generate();
+    let engine_a = NodeEngine::new(NodeConfig {
+        listen_addr: SocketAddr::from_str("127.0.0.1:0").unwrap(),
+        keypair: kp_a.clone(),
+        bootstrap_peers: Vec::new(),
+        stun_server: None,
+        max_peers: 100,
+        heartbeat_interval: Duration::from_millis(80),
+    });
+    engine_a.start().await.expect("A starts");
+    engine_a.connect_to(addr_b, kp_b.public).expect("A knows B");
+
+    let before = engine_a.get_peer(&kp_b.public).unwrap().last_seen;
+
+    // Wait for at least one Ping/Pong round trip to refresh B.
+    let mut refreshed = false;
+    for _ in 0..20 {
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        if engine_a
+            .get_peer(&kp_b.public)
+            .is_some_and(|peer| peer.last_seen > before)
+        {
+            refreshed = true;
+            break;
+        }
+    }
+    assert!(refreshed, "Pong from a live peer refreshes last_seen");
+
+    engine_a.stop().await;
+    engine_b.stop().await;
+}
+
+/// Datagrams that are not signed, are signed by the wrong key for the
+/// identity they claim, or use the old unsigned JSON framing never reach the
+/// peer table or the application.
+#[tokio::test]
+async fn test_forged_and_impersonating_datagrams_are_dropped() {
+    let victim_engine_key = Keypair::generate();
+    let victim_dh = crate::crypto::DhKeypair::from_ed25519(&victim_engine_key);
+    let engine = NodeEngine::new(NodeConfig {
+        listen_addr: SocketAddr::from_str("127.0.0.1:0").unwrap(),
+        keypair: victim_engine_key,
+        bootstrap_peers: Vec::new(),
+        stun_server: None,
+        max_peers: 100,
+        heartbeat_interval: Duration::from_secs(30),
+    });
+    engine.start().await.expect("engine starts");
+    let addr = engine.local_addr().unwrap().unwrap();
+
+    let victim = Keypair::generate();
+    let attacker = Keypair::generate();
+    let raw = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+
+    // Legacy unsigned framing is not accepted at all.
+    let unsigned = serde_json::to_vec(&NetworkMessage::SearchQuery {
+        query: "plaintext injection".to_string(),
+        sender: victim.public,
+    })
+    .unwrap();
+    raw.send_to(&unsigned, addr).await.unwrap();
+
+    // A signed message whose payload claims to be someone else is rejected.
+    let impersonating = serde_json::to_vec(&NetworkMessage::SearchQuery {
+        query: "impersonation".to_string(),
+        sender: victim.public,
+    })
+    .unwrap();
+    for datagram in super::envelope::encode_for(
+        &attacker,
+        &victim_dh.public,
+        1,
+        crate::discovery::unix_time(),
+        &impersonating,
+    )
+    .unwrap()
+    {
+        raw.send_to(&datagram, addr).await.unwrap();
+    }
+
+    tokio::time::sleep(Duration::from_millis(150)).await;
+    assert!(
+        engine.get_peer(&victim.public).is_none(),
+        "another key cannot speak for the victim"
+    );
+    assert!(
+        engine.get_peer(&attacker.public).is_none(),
+        "an impersonating datagram is dropped entirely"
+    );
+
+    // The same sender with a truthful identity is accepted.
+    let honest = serde_json::to_vec(&NetworkMessage::SearchQuery {
+        query: "hello".to_string(),
+        sender: attacker.public,
+    })
+    .unwrap();
+    for datagram in super::envelope::encode_for(
+        &attacker,
+        &victim_dh.public,
+        2,
+        crate::discovery::unix_time(),
+        &honest,
+    )
+    .unwrap()
+    {
+        raw.send_to(&datagram, addr).await.unwrap();
+    }
+    tokio::time::sleep(Duration::from_millis(150)).await;
+    assert!(
+        engine.get_peer(&attacker.public).is_some(),
+        "an honestly signed message registers the sender"
+    );
 
     engine.stop().await;
+}
+
+/// A three-relay onion path actually forwards fixed-size cells hop-by-hop and
+/// delivers an authenticated request at the exit. Each relay sees only the
+/// previous hop's address, and relay work is reported for credit accounting.
+#[tokio::test]
+async fn test_onion_path_relays_and_delivers_signed_message() {
+    fn engine(kp: Keypair) -> NodeEngine {
+        NodeEngine::new(NodeConfig {
+            listen_addr: "127.0.0.1:0".parse().unwrap(),
+            keypair: kp,
+            bootstrap_peers: Vec::new(),
+            stun_server: None,
+            max_peers: 100,
+            heartbeat_interval: Duration::from_secs(30),
+        })
+    }
+
+    let kp_origin = Keypair::generate();
+    let kp_a = Keypair::generate();
+    let kp_b = Keypair::generate();
+    let kp_c = Keypair::generate();
+
+    let origin = engine(kp_origin.clone());
+    let relay_a = engine(kp_a.clone());
+    let relay_b = engine(kp_b.clone());
+    let relay_c = engine(kp_c.clone());
+    for node in [&origin, &relay_a, &relay_b, &relay_c] {
+        node.start().await.expect("node starts");
+    }
+    let addr_a = relay_a.local_addr().unwrap().unwrap();
+    let addr_b = relay_b.local_addr().unwrap().unwrap();
+    let addr_c = relay_c.local_addr().unwrap().unwrap();
+
+    // Origin knows the entry hop; each relay knows only its next hop, so the
+    // exit can never observe the origin's address.
+    origin.connect_to(addr_a, kp_a.public).unwrap();
+    relay_a.connect_to(addr_b, kp_b.public).unwrap();
+    relay_b.connect_to(addr_c, kp_c.public).unwrap();
+
+    let mut delivered = relay_c.subscribe_onion();
+    let mut relayed_a = relay_a.subscribe_relay();
+    let mut relayed_b = relay_b.subscribe_relay();
+
+    let path = [
+        DhPublicKey::from_ed25519(&kp_a.public).unwrap(),
+        DhPublicKey::from_ed25519(&kp_b.public).unwrap(),
+        DhPublicKey::from_ed25519(&kp_c.public).unwrap(),
+    ];
+    origin
+        .send_onion_to(addr_a, &path, &NetworkMessage::Ping { nonce: 0x5eed })
+        .expect("origin sends onion request");
+
+    let (sender, message) = tokio::time::timeout(Duration::from_secs(2), delivered.recv())
+        .await
+        .expect("exit delivers")
+        .expect("delivery channel open");
+    assert_eq!(sender, kp_origin.public);
+    assert_eq!(message, NetworkMessage::Ping { nonce: 0x5eed });
+
+    // A message larger than one cell's 118-byte payload must be chunked and
+    // reassembled at the exit without changing its authenticated sender.
+    let large = NetworkMessage::SearchQuery {
+        query: "chunked onion payload ".repeat(30),
+        sender: kp_origin.public,
+    };
+    origin
+        .send_onion_to(addr_a, &path, &large)
+        .expect("large message sends across cells");
+    let (sender, delivered_large) = tokio::time::timeout(Duration::from_secs(2), delivered.recv())
+        .await
+        .expect("exit reassembles large message")
+        .expect("delivery channel open");
+    assert_eq!(sender, kp_origin.public);
+    assert_eq!(delivered_large, large);
+
+    let event = tokio::time::timeout(Duration::from_secs(2), relayed_a.recv())
+        .await
+        .expect("entry relay reports work")
+        .expect("relay channel open");
+    assert_eq!(event.bytes, CELL_SIZE as u64);
+    let event_from_b = tokio::time::timeout(Duration::from_secs(2), relayed_b.recv())
+        .await
+        .expect("middle relay reports work")
+        .expect("relay channel open");
+    assert_eq!(event_from_b.bytes, CELL_SIZE as u64);
+
+    for node in [&origin, &relay_a, &relay_b, &relay_c] {
+        node.stop().await;
+    }
+}
+
+/// A request sent through an onion circuit gets its answer back along the
+/// return path: the exit replies to the second-to-last relay and the reply
+/// traverses the earlier relays to reach the origin, which never told the
+/// exit its address.
+#[tokio::test]
+async fn test_onion_request_reply_circuit_round_trips() {
+    fn engine(kp: Keypair) -> NodeEngine {
+        NodeEngine::new(NodeConfig {
+            listen_addr: "127.0.0.1:0".parse().unwrap(),
+            keypair: kp,
+            bootstrap_peers: Vec::new(),
+            stun_server: None,
+            max_peers: 100,
+            heartbeat_interval: Duration::from_secs(30),
+        })
+    }
+
+    let kp_origin = Keypair::generate();
+    let kp_a = Keypair::generate();
+    let kp_b = Keypair::generate();
+    let kp_c = Keypair::generate();
+    let origin = engine(kp_origin.clone());
+    let relay_a = engine(kp_a.clone());
+    let relay_b = engine(kp_b.clone());
+    let relay_c = engine(kp_c.clone());
+    for node in [&origin, &relay_a, &relay_b, &relay_c] {
+        node.start().await.expect("node starts");
+    }
+    let addr_a = relay_a.local_addr().unwrap().unwrap();
+    let addr_b = relay_b.local_addr().unwrap().unwrap();
+    let addr_c = relay_c.local_addr().unwrap().unwrap();
+    origin.connect_to(addr_a, kp_a.public).unwrap();
+    relay_a.connect_to(addr_b, kp_b.public).unwrap();
+    relay_b.connect_to(addr_c, kp_c.public).unwrap();
+    // The origin needs a dial address for every relay it names — including the
+    // return entry — because it builds the return path before sending.
+    origin.connect_to(addr_b, kp_b.public).unwrap();
+
+    let mut requests = relay_c.subscribe_onion_requests();
+    let path = [
+        DhPublicKey::from_ed25519(&kp_a.public).unwrap(),
+        DhPublicKey::from_ed25519(&kp_b.public).unwrap(),
+        DhPublicKey::from_ed25519(&kp_c.public).unwrap(),
+    ];
+    let waiter = {
+        let origin = origin.clone();
+        let path = path.to_vec();
+        tokio::spawn(async move {
+            origin
+                .send_onion_request(
+                    &path,
+                    &NetworkMessage::SearchQuery {
+                        query: "private query".to_string(),
+                        sender: kp_origin.public,
+                    },
+                    Duration::from_secs(3),
+                )
+                .await
+        })
+    };
+
+    let request = tokio::time::timeout(Duration::from_secs(2), requests.recv())
+        .await
+        .expect("exit delivers the request")
+        .expect("request channel open");
+    assert_eq!(request.sender, kp_origin.public);
+    assert_eq!(
+        request.message,
+        NetworkMessage::SearchQuery {
+            query: "private query".to_string(),
+            sender: kp_origin.public,
+        }
+    );
+    assert!(request.can_reply(), "request carries a usable return path");
+    let return_path = request.return_path.as_ref().unwrap();
+    assert_eq!(
+        return_path.first_hop, addr_b,
+        "reply enters at the last relay"
+    );
+    assert_eq!(
+        return_path.path.last(),
+        Some(&DhPublicKey::from_ed25519(&kp_origin.public).unwrap()),
+        "return path ends at the origin's onion key"
+    );
+    assert!(
+        !return_path
+            .path
+            .contains(&DhPublicKey::from_ed25519(&kp_c.public).unwrap()),
+        "the exit does not forward through itself"
+    );
+
+    relay_c
+        .send_onion_reply(
+            &request,
+            &NetworkMessage::SearchResponse {
+                query: "private query".to_string(),
+                results: Vec::new(),
+            },
+        )
+        .expect("exit replies through the return path");
+
+    let reply = tokio::time::timeout(Duration::from_secs(2), waiter)
+        .await
+        .expect("origin resolves the reply")
+        .expect("waiter joins")
+        .expect("reply arrives before the circuit times out");
+    assert_eq!(
+        reply,
+        NetworkMessage::SearchResponse {
+            query: "private query".to_string(),
+            results: Vec::new(),
+        }
+    );
+
+    for node in [&origin, &relay_a, &relay_b, &relay_c] {
+        node.stop().await;
+    }
+}
+
+/// `FindNode` populates the routing table beyond direct peers: A knows B, B
+/// knows C, and a lookup for C's id returns C's advertised contact.
+#[tokio::test]
+async fn test_find_node_learns_contacts_beyond_direct_peers() {
+    fn engine(kp: Keypair) -> NodeEngine {
+        NodeEngine::new(NodeConfig {
+            listen_addr: "127.0.0.1:0".parse().unwrap(),
+            keypair: kp,
+            bootstrap_peers: Vec::new(),
+            stun_server: None,
+            max_peers: 100,
+            heartbeat_interval: Duration::from_secs(30),
+        })
+    }
+
+    let kp_a = Keypair::generate();
+    let kp_b = Keypair::generate();
+    let kp_c = Keypair::generate();
+    let a = engine(kp_a.clone());
+    let b = engine(kp_b.clone());
+    let c = engine(kp_c.clone());
+    for node in [&a, &b, &c] {
+        node.start().await.unwrap();
+    }
+    let addr_a = a.local_addr().unwrap().unwrap();
+    let addr_b = b.local_addr().unwrap().unwrap();
+    let addr_c = c.local_addr().unwrap().unwrap();
+    a.connect_to(addr_b, kp_b.public).unwrap();
+    b.connect_to(addr_c, kp_c.public).unwrap();
+
+    let target = crate::dht::NodeId::from_public_key(&kp_c.public);
+    let contacts = a.find_node(target, Duration::from_millis(500)).await;
+    assert!(
+        contacts
+            .iter()
+            .any(|contact| contact.public_key == kp_c.public),
+        "lookup learns the peer behind the middle hop"
+    );
+    assert!(a
+        .closest_contacts(&target, 5)
+        .iter()
+        .any(|contact| { contact.public_key == kp_c.public && contact.address == addr_c }));
+
+    for node in [&a, &b, &c] {
+        node.stop().await;
+    }
+    let _ = addr_a;
+}
+
+/// A process restart reuses the same identity but a fresh envelope sequence.
+/// The peer's replay window still remembers the previous session's high-water
+/// mark, so the new session must start above it or every message is dropped.
+#[tokio::test]
+async fn test_restarted_peer_is_not_rejected_as_a_replay() {
+    fn engine(kp: Keypair) -> NodeEngine {
+        NodeEngine::new(NodeConfig {
+            listen_addr: "127.0.0.1:0".parse().unwrap(),
+            keypair: kp,
+            bootstrap_peers: Vec::new(),
+            stun_server: None,
+            max_peers: 100,
+            heartbeat_interval: Duration::from_secs(30),
+        })
+    }
+
+    let kp_a = Keypair::generate();
+    let kp_b = Keypair::generate();
+    let b = engine(kp_b.clone());
+    b.start().await.unwrap();
+    let addr_b = b.local_addr().unwrap().unwrap();
+
+    {
+        let a = engine(kp_a.clone());
+        a.start().await.unwrap();
+        a.dial(addr_b, kp_b.public, Duration::from_secs(2))
+            .await
+            .expect("first session joins");
+        for nonce in 0..5 {
+            a.send_to(&kp_b.public, NetworkMessage::Ping { nonce })
+                .unwrap();
+        }
+        tokio::time::sleep(Duration::from_millis(150)).await;
+        a.stop().await;
+    }
+
+    // Same identity, new process, fresh sequence counter.
+    let a = engine(kp_a.clone());
+    a.start().await.unwrap();
+    a.dial(addr_b, kp_b.public, Duration::from_secs(2))
+        .await
+        .expect("a restarted peer is not mistaken for a replayed old session");
+
+    a.stop().await;
+    b.stop().await;
+}
+
+/// The lookup is iterative: a target two hops beyond the last directly-known
+/// neighbor is only reachable by querying the contacts learned in the first
+/// round.
+#[tokio::test]
+async fn test_find_node_walks_past_the_first_hop() {
+    fn engine(kp: Keypair) -> NodeEngine {
+        NodeEngine::new(NodeConfig {
+            listen_addr: "127.0.0.1:0".parse().unwrap(),
+            keypair: kp,
+            bootstrap_peers: Vec::new(),
+            stun_server: None,
+            max_peers: 100,
+            heartbeat_interval: Duration::from_secs(30),
+        })
+    }
+
+    let keypairs: Vec<Keypair> = (0..4).map(|_| Keypair::generate()).collect();
+    let nodes: Vec<NodeEngine> = keypairs.iter().map(|kp| engine(kp.clone())).collect();
+    for node in &nodes {
+        node.start().await.unwrap();
+    }
+    let addrs: Vec<SocketAddr> = nodes
+        .iter()
+        .map(|node| node.local_addr().unwrap().unwrap())
+        .collect();
+    // A -> B -> C -> D; each node only dials the next one.
+    for index in 0..3 {
+        nodes[index]
+            .connect_to(addrs[index + 1], keypairs[index + 1].public)
+            .unwrap();
+    }
+    tokio::time::sleep(Duration::from_millis(100)).await;
+
+    let target = crate::dht::NodeId::from_public_key(&keypairs[3].public);
+    let contacts = nodes[0].find_node(target, Duration::from_secs(2)).await;
+    assert!(
+        contacts.iter().any(|contact| {
+            contact.public_key == keypairs[3].public && contact.address == addrs[3]
+        }),
+        "iterative walk reaches the node three hops away: {contacts:?}"
+    );
+
+    for node in &nodes {
+        node.stop().await;
+    }
+}
+
+#[tokio::test]
+async fn bootstrap_spec_accepts_literal_addresses_and_dns_names() {
+    let keypair = Keypair::generate();
+    let spec = format!("127.0.0.1:7921/{}", keypair.public.to_hex());
+    let peer = resolve_bootstrap_peer(&spec)
+        .await
+        .expect("literal bootstrap address resolves");
+    assert_eq!(peer.public_key, keypair.public);
+    assert_eq!(peer.address, "127.0.0.1:7921".parse().unwrap());
+
+    let spec = format!("localhost:7921/{}", keypair.public.to_hex());
+    let peer = resolve_bootstrap_peer(&spec)
+        .await
+        .expect("DNS bootstrap name resolves");
+    assert_eq!(peer.public_key, keypair.public);
+    assert_eq!(peer.address.port(), 7921);
+}
+
+#[tokio::test]
+async fn bootstrap_spec_rejects_malformed_entries() {
+    assert!(resolve_bootstrap_peer("seed.example:7921/not-hex")
+        .await
+        .is_none());
+    assert!(resolve_bootstrap_peer("seed.example:7921").await.is_none());
+    assert!(resolve_bootstrap_peer("127.0.0.1:7921").await.is_none());
+}
+
+/// Cover traffic is off by default and, when enabled with a fast schedule,
+/// actually emits fixed-size decoy cells toward live peers.
+#[tokio::test]
+async fn cover_traffic_is_opt_in_and_emits_decoy_cells() {
+    fn engine(keypair: Keypair) -> NodeEngine {
+        NodeEngine::new(NodeConfig {
+            listen_addr: "127.0.0.1:0".parse().unwrap(),
+            keypair,
+            bootstrap_peers: Vec::new(),
+            stun_server: None,
+            max_peers: 32,
+            heartbeat_interval: Duration::from_secs(30),
+        })
+    }
+
+    let origin_key = Keypair::generate();
+    let relays: Vec<Keypair> = (0..3).map(|_| Keypair::generate()).collect();
+    let origin = engine(origin_key.clone());
+    let relay_engines: Vec<NodeEngine> = relays.iter().map(|kp| engine(kp.clone())).collect();
+
+    // Disabled by default: no configuration and no emitted cells.
+    assert!(origin.cover_traffic().is_none());
+
+    origin.enable_cover_traffic(CoverConfig {
+        mean_interval: Duration::from_millis(50),
+        min_interval: Duration::from_millis(40),
+        max_interval: Duration::from_millis(80),
+    });
+    assert!(origin.cover_traffic().is_some());
+
+    for node in std::iter::once(&origin).chain(relay_engines.iter()) {
+        node.start().await.expect("engine starts");
+    }
+    for (index, relay) in relay_engines.iter().enumerate() {
+        let addr = relay.local_addr().unwrap().unwrap();
+        origin.connect_to(addr, relays[index].public).unwrap();
+    }
+
+    let deadline = Instant::now() + Duration::from_secs(3);
+    loop {
+        if origin.metrics().snapshot().onion_cover_cells_sent > 0 {
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "cover traffic did not emit a decoy cell"
+        );
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+
+    origin.stop().await;
+    for node in &relay_engines {
+        node.stop().await;
+    }
 }

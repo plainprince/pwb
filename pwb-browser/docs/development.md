@@ -28,8 +28,11 @@ cargo build -p pwb-browser --release
 # Run with a local .pwb file
 cargo run -p pwb-browser -- --file path/to/bundle.pwb
 
-# Run with a network domain
-cargo run -p pwb-browser -- welcome.pwb
+# Run with an official built-in page
+cargo run -p pwb-browser -- welcome.plain
+
+# Run with an unofficial network domain
+cargo run -p pwb-browser -- mysite.pwb
 
 # Run with a system domain
 cargo run -p pwb-browser -- search.plain?q=plainweb
@@ -48,8 +51,8 @@ cargo run -p pwb-browser -- search.plain?q=plainweb
 # Open the included demo bundle
 cargo run -p pwb-browser -- --file demo.pwb
 
-# Open a network domain
-cargo run -p pwb-browser -- welcome.pwb
+# Open an official built-in page
+cargo run -p pwb-browser -- welcome.plain
 
 # Use the search system domain
 cargo run -p pwb-browser -- search.plain?q=plainweb

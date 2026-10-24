@@ -81,3 +81,128 @@ fn test_wire_roundtrip() {
         Some("Hello {name}")
     );
 }
+
+/// A bundle with plenty of repeated text, so deflate has something to remove.
+fn repetitive_bundle() -> Bundle {
+    let mut root = PlainNode::new(1, Tag::Document);
+    for i in 0..64 {
+        let mut text = PlainNode::new(i + 2, Tag::Text);
+        text.text_content = Some("PlainWeb compresses repeated content losslessly.".to_string());
+        root.children.push(text);
+    }
+    Bundle {
+        version: CURRENT_VERSION,
+        title: "Compressed Test".to_string(),
+        author_pubkey: None,
+        root_node: root,
+        script_payload: Some(b"console.log('hello');".repeat(20)),
+        components: HashMap::new(),
+        modules: HashMap::new(),
+    }
+}
+
+#[test]
+fn test_compressed_bundle_roundtrips_and_shrinks() {
+    let bundle = repetitive_bundle();
+    let raw = bundle.serialize();
+    let compressed = bundle.serialize_compressed();
+
+    assert!(Bundle::is_compressed(&compressed));
+    assert_eq!(&compressed[..4], COMPRESSED_MAGIC);
+    assert_eq!(compressed[4], COMPRESSION_VERSION);
+    // Header + zlib stream must beat the raw repetitive bundle.
+    assert!(
+        compressed.len() < raw.len(),
+        "compressed {} bytes should be smaller than {} raw bytes",
+        compressed.len(),
+        raw.len()
+    );
+
+    let decoded = Bundle::deserialize(&compressed).expect("compressed bundle decodes");
+    assert_eq!(decoded.title, bundle.title);
+    assert_eq!(decoded.root_node.children.len(), 64);
+    assert_eq!(
+        decoded.root_node.children[0].text_content.as_deref(),
+        Some("PlainWeb compresses repeated content losslessly.")
+    );
+    assert_eq!(decoded.script_payload, bundle.script_payload);
+    // Re-encoding is deterministic, so the canonical bytes match exactly.
+    assert_eq!(decoded.serialize(), raw);
+}
+
+#[test]
+fn test_legacy_uncompressed_bundles_still_load() {
+    let bundle = repetitive_bundle();
+    let raw = bundle.serialize();
+    assert!(!Bundle::is_compressed(&raw));
+    let decoded = Bundle::deserialize(&raw).expect("legacy PWB1 still decodes");
+    assert_eq!(decoded.title, bundle.title);
+}
+
+#[test]
+fn test_compressed_bundle_rejects_truncation_and_corruption() {
+    let bundle = repetitive_bundle();
+    let compressed = bundle.serialize_compressed();
+
+    // Truncated zlib stream (cut into the compressed data, not just the
+    // checksum trailer).
+    assert!(Bundle::deserialize(&compressed[..compressed.len() / 2]).is_err());
+
+    // Corrupted byte in the middle of the zlib body.
+    let mut corrupt = compressed.clone();
+    let middle = 41 + (corrupt.len() - 41) / 2;
+    corrupt[middle] ^= 0xFF;
+    assert!(Bundle::deserialize(&corrupt).is_err());
+
+    // Declared length that does not match the inflated data.
+    let mut wrong_len = compressed.clone();
+    let declared = (bundle.serialize().len() + 1) as u32;
+    wrong_len[5..9].copy_from_slice(&declared.to_le_bytes());
+    assert!(Bundle::deserialize(&wrong_len).is_err());
+
+    // Unknown compression version.
+    let mut bad_version = compressed.clone();
+    bad_version[4] = 99;
+    assert!(Bundle::deserialize(&bad_version).is_err());
+}
+
+#[test]
+fn test_bundle_rejects_trailing_bytes() {
+    let bundle = repetitive_bundle();
+    let mut raw = bundle.serialize();
+    raw.push(0xAB);
+    let err = Bundle::deserialize(&raw).expect_err("trailing byte is rejected");
+    assert!(matches!(err, WireError::TrailingBytes(1)), "got {err:?}");
+
+    let mut trailing_many = bundle.serialize();
+    trailing_many.extend_from_slice(b"garbage");
+    assert!(matches!(
+        Bundle::deserialize(&trailing_many),
+        Err(WireError::TrailingBytes(_))
+    ));
+
+    // Exact bytes still decode.
+    let exact = bundle.serialize();
+    assert!(Bundle::deserialize(&exact).is_ok());
+}
+
+#[test]
+fn test_compressed_bundle_rejects_trailing_bytes() {
+    let bundle = repetitive_bundle();
+    let mut compressed = bundle.serialize_compressed();
+    compressed.extend_from_slice(b"trailing");
+    let err = Bundle::deserialize(&compressed).expect_err("trailing container bytes rejected");
+    assert!(matches!(err, WireError::TrailingBytes(_)), "got {err:?}");
+}
+
+#[test]
+fn test_compressed_bundle_rejects_oversized_declaration() {
+    let mut bomb = Vec::new();
+    bomb.extend_from_slice(COMPRESSED_MAGIC);
+    bomb.push(COMPRESSION_VERSION);
+    bomb.extend_from_slice(&((MAX_DECOMPRESSED_BYTES + 1) as u32).to_le_bytes());
+    bomb.extend_from_slice(&[0u8; 32]); // digest placeholder
+    bomb.extend_from_slice(b"not a zlib stream");
+    let err = Bundle::deserialize(&bomb).expect_err("oversized declaration is rejected");
+    assert!(matches!(err, WireError::CompressionFailed(_)));
+}

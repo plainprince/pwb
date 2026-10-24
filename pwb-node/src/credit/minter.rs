@@ -84,9 +84,13 @@ impl CreditMinter {
         self.traffic.record(bytes);
     }
 
-    /// Issue a requester challenge nonce (TTL-bound, one claim). The caller
-    /// supplies the random nonce — the requester side owns its entropy.
-    pub fn issue_challenge(&mut self, nonce: [u8; 32], now: Instant) {
+    /// Record a challenge nonce that arrived in a signed requester message
+    /// (`ShardQuery`). The *requester* owns the nonce and its entropy; the
+    /// serving node only remembers it, TTL-bound and claim-once, so it can
+    /// verify the receipt it signs against a real round-trip. A node cannot
+    /// mint by inventing nonces for itself: `mint_query` only pays for a
+    /// challenge that a peer sent.
+    pub fn record_challenge(&mut self, nonce: [u8; 32], now: Instant) {
         self.challenges.issue(nonce, now);
     }
 
@@ -151,6 +155,17 @@ impl CreditMinter {
         self.relay.live_cells = self.relay.live_cells.saturating_add(1);
         self.relay.live_bytes = self.relay.live_bytes.saturating_add(cell.len() as u64);
         self.traffic.record(cell.len() as u64);
+    }
+
+    /// Bytes relayed in the current unsealed window (relay credits are based
+    /// on whole KiB, so callers wait for at least 1024 bytes before sealing).
+    pub fn pending_relay_bytes(&self) -> u64 {
+        self.relay.live_bytes
+    }
+
+    /// Cells relayed in the current unsealed window.
+    pub fn pending_relay_cells(&self) -> u64 {
+        self.relay.live_cells
     }
 
     /// Seal the current relay window into a signed receipt. Returns `None`

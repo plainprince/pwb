@@ -3,8 +3,9 @@
 //! Backing machinery for the browser JS APIs:
 //! - `fetch` — HTTP on a background thread (ureq); the result is queued and
 //!   resolved into the JS promise on the main thread by
-//!   [`crate::js_runtime::poll_async_ops`]. CORS enforcement is compiled in
-//!   via the `strict-cors` cargo feature (see [`cors_validate`]).
+//!   [`crate::js_runtime::poll_async_ops`]. CORS is enforced by default (see
+//!   [`cors_validate`]); build with `--features permissive-cors` to opt out for
+//!   local development.
 //! - `WebSocket` — one background thread per connection (tungstenite); inbound
 //!   events are queued like fetch, outbound messages are pushed through a
 //!   shared per-connection queue the thread drains.

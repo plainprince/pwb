@@ -10,7 +10,7 @@ use pwb_core::crypto::{ContentId, Keypair, PublicKey};
 use pwb_node::blind::{
     withdraw_attested, BlindBalanceIssuer, BlindClaim, BlindClaimError, IssuerBinding,
 };
-use pwb_node::domain::{DomainRegistry, PricingEpochStats, RollingPricing};
+use pwb_node::domain::{DomainRegistry, PricingEpochStats, RollingPricing, INITIAL_CLAIM_PRICE};
 use pwb_node::ledger::{AttestorLedger, BalanceAttestation, QuorumCertificate};
 
 /// A mini node: its identity keypair, the attestor ledger it runs (which
@@ -93,12 +93,12 @@ fn test_multi_node_domain_claim_and_partition_merge() {
                 .is_ok(),
             "node {i} claims its first domain"
         );
-        assert_eq!(nodes[i].registry.claimed_by(&subject), 50);
+        assert_eq!(nodes[i].registry.claimed_by(&subject), INITIAL_CLAIM_PRICE);
     }
 
     // Phase 2: network partition. Left pair {0, 1}, right singleton {2}.
-    // Each node reuses its still-valid certificate to claim a second domain
-    // (balance 200 - 50 = 150 still covers the 50-credit price).
+    // Each node claims a second domain against a fresh certificate head
+    // (the attested balance covers both claims).
     // Precompute the other-two-node signing sets before splitting borrows.
     let others_signers: Vec<Vec<Keypair>> = (0..3)
         .map(|i| {
@@ -191,10 +191,13 @@ fn test_multi_node_domain_claim_and_partition_merge() {
     }
     assert_eq!(left_reg.count(), 6);
 
-    // Claimed spend per subject is the max observed on either side (two
-    // claims of 50 each).
+    // Claimed spend per subject is derived from the surviving funded
+    // records (two claims at the initial price each).
     for node in &nodes {
-        assert_eq!(left_reg.claimed_by(&node.identity.public), 100);
+        assert_eq!(
+            left_reg.claimed_by(&node.identity.public),
+            2 * INITIAL_CLAIM_PRICE
+        );
     }
 
     // Merged base cost takes the maximum observed on either partition.

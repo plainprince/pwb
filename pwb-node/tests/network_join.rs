@@ -2,7 +2,7 @@
 //! UDP can discover each other via connection links and exchange
 //! `NetworkMessage` datagrams end-to-end.
 
-use pwb_core::crypto::{ContentId, Keypair, Signature};
+use pwb_core::crypto::{ContentId, Keypair};
 use pwb_core::net::{NetworkMessage, NodeConfig, NodeEngine};
 use std::net::SocketAddr;
 use std::time::Duration;
@@ -111,12 +111,7 @@ async fn test_broadcast_reaches_all_peers() {
     // A broadcasts a GossipAnnounce; B and C should both receive it.
     let cid = ContentId([7u8; 32]);
     engine_a
-        .broadcast(NetworkMessage::GossipAnnounce {
-            content_id: cid,
-            title: "new artifact".to_string(),
-            publisher: kp_a.public,
-            signature: Signature([2u8; 64]),
-        })
+        .broadcast(NetworkMessage::gossip_announce(&kp_a, cid, "new artifact"))
         .expect("A broadcasts");
 
     tokio::time::sleep(Duration::from_millis(200)).await;

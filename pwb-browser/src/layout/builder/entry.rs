@@ -3,7 +3,8 @@
 use super::positioning::layout_node;
 use crate::dom::Dom;
 use crate::layout::box_types::{LayoutBox, LayoutCtx};
-use crate::layout::text::docked_devtools_width;
+use crate::layout::text::{docked_devtools_width, resolve_unit};
+use crate::style::compute_style;
 use pwb_core::spec::CursorStyle;
 
 /// Build a unified Layout Tree for the DOM.
@@ -16,7 +17,31 @@ pub fn build_layout_tree(
     // Page margins are viewport-relative (5vh ≈ 30px at a 600px-tall window,
     // ~65px at 1300px) so pages keep their proportions at any window size.
     let margin_x = viewport_height as f32 * 0.05;
-    let mut current_y = margin_x - scroll_y;
+
+    // The browser chrome is a fixed overlay painted above the page. Reserve its
+    // height in the page's top flow, or the first lines of every page render
+    // underneath the address bar.
+    let chrome_height = dom
+        .root
+        .children
+        .iter()
+        .find(|child| child.attributes.get("id").map(String::as_str) == Some("__pwb_chrome"))
+        .and_then(|node| {
+            compute_style(node).height.and_then(|height| {
+                resolve_unit(
+                    height,
+                    viewport_height as f32,
+                    viewport_width as f32,
+                    viewport_height as f32,
+                )
+            })
+        })
+        .unwrap_or(0.0);
+    let mut current_y = if chrome_height > 0.0 {
+        chrome_height + 12.0
+    } else {
+        margin_x
+    } - scroll_y;
 
     // When the devtools are docked (visible) they occupy their own column on
     // the right: the page lays out beside them and the site content shrinks to

@@ -54,8 +54,9 @@ fn perform_fetch(
             out_headers.push((name, v.to_string()));
         }
     }
-    // CORS enforcement is cfg-gated: `cargo build -p pwb-browser --features strict-cors`.
-    #[cfg(feature = "strict-cors")]
+    // CORS is enforced unless the build explicitly opts out for local
+    // development (`--features permissive-cors`).
+    #[cfg(not(feature = "permissive-cors"))]
     cors_validate(url, &out_headers)?;
     let body = resp.into_string().map_err(|e| e.to_string())?.into_bytes();
     Ok(FetchResponse {
@@ -67,11 +68,12 @@ fn perform_fetch(
     })
 }
 
-/// CORS check (only compiled with the `strict-cors` feature). The page is a
-/// local bundle, so `file:`/relative URLs are always same-origin; any http(s)
-/// request is treated as cross-origin and must be blessed by the response's
-/// `Access-Control-Allow-Origin: *` header.
-#[cfg(feature = "strict-cors")]
+/// CORS check. The page is a local bundle, so `file:`/relative URLs are
+/// always same-origin; any http(s) request is treated as cross-origin and must
+/// be blessed by the response's `Access-Control-Allow-Origin: *` header.
+/// Build with `--features permissive-cors` to disable the check during local
+/// development.
+#[cfg(not(feature = "permissive-cors"))]
 pub(super) fn cors_validate(url: &str, headers: &[(String, String)]) -> Result<(), String> {
     if url.starts_with("file:") || !url.contains("://") {
         return Ok(());
@@ -84,7 +86,10 @@ pub(super) fn cors_validate(url: &str, headers: &[(String, String)]) -> Result<(
     if allowed {
         Ok(())
     } else {
-        Err("CORS: cross-origin fetch blocked (response lacks Access-Control-Allow-Origin: *). Build with the `strict-cors` cargo feature to enforce this check; it is off by default.".to_string())
+        Err(
+            "CORS: cross-origin fetch blocked (response lacks Access-Control-Allow-Origin: *)."
+                .to_string(),
+        )
     }
 }
 
@@ -255,4 +260,50 @@ pub fn ws_close(state: &WebApiState, id: u64) {
         .entry(id)
         .or_default()
         .push_back(WsOutbound::Close);
+}
+
+#[cfg(all(test, not(feature = "permissive-cors")))]
+mod tests {
+    use super::perform_fetch;
+    use std::io::{Read, Write};
+    use std::net::TcpListener;
+
+    /// Serve one HTTP response and return the bound address.
+    fn serve_once(extra_headers: &'static str) -> std::net::SocketAddr {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut request = [0u8; 1024];
+            let _ = stream.read(&mut request);
+            let body = "ok";
+            let response = format!(
+                "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n{}\r\n{}",
+                body.len(),
+                extra_headers,
+                body
+            );
+            let _ = stream.write_all(response.as_bytes());
+        });
+        addr
+    }
+
+    #[test]
+    fn default_build_blocks_cross_origin_response_without_cors() {
+        let addr = serve_once("");
+        let error = match perform_fetch(&format!("http://{addr}/data"), "GET", &[], "") {
+            Ok(_) => panic!("a missing Access-Control-Allow-Origin must be rejected"),
+            Err(error) => error,
+        };
+        assert!(error.starts_with("CORS:"), "got {error}");
+    }
+
+    #[test]
+    fn default_build_allows_a_blessed_cross_origin_response() {
+        let addr = serve_once("Access-Control-Allow-Origin: *\r\n");
+        let response = perform_fetch(&format!("http://{addr}/data"), "GET", &[], "")
+            .expect("ACAO:* allows the response");
+        assert_eq!(response.status, 200);
+        assert_eq!(response.body, b"ok");
+    }
 }

@@ -21,7 +21,7 @@ It is pure protocol and pure data structures: no rendering, no sockets-driven po
 
 - **pwb-web** — uses `spec` and `wire` to compile sites into `.pwb` bundles.
 - **pwb-browser** — uses `wire`, `spec`, and `components` to decompile and render bundles.
-- **pwb-node** — uses `crypto`, `net`, `onion`, `dht`, `discovery`, `qr`, and `system` to participate in the network.
+- **pwb-node** — uses `crypto`, `net`, `discovery`, `qr`, and `system` to participate in the network. The `onion` and `dht` primitives are implemented and tested but are not yet wired into the live transport/routing path.
 
 ## Documentation
 

@@ -23,4 +23,5 @@ pub use hit::{
     find_scroll_container, hit_test_cursor_from_layout, hit_test_cursor_from_layout_scrolled,
     hit_test_layout_box, hit_test_layout_box_scrolled,
 };
+pub(crate) use text::draw_text_ab_glyph;
 pub use tooltip::draw_tooltip;

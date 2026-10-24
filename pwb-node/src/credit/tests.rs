@@ -44,7 +44,7 @@ fn test_query_mint_happy_path_and_replay_rejection() {
     let t0 = Instant::now();
 
     let challenge = [7u8; 32];
-    minter.issue_challenge(challenge, t0);
+    minter.record_challenge(challenge, t0);
     minter.record_traffic(8 * 1024);
 
     let results = vec![
@@ -57,8 +57,9 @@ fn test_query_mint_happy_path_and_replay_rejection() {
         Ok(MintPolicy::default().query_credits)
     );
     assert_eq!(minter.total_earned(), 5);
-    // Traffic was consumed at the floor rate.
-    assert_eq!(minter.available_traffic(), 8 * 1024 - 5 * 1024);
+    // Traffic was consumed at the policy's floor rate.
+    let floor = minter.policy().traffic_per_credit;
+    assert_eq!(minter.available_traffic(), 8 * 1024 - 5 * floor);
 
     // The challenge was claimed: the same receipt cannot mint twice.
     assert_eq!(
@@ -73,7 +74,7 @@ fn test_query_receipt_rejects_bad_signature() {
     let mut minter = minter_with(&server, no_cooldown_policy());
     let t0 = Instant::now();
     let challenge = [9u8; 32];
-    minter.issue_challenge(challenge, t0);
+    minter.record_challenge(challenge, t0);
     minter.record_traffic(10 * 1024);
 
     let mut receipt = QueryReceipt::sign(&server, "plainweb", vec![], challenge);
@@ -112,7 +113,7 @@ fn test_challenge_unknown_and_expired() {
 
     // Issued but expired.
     let challenge = [2u8; 32];
-    minter.issue_challenge(challenge, t0);
+    minter.record_challenge(challenge, t0);
     let expired = QueryReceipt::sign(&server, "q", vec![], challenge);
     assert_eq!(
         minter.mint_query(&expired, t0 + Duration::from_secs(61)),
@@ -120,7 +121,7 @@ fn test_challenge_unknown_and_expired() {
     );
 
     // Re-issuing refreshes the same nonce.
-    minter.issue_challenge(challenge, t0 + Duration::from_secs(100));
+    minter.record_challenge(challenge, t0 + Duration::from_secs(100));
     assert_eq!(
         minter.mint_query(&expired, t0 + Duration::from_secs(101)),
         Ok(5)
@@ -326,13 +327,13 @@ fn test_cooldown_spreads_mints_over_time() {
     minter.record_traffic(100 * 1024);
 
     let c1 = [1u8; 32];
-    minter.issue_challenge(c1, t0);
+    minter.record_challenge(c1, t0);
     let r1 = QueryReceipt::sign(&server, "q1", vec![], c1);
     assert_eq!(minter.mint_query(&r1, t0), Ok(5));
 
     // Same kind inside the cooldown → refused with the remaining wait.
     let c2 = [2u8; 32];
-    minter.issue_challenge(c2, t0);
+    minter.record_challenge(c2, t0);
     let r2 = QueryReceipt::sign(&server, "q2", vec![], c2);
     assert_eq!(
         minter.mint_query(&r2, t0 + Duration::from_secs(1)),
@@ -368,7 +369,7 @@ fn test_traffic_floor_rate_limits_mints() {
     // 300 bytes < 5 credits × 100 bytes needed.
     minter.record_traffic(300);
     let c1 = [1u8; 32];
-    minter.issue_challenge(c1, t0);
+    minter.record_challenge(c1, t0);
     let r1 = QueryReceipt::sign(&server, "q1", vec![], c1);
     assert_eq!(
         minter.mint_query(&r1, t0),
@@ -385,7 +386,7 @@ fn test_traffic_floor_rate_limits_mints() {
 
     // The next mint needs fresh traffic: issuance tracks network flow.
     let c2 = [2u8; 32];
-    minter.issue_challenge(c2, t0);
+    minter.record_challenge(c2, t0);
     let r2 = QueryReceipt::sign(&server, "q2", vec![], c2);
     assert_eq!(
         minter.mint_query(&r2, t0),
@@ -411,12 +412,12 @@ fn test_epoch_cap_and_rollover() {
     minter.record_traffic(1024 * 1024);
 
     let c1 = [1u8; 32];
-    minter.issue_challenge(c1, t0);
+    minter.record_challenge(c1, t0);
     let r1 = QueryReceipt::sign(&server, "q1", vec![], c1);
     assert_eq!(minter.mint_query(&r1, t0), Ok(5)); // 5/8 used
 
     let c2 = [2u8; 32];
-    minter.issue_challenge(c2, t0);
+    minter.record_challenge(c2, t0);
     let r2 = QueryReceipt::sign(&server, "q2", vec![], c2);
     assert_eq!(
         minter.mint_query(&r2, t0),
@@ -425,7 +426,7 @@ fn test_epoch_cap_and_rollover() {
 
     // Rollover opens a fresh epoch window.
     let t1 = t0 + Duration::from_secs(61);
-    minter.issue_challenge(c2, t1);
+    minter.record_challenge(c2, t1);
     assert_eq!(minter.mint_query(&r2, t1), Ok(5));
 }
 
@@ -445,7 +446,7 @@ fn test_anti_asic_traffic_invariant_across_services() {
 
     minter.record_traffic(4096);
     let c1 = [1u8; 32];
-    minter.issue_challenge(c1, t0);
+    minter.record_challenge(c1, t0);
     let query = QueryReceipt::sign(&node, "q", vec![], c1);
     minter.mint_query(&query, t0).expect("query pays");
 

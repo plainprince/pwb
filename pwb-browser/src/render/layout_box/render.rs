@@ -10,7 +10,7 @@ use tiny_skia::Rect;
 
 use super::containers::render_view;
 use super::text::{render_code, render_text};
-use super::widgets::{render_button, render_icon, render_input};
+use super::widgets::{render_button, render_icon, render_image, render_input, render_link};
 
 /// Per-box rendering context shared by the per-tag render functions: the
 /// viewport dimensions, the accumulated scroll translation/clip, and the
@@ -86,6 +86,8 @@ pub(crate) fn render_layout_box(
         Tag::Button => render_button(&ctx, box_node, pixmap),
         Tag::Icon => render_icon(&ctx, box_node, pixmap),
         Tag::Input => render_input(&ctx, box_node, pixmap),
+        Tag::Image => render_image(&ctx, box_node, pixmap),
+        Tag::Link => render_link(&ctx, box_node, pixmap),
         _ => {}
     }
 

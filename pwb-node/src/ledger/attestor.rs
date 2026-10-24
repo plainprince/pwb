@@ -38,6 +38,30 @@ impl AttestorLedger {
         self.histories.len()
     }
 
+    /// Every subject history this attestor holds, for persistence.
+    pub fn snapshot(&self) -> Vec<(PublicKey, Vec<ChainedEvent>)> {
+        self.histories
+            .iter()
+            .map(|(subject, history)| (*subject, history.clone()))
+            .collect()
+    }
+
+    /// Rebuild an attestor ledger from persisted histories, keeping only
+    /// chains that verify end-to-end. A tampered/corrupt history is dropped
+    /// rather than becoming an attestable balance.
+    pub fn restore(
+        attestor: PublicKey,
+        histories: impl IntoIterator<Item = (PublicKey, Vec<ChainedEvent>)>,
+    ) -> Self {
+        let mut ledger = Self::new(attestor);
+        for (subject, history) in histories {
+            if subject != attestor && verify_history(&subject, &history).is_some() {
+                ledger.histories.insert(subject, history);
+            }
+        }
+        ledger
+    }
+
     /// The subject's chained history, if anything was recorded.
     pub fn history(&self, subject: &PublicKey) -> &[ChainedEvent] {
         self.histories

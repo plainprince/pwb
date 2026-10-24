@@ -4,7 +4,7 @@
 //! Covers: joining via connection links, bidirectional peer discovery,
 //! broadcast fan-out, direct query exchange, and unknown-peer rejection.
 
-use pwb_core::crypto::{ContentId, Keypair, PublicKey, Signature};
+use pwb_core::crypto::{ContentId, Keypair, PublicKey};
 use pwb_core::net::{NetworkError, NetworkMessage, NodeConfig, NodeEngine};
 use std::net::SocketAddr;
 use std::time::Duration;
@@ -13,6 +13,7 @@ struct Node {
     engine: NodeEngine,
     addr: SocketAddr,
     pubkey: PublicKey,
+    keypair: Keypair,
 }
 
 async fn spawn() -> Node {
@@ -36,6 +37,7 @@ async fn spawn() -> Node {
         engine,
         addr,
         pubkey,
+        keypair,
     }
 }
 
@@ -79,12 +81,11 @@ async fn test_three_node_mesh_join_and_broadcast() {
     // Broadcast a GossipAnnounce from A; B and C both receive it over real UDP.
     let cid = ContentId([42u8; 32]);
     a.engine
-        .broadcast(NetworkMessage::GossipAnnounce {
-            content_id: cid,
-            title: "manual mesh artifact".to_string(),
-            publisher: a.pubkey,
-            signature: Signature([9u8; 64]),
-        })
+        .broadcast(NetworkMessage::gossip_announce(
+            &a.keypair,
+            cid,
+            "manual mesh artifact",
+        ))
         .expect("A broadcasts GossipAnnounce");
 
     settle().await;

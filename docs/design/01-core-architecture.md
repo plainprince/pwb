@@ -32,10 +32,10 @@ two crates.
 
 Centralize native `.plain` system domain handlers inside `pwb-core::system`:
 
-- `search.plain`, `devtools.plain`, `register.plain`, `gossip.plain`, `nodes.plain`
+- `search.plain`, `devtools.plain`, `register.plain`, `gossip.plain`, `nodes.plain`, `network.plain`, `help.plain`
 - Single source of truth for:
   - Reserved-domain list
-  - `.plain` TLD security rule
+  - `.plain` = official namespace rule (system protocols + shipped content pages); `.pwb` = unofficial user namespace
   - `plain://` URL parsing (`SystemUrl` / `SystemDomain` with `q=` / `connect=` parameter extraction)
   - `nodes.plain` connection-link codec (`build_connection_link` / `parse_connection_link`, previously inlined in `NodeEngine`)
 
@@ -43,5 +43,5 @@ Centralize native `.plain` system domain handlers inside `pwb-core::system`:
 
 - `pwb-node::domain` re-exports the canonical reserved-domain list and rule
 - `NodeEngine`'s link methods delegate to `pwb-core::system`
-- `pwb-node::system` gained native `gossip.plain` and `nodes.plain` page renderers (connection links render as a connect card)
-- `pwb-browser`'s resolver dispatches all five domains through the core parser (reserved-but-unhandled domains like `network.plain`/`help.plain` fail with a clear `SystemError` instead of a filesystem miss)
+- `pwb-node::system` renders every native domain, including `gossip.plain`, `nodes.plain` (connection links render as a connect card), `network.plain` (live addresses, peers, and local-service counts), and `help.plain`
+- `pwb-browser`'s resolver dispatches all seven domains through the core parser; `network.plain` receives a `NetworkSnapshot` (listen/discovery/STUN addresses plus the live peer table) from the owning app

@@ -53,6 +53,18 @@ impl Keypair {
         let signature = signing_key.sign(message);
         Signature(signature.to_bytes())
     }
+
+    /// Reconstruct a keypair from a 32-byte Ed25519 secret-key seed. The
+    /// public key is derived deterministically from the seed, so the same
+    /// seed always reproduces the same identity (peer ID).
+    pub fn from_seed(seed: &[u8; 32]) -> Self {
+        let signing_key = SigningKey::from_bytes(seed);
+        let verifying_key = signing_key.verifying_key();
+        Self {
+            public: PublicKey(verifying_key.to_bytes()),
+            secret: SecretKey(*seed),
+        }
+    }
 }
 
 /// 512-bit Ed25519 Signature.

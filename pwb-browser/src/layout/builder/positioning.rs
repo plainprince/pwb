@@ -35,6 +35,7 @@ pub(super) fn layout_node(
             value: node.attributes.get("value").cloned(),
             placeholder: node.attributes.get("placeholder").cloned(),
             icon: node.attributes.get("icon").cloned(),
+            image_src: None,
             children: Vec::new(),
             overflow: OverflowStyle::Visible,
             content_height: 0.0,

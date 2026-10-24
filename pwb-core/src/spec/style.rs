@@ -153,4 +153,11 @@ pub enum StyleProperty {
     Resize(ResizeStyle),
     /// Clipping/scrolling behavior (`overflow: visible|hidden|scroll|auto`).
     Overflow(OverflowStyle),
+    /// A property passed through verbatim as `(name, value)`.
+    ///
+    /// The runtime style engine understands more attributes than this typed
+    /// enum enumerates (`border-top`, `min-width`, `flex`, …). Compiling them
+    /// as raw attributes keeps authored styling from being silently dropped
+    /// at bundle time.
+    Raw(String, String),
 }

@@ -15,7 +15,7 @@ cargo build --workspace --all-targets
 
 # Run a layer
 cargo run -p pwb-node          # serverless node
-cargo run -p pwb-browser -- welcome.pwb   # browser
+cargo run -p pwb-browser -- welcome.plain   # browser
 cargo run -p pwb-web -- demo_site demo.pwb   # bundler
 ```
 
@@ -80,8 +80,8 @@ Critical constants live in source and are pinned by tests:
 
 - `pwb-core/src/onion.rs` — `CELL_SIZE=512`, `MIN_HOPS=3`, `MAX_LAYER_SLOTS=6`, `PAYLOAD_MAX=118`
 - `pwb-core/src/discovery.rs` — `DISCOVERY_PORT=7922`, `BEACON_INTERVAL=30s`, `BEACON_MAX_AGE=120s`, `ADDR_REBIND_GRACE=300s`, multicast `239.255.0.1`
-- `pwb-node/src/domain.rs` — `INITIAL_CLAIM_PRICE=50`, `MIN_CLAIM_PRICE=10`, `MAX_CLAIM_PRICE=10_000`, `PRICING_WINDOW=8`
-- `pwb-node/src/system.rs` — `.plain` TLD is strictly reserved for built-in system protocols
+- `pwb-node/src/domain.rs` — `INITIAL_CLAIM_PRICE=10`, `MIN_CLAIM_PRICE=10`, `MAX_CLAIM_PRICE=10_000`, `PRICING_WINDOW=8`
+- `pwb-node/src/system.rs` — `.plain` TLD is the reserved **official** namespace (built-in system pages + shipped content pages); `.pwb` is the **unofficial** user namespace
 
 Do not change any of these without updating `docs/protocol.md`, the related
 tests, and the CHANGELOG in the same PR.

@@ -3,7 +3,7 @@
 use pwb_core::crypto::{ContentId, PublicKey, VoucherSpendError};
 use pwb_core::system::is_reserved_system_domain;
 
-use super::registry::{DomainRecord, DomainRegistry};
+use super::registry::{ClaimFunding, DomainRecord, DomainRegistry};
 use crate::blind::{BlindClaim, BlindClaimError};
 use crate::ledger::{LedgerError, QuorumCertificate};
 
@@ -12,9 +12,11 @@ impl DomainRegistry {
     /// quorum (TODO §4.2): the owner's authoritative balance is what the
     /// neighborhood attested, never a self-declared figure. The price is the
     /// registry's current rolling claim price (§5); the certificate must
-    /// verify against `neighborhood` at threshold `k` and cover the price in
-    /// unclaimed attested balance, after which the spent amount is recorded
-    /// so the same certificate cannot fund a second claim.
+    /// verify against `neighborhood` at threshold `k` and cover the price
+    /// in unclaimed attested balance. The record cites the certificate's
+    /// `(head, balance)` as its funding, so the same attested state cannot
+    /// fund two surviving claims — not even across partitions (merges
+    /// repair overdrawn funding groups).
     pub fn register_attested(
         &mut self,
         domain: &str,
@@ -32,7 +34,9 @@ impl DomainRegistry {
         }
         certificate.verify(k, neighborhood)?;
         let cost = self.claim_cost();
-        let already = self.claimed.get(&certificate.subject).copied().unwrap_or(0);
+        // Spendable balance is derived from the live funded records, so a
+        // restarted node enforces the same budget as before the restart.
+        let already = self.claimed_by(&certificate.subject);
         if already.saturating_add(cost) > certificate.balance {
             return Err(LedgerError::InsufficientAttestedBalance {
                 attested: certificate.balance,
@@ -44,10 +48,17 @@ impl DomainRegistry {
             domain: clean_domain.clone(),
             target_content_id: target,
             owner: certificate.subject,
+            credits_spent: cost,
             registered_at_epoch: certificate.epoch,
+            // The registry holds no owner key here, so this record is local
+            // only; it is never served to peers until the owner signs it.
+            signature: None,
+            funding: Some(ClaimFunding {
+                head: certificate.head,
+                balance: certificate.balance,
+            }),
         };
         self.records.insert(clean_domain, record);
-        self.claimed.insert(certificate.subject, already + cost);
         Ok(())
     }
 
@@ -103,7 +114,12 @@ impl DomainRegistry {
             domain: clean_domain.clone(),
             target_content_id: target,
             owner,
+            credits_spent: cost,
             registered_at_epoch: claim.binding.epoch,
+            // As above: a blind voucher proves payment, not an owner signature.
+            signature: None,
+            // Blind spends are single-use by token, not by attested state.
+            funding: None,
         };
         self.records.insert(clean_domain, record);
         Ok(())

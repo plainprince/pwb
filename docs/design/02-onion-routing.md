@@ -65,6 +65,29 @@ Proven by `test_intermediate_cannot_tell_if_next_hop_is_destination`:
 - `recv_cell` enforces exactly `CELL_SIZE` datagrams (constant size)
 - Unknown next hops refused with `PeerNotFound`
 
+### Return circuits (`pwb-core::net::onion_transport`)
+
+- One logical message is split into `PON1` cells (independent 512-byte onions) and reassembled at the exit with bounded state.
+- An inner `PON4` message carries `kind` (request/reply), a random request id, the originator's Ed25519 key, an optional return path, and the real payload length.
+- The inner message is padded to a fixed 4 KiB envelope, or to the 48 KiB maximum when it does not fit, so the cell count reveals only that coarse size class and never a bulk transfer's exact length. The signature covers the padding, which is discarded after verification.
+- The return path lists the relays back to the originator (entry first, ending at its own onion key) plus the entry hop's dial address; the originator derives it from the outbound path without the exit (the responder).
+- `NodeEngine::send_onion_request` registers the request id, retransmits across the timeout (UDP may drop any fragment), and resolves the correlated `OnionKind::Reply`; `send_onion_reply` answers a delivered `OnionRequest`.
+- The exit only ever sees its previous relay: it sends the reply there, and each relay re-originates it toward the originator.
+- `pwb-node --private-search` uses a three-relay circuit for `search.plain`, and the node answers onion-delivered `SearchQuery`/`FetchArtifact` requests.
+
+### Client defaults
+
+- `pwb-browser` sends `search.plain` queries, `.pwb` registry resolution, and
+  content/artifact fetches over three-hop onion circuits by default. There is
+  no silent direct fallback: a failed circuit reports the failure instead of
+  leaking the request.
+- `--direct` switches those lookups to the direct authenticated transport,
+  which reveals the browser's address to the peer it talks to. It exists for
+  LAN debugging and for users who accept that trade-off.
+- `pwb-node --private-search` uses the same circuit and return-path code, so a
+  query originated by either binary is answered through the same exit
+  behaviour (the exit never learns the originator's address).
+
 ### Cover traffic
 
 - `CoverDispatch` schedules decoys at exponentially distributed, clamped intervals:

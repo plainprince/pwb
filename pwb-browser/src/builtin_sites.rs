@@ -4,12 +4,14 @@
 //! routed through `pwb-core` (spec/wire types) into `pwb-web` (the PML/PSS/JS
 //! compiler) — the same pipeline `pwb-web`'s CLI uses.
 //!
-//! Regular builtin pages (e.g. `welcome`) live in `webpages/<name>.pwb/`
-//! containing `index.pml`, `style.pss`, and `app.pjs`.
+//! Official, browser-shipped pages live on the reserved `.plain` TLD: regular
+//! builtin content pages (e.g. `welcome.plain`) live in
+//! `webpages/<name>.plain/` containing `index.pml`, `style.pss`, and `app.pjs`.
 //!
 //! Special system pages (e.g. `devtools`) live in `webpages/<name>/` **without**
-//! a `.pwb` TLD suffix, reflecting that they are internal browser tools, not
-//! user-facing network sites.
+//! a TLD suffix, reflecting that they are internal browser tools, not
+//! user-facing network sites. `.pwb` is reserved for *unofficial* sites created
+//! and claimed by network participants.
 
 use crate::dom::Dom;
 use std::path::Path;
@@ -48,10 +50,11 @@ pub fn compile_builtin_page_bytes(name: &str) -> Option<Vec<u8>> {
 
 /// Locate the source directory for a builtin page.
 ///
-/// Automatically matches any directory inside `webpages/` matching either:
-/// 1. Exact input name (e.g. `devtools`, `welcome.pwb`)
-/// 2. Stem with `.pwb` suffix (e.g. `welcome` -> `welcome.pwb`)
-/// 3. Bare stem (e.g. `devtools.pwb` -> `devtools`)
+/// Automatically matches any directory inside `webpages/` matching any of:
+/// 1. Exact input name (e.g. `devtools`, `welcome.plain`)
+/// 2. Stem with the official `.plain` suffix (e.g. `welcome` -> `welcome.plain`)
+/// 3. Stem with a legacy `.pwb` suffix (e.g. `welcome` -> `welcome.pwb`)
+/// 4. Bare stem (e.g. `devtools.plain` -> `devtools`)
 ///
 /// Searches relative to the current working directory first (runtime), then
 /// relative to this crate's manifest directory (for tests / `cargo run`).
@@ -60,13 +63,17 @@ fn builtin_page_dir(input: &str) -> Option<std::path::PathBuf> {
 
     // Extract stem by stripping TLDs if present
     let stem = clean
-        .strip_suffix(".pwb")
-        .unwrap_or(clean)
         .strip_suffix(".plain")
+        .or_else(|| clean.strip_suffix(".pwb"))
         .unwrap_or(clean);
 
     // Candidates to search for inside `webpages/`
-    let candidates = [clean.to_string(), format!("{}.pwb", stem), stem.to_string()];
+    let candidates = [
+        clean.to_string(),
+        format!("{stem}.plain"),
+        format!("{stem}.pwb"),
+        stem.to_string(),
+    ];
 
     for candidate in &candidates {
         let rel = Path::new("webpages").join(candidate);
@@ -98,7 +105,7 @@ mod tests {
 
     #[test]
     fn test_compile_builtin_welcome_page() {
-        // Compiles the real `webpages/welcome.pwb/` sources through pwb-web
+        // Compiles the real `webpages/welcome.plain/` sources through pwb-web
         // (pwb-core spec → pwb-web compiler → pwb-browser DOM).
         let dom = compile_builtin_page("welcome").expect("welcome page should compile");
         assert_eq!(dom.title, "Welcome to PlainWeb");
@@ -116,9 +123,29 @@ mod tests {
             "welcome page must include #ctx-btn"
         );
 
-        let bytes = compile_builtin_page_bytes("welcome").expect("welcome bytes");
-        assert_eq!(&bytes[0..4], b"PWB1");
+        // The shipped page demonstrates native link navigation: the anchor is
+        // a real Tag::Link with a resolvable href (no JS required).
+        fn find_link(node: &crate::dom::DomNode) -> Option<String> {
+            if node.tag == pwb_core::spec::Tag::Link {
+                return node.attributes.get("href").cloned();
+            }
+            node.children.iter().find_map(find_link)
+        }
+        assert_eq!(
+            find_link(&dom.root).as_deref(),
+            Some("demo.plain"),
+            "welcome page must expose a native href link"
+        );
 
+        let bytes = compile_builtin_page_bytes("welcome").expect("welcome bytes");
+        assert!(
+            pwb_core::wire::Bundle::is_compressed(&bytes),
+            "builtin pages ship in the compressed PWBZ container"
+        );
+        let decoded = pwb_core::wire::Bundle::deserialize(&bytes).expect("compressed page decodes");
+        assert_eq!(decoded.title, "Welcome to PlainWeb");
+
+        assert!(is_builtin_site("welcome"));
         assert!(is_builtin_site("welcome.plain"));
         assert!(!is_builtin_site("welcome.com"));
     }

@@ -1,16 +1,41 @@
 //! System domain request handler.
 
+use std::net::SocketAddr;
+
 use crate::domain::DomainRegistry;
 use crate::host::ArtifactHost;
 use crate::identity::IdentityManager;
 use crate::search::SearchEngine;
+use pwb_core::crypto::PublicKey;
 use pwb_core::net::{NetworkMessage, SearchResultWire};
+
+/// A live snapshot of the node's network view, rendered by `network.plain`.
+///
+/// The browser and the node fill in only what they know: missing addresses
+/// render as "unknown" instead of failing the page.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct NetworkSnapshot {
+    /// The UDP address the engine is listening on.
+    pub listen_addr: Option<SocketAddr>,
+    /// Where LAN discovery is bound (broadcast/multicast).
+    pub discovery_addr: Option<SocketAddr>,
+    /// Public address learned via STUN, when NAT traversal is configured.
+    pub public_addr: Option<SocketAddr>,
+    /// Peers in the live peer table.
+    pub peers: Vec<(PublicKey, SocketAddr)>,
+}
 
 pub struct SystemDomainHandler<'a> {
     pub search: &'a SearchEngine,
     pub host: &'a ArtifactHost,
     pub registry: &'a DomainRegistry,
     pub identity: &'a IdentityManager,
+    /// Spendable balance from the signed credit ledger, rendered on
+    /// `register.plain`.
+    pub balance: u64,
+    /// Live network view for `network.plain`; defaults to identity/registry
+    /// figures only.
+    pub network: NetworkSnapshot,
 }
 
 impl<'a> SystemDomainHandler<'a> {
@@ -19,13 +44,23 @@ impl<'a> SystemDomainHandler<'a> {
         host: &'a ArtifactHost,
         registry: &'a DomainRegistry,
         identity: &'a IdentityManager,
+        balance: u64,
     ) -> Self {
         Self {
             search,
             host,
             registry,
             identity,
+            balance,
+            network: NetworkSnapshot::default(),
         }
+    }
+
+    /// Attach a live network snapshot (builder form, so existing callers keep
+    /// compiling and `network.plain` degrades gracefully).
+    pub fn with_network(mut self, network: NetworkSnapshot) -> Self {
+        self.network = network;
+        self
     }
 
     /// Process incoming system domain requests and return response messages.
@@ -49,7 +84,7 @@ impl<'a> SystemDomainHandler<'a> {
                 })
             }
             NetworkMessage::FetchArtifact { content_id } => {
-                let bundle_bytes = self.host.get(&content_id).cloned().unwrap_or_default();
+                let bundle_bytes = self.host.get(&content_id).unwrap_or_default();
                 Some(NetworkMessage::ArtifactResponse {
                     content_id,
                     bundle_bytes,

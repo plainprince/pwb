@@ -45,6 +45,9 @@ pub struct WithdrawalReceipt {
     pub total: u64,
     /// Denomination of each voucher.
     pub denomination: u64,
+    /// Attestor-signed binding of the denomination key, when the withdrawal
+    /// ran over the network (needed to build a private claim).
+    pub binding: Option<crate::blind::IssuerBinding>,
 }
 
 /// Requester side of a withdrawal: fresh secrets and blinding factors bound
@@ -190,6 +193,7 @@ pub fn withdraw_attested(
         evidence,
         total,
         denomination,
+        binding: None,
     })
 }
 

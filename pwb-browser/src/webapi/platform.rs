@@ -11,7 +11,9 @@ pub fn show_alert(msg: &str) {
     #[cfg(target_os = "macos")]
     macos::alert(msg);
     #[cfg(not(target_os = "macos"))]
-    println!("[JS Alert] {}", msg);
+    if !native::alert(msg) {
+        println!("[JS Alert] {}", msg);
+    }
 }
 
 pub fn show_confirm(msg: &str) -> bool {
@@ -20,9 +22,12 @@ pub fn show_confirm(msg: &str) -> bool {
         return macos::confirm(msg);
     }
     #[cfg(not(target_os = "macos"))]
-    {
-        println!("[JS Confirm] {}", msg);
-        true
+    match native::confirm(msg) {
+        Some(answer) => answer,
+        None => {
+            println!("[JS Confirm] {}", msg);
+            true
+        }
     }
 }
 
@@ -32,9 +37,91 @@ pub fn show_prompt(msg: &str, default_val: &str) -> Option<String> {
         return macos::prompt(msg, default_val);
     }
     #[cfg(not(target_os = "macos"))]
-    {
-        println!("[JS Prompt] {} (default: {})", msg, default_val);
-        Some(default_val.to_string())
+    match native::prompt(msg, default_val) {
+        Some(value) => value,
+        None => {
+            println!("[JS Prompt] {} (default: {})", msg, default_val);
+            Some(default_val.to_string())
+        }
+    }
+}
+
+/// Cross-platform dialogs for Linux/Windows via `tinyfiledialogs`.
+///
+/// Unix builds drive `zenity`, `kdialog`, or `yad`; Windows uses the native
+/// TaskDialog API. When no GUI backend is usable — headless CI, a server
+/// without a display, or `PWB_HEADLESS` — the caller falls back to the console
+/// behaviour instead of failing or hanging on a modal nobody can see.
+#[cfg(not(target_os = "macos"))]
+mod native {
+    use tinyfiledialogs::{
+        input_box, message_box_ok, message_box_ok_cancel, MessageBoxIcon, OkCancel,
+    };
+
+    const TITLE: &str = "PlainWeb";
+
+    /// Whether a modal dialog can be shown in this process right now.
+    pub(super) fn available() -> bool {
+        if cfg!(test) || std::env::var_os("PWB_HEADLESS").is_some() {
+            return false;
+        }
+        #[cfg(unix)]
+        {
+            let has_display = std::env::var_os("DISPLAY").is_some()
+                || std::env::var_os("WAYLAND_DISPLAY").is_some();
+            if !has_display {
+                return false;
+            }
+            // tinyfiledialogs shells out to one of these on Unix. Probing
+            // first keeps alert/confirm from silently turning into no-ops
+            // (and confirm into a spurious `false`).
+            if !["zenity", "kdialog", "yad"]
+                .iter()
+                .any(|name| in_path(name))
+            {
+                return false;
+            }
+        }
+        true
+    }
+
+    fn in_path(name: &str) -> bool {
+        std::env::var_os("PATH")
+            .map(|paths| {
+                std::env::split_paths(&paths).any(|dir| {
+                    let candidate = dir.join(name);
+                    candidate.is_file()
+                })
+            })
+            .unwrap_or(false)
+    }
+
+    /// Returns `false` when no GUI dialog was available (caller prints instead).
+    pub(super) fn alert(msg: &str) -> bool {
+        if !available() {
+            return false;
+        }
+        message_box_ok(TITLE, msg, MessageBoxIcon::Info);
+        true
+    }
+
+    /// `Some(answer)` when a dialog was shown; `None` to use the console path.
+    pub(super) fn confirm(msg: &str) -> Option<bool> {
+        if !available() {
+            return None;
+        }
+        Some(
+            message_box_ok_cancel(TITLE, msg, MessageBoxIcon::Question, OkCancel::Ok)
+                == OkCancel::Ok,
+        )
+    }
+
+    /// `Some(None)` means the user cancelled; `None` means no GUI dialog.
+    pub(super) fn prompt(msg: &str, default_val: &str) -> Option<Option<String>> {
+        if !available() {
+            return None;
+        }
+        Some(input_box(TITLE, msg, default_val))
     }
 }
 

@@ -13,7 +13,7 @@ fn test_system_devtools_domain() {
     let registry = DomainRegistry::new();
     let identity = IdentityManager::new();
 
-    let handler = SystemDomainHandler::new(&search, &host, &registry, &identity);
+    let handler = SystemDomainHandler::new(&search, &host, &registry, &identity, 100);
     let bundle = handler.render_system_devtools_page(None);
 
     assert_eq!(bundle.title, "devtools.plain — Developer Tools Inspector");
@@ -27,7 +27,7 @@ fn test_system_gossip_domain() {
     let registry = DomainRegistry::new();
     let identity = IdentityManager::new();
 
-    let handler = SystemDomainHandler::new(&search, &host, &registry, &identity);
+    let handler = SystemDomainHandler::new(&search, &host, &registry, &identity, 100);
     let bundle = handler.render_system_gossip_page();
 
     assert_eq!(bundle.title, "gossip.plain — Artifact Gossip");
@@ -41,24 +41,27 @@ fn test_system_nodes_domain() {
     let registry = DomainRegistry::new();
     let identity = IdentityManager::new();
 
-    let handler = SystemDomainHandler::new(&search, &host, &registry, &identity);
+    let handler = SystemDomainHandler::new(&search, &host, &registry, &identity, 100);
 
-    // No connection target: the page renders the pairing hint.
-    let bundle = handler.render_system_nodes_page(None);
+    // No connection target and no peers: the page renders the pairing hint.
+    let bundle = handler.render_system_nodes_page(None, &[]);
     assert_eq!(bundle.title, "nodes.plain — Peer Node Registry");
     assert!(bundle.script_payload.is_some());
 
-    // With a parsed connection-link target: the connect card renders.
+    // With a parsed connection-link target and a live peer: the connect card
+    // and the peer row both render, and the button gets a click handler.
     let addr: std::net::SocketAddr = "127.0.0.1:9000".parse().unwrap();
     let peer = PublicKey([9u8; 32]);
-    let bundle = handler.render_system_nodes_page(Some((addr, peer)));
+    let bundle = handler.render_system_nodes_page(Some((addr, peer)), &[(peer, addr)]);
     assert_eq!(bundle.title, "nodes.plain — Peer Node Registry");
+    let script = String::from_utf8(bundle.script_payload.unwrap()).unwrap();
+    assert!(script.contains("__pwb_connect"));
 }
 
 #[test]
 fn test_handle_message_search_query_and_fetch_artifact() {
-    let mut search = SearchEngine::new();
-    let mut host = ArtifactHost::new();
+    let search = SearchEngine::new();
+    let host = ArtifactHost::new();
     let registry = DomainRegistry::new();
     let identity = IdentityManager::new();
 
@@ -79,7 +82,7 @@ fn test_handle_message_search_query_and_fetch_artifact() {
     search.index_bundle(cid, &bundle);
     let stored_cid = host.store(bundle.serialize()).expect("stores");
 
-    let handler = SystemDomainHandler::new(&search, &host, &registry, &identity);
+    let handler = SystemDomainHandler::new(&search, &host, &registry, &identity, 100);
 
     // SearchQuery → SearchResponse with wire results.
     let response = handler
@@ -148,7 +151,7 @@ fn test_devtools_page_with_bundle_shows_dom_tree() {
     let host = ArtifactHost::new();
     let registry = DomainRegistry::new();
     let identity = IdentityManager::new();
-    let handler = SystemDomainHandler::new(&search, &host, &registry, &identity);
+    let handler = SystemDomainHandler::new(&search, &host, &registry, &identity, 100);
 
     let mut root = pwb_core::spec::PlainNode::new(0, pwb_core::spec::Tag::Document);
     let mut title = pwb_core::spec::PlainNode::new(1, pwb_core::spec::Tag::Title);
@@ -178,8 +181,61 @@ fn test_devtools_page_with_bundle_shows_dom_tree() {
 }
 
 #[test]
+fn test_register_page_renders_claim_form_and_known_domains() {
+    let identity = IdentityManager::new();
+    let mut registry = DomainRegistry::new();
+    let cid = pwb_core::crypto::ContentId([4u8; 32]);
+    registry
+        .register("alice.pwb", cid, identity.public_key())
+        .expect("registers");
+
+    let bundle = render_register_page_bundle(
+        identity.public_key(),
+        100,
+        registry.claim_cost(),
+        &registry.records_snapshot(),
+        &[(cid, "Alice Site".to_string())],
+        Some(cid),
+        Some("Claimed alice.pwb"),
+    );
+
+    assert_eq!(bundle.title, "register.plain — Domain Claim Registry");
+    assert!(bundle.script_payload.is_some());
+
+    // The claim form (domain + content-id inputs and a claim button) and the
+    // hosted-artifact filler are present.
+    fn has_id(n: &pwb_core::spec::PlainNode, id: &str) -> bool {
+        n.attributes.get("id").map(|v| v == id).unwrap_or(false)
+            || n.children.iter().any(|c| has_id(c, id))
+    }
+    assert!(has_id(&bundle.root_node, "reg-domain"), "domain input");
+    assert!(has_id(&bundle.root_node, "reg-cid"), "content-id input");
+    assert!(has_id(&bundle.root_node, "claim-btn"), "claim button");
+    assert!(has_id(&bundle.root_node, "use_0"), "artifact filler button");
+
+    // The status message is interpolated into the page.
+    fn has_text_containing(n: &pwb_core::spec::PlainNode, needle: &str) -> bool {
+        n.text_content
+            .as_deref()
+            .map(|t| t.contains(needle))
+            .unwrap_or(false)
+            || n.children.iter().any(|c| has_text_containing(c, needle))
+    }
+    assert!(
+        has_text_containing(&bundle.root_node, "Claimed alice.pwb"),
+        "status message renders"
+    );
+}
+
+#[test]
+fn test_message_bundle_renders_title_and_message() {
+    let bundle = render_message_bundle("domain not found", "No node knows that name.");
+    assert_eq!(bundle.title, "domain not found");
+}
+
+#[test]
 fn test_search_page_renders_result_cards_when_hits_exist() {
-    let mut search = SearchEngine::new();
+    let search = SearchEngine::new();
     let host = ArtifactHost::new();
     let registry = DomainRegistry::new();
     let identity = IdentityManager::new();
@@ -199,19 +255,28 @@ fn test_search_page_renders_result_cards_when_hits_exist() {
     let cid = pwb_core::crypto::ContentId::compute(b"searchable-bytes");
     search.index_bundle(cid, &bundle);
 
-    let handler = SystemDomainHandler::new(&search, &host, &registry, &identity);
+    let handler = SystemDomainHandler::new(&search, &host, &registry, &identity, 100);
     let page = handler.render_system_search_page("decentralized");
     assert!(page.title.contains("decentralized"));
 
-    // The non-empty branch emits per-result cards with Visit buttons.
-    fn find_button(n: &pwb_core::spec::PlainNode) -> bool {
-        if n.tag == pwb_core::spec::Tag::Button {
-            return true;
+    // The non-empty branch emits per-result cards whose title and "Visit Site"
+    // affordance are native links to the content-addressed page — no JS needed.
+    let href = format!("content.pwb/{}", cid.to_hex());
+    fn find_link(n: &pwb_core::spec::PlainNode, href: &str) -> Option<String> {
+        if n.tag == pwb_core::spec::Tag::Link
+            && n.attributes.get("href").map(String::as_str) == Some(href)
+        {
+            return n.text_content.clone();
         }
-        n.children.iter().any(find_button)
+        n.children.iter().find_map(|c| find_link(c, href))
     }
+    let label = find_link(&page.root_node, &href).expect("result cards link to the hit");
     assert!(
-        find_button(&page.root_node),
-        "result cards include a Visit Site button"
+        label.contains("Searchable"),
+        "result link is labelled with the hit's title, got {label:?}"
+    );
+    assert!(
+        page.script_payload.is_none(),
+        "native links must not need a script payload"
     );
 }

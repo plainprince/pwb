@@ -13,9 +13,11 @@ use crate::dom::Dom;
 use crate::js_runtime::{execute_script, DomHandle};
 use crate::render::{SelectionPoint, TextSelection};
 use pwb_core::wire::Bundle;
-use pwb_node::domain::DomainRegistry;
+use pwb_node::domain::{DomainRegistry, DomainService};
+use pwb_node::federation::DistributedSearch;
 use pwb_node::host::ArtifactHost;
 use pwb_node::identity::IdentityManager;
+use pwb_node::privacy::PrivacyMode;
 use pwb_node::search::SearchEngine;
 
 use std::sync::{Arc, Mutex};
@@ -34,12 +36,17 @@ pub enum PipelineError {
 /// Build a `BrowserApp` for `bundle_bytes` without running the event loop.
 /// Callers (main.rs) own the `EventLoop` and drive `run_app` once; navigation
 /// swaps the DOM in place via `BrowserApp::navigate_to`.
+#[allow(clippy::too_many_arguments)]
 pub fn build_browser_app(
     bundle_bytes: &[u8],
     search: Arc<SearchEngine>,
     host: Arc<ArtifactHost>,
-    registry: Arc<DomainRegistry>,
+    registry: Arc<Mutex<DomainRegistry>>,
     identity: Arc<IdentityManager>,
+    federation: Arc<DistributedSearch>,
+    domain: Arc<DomainService>,
+    privacy: PrivacyMode,
+    runtime: tokio::runtime::Handle,
 ) -> Result<BrowserApp, PipelineError> {
     println!("Decompiling PlainWeb binary bundle...");
     let bundle = Bundle::deserialize(bundle_bytes).map_err(PipelineError::Wire)?;
@@ -54,7 +61,12 @@ pub fn build_browser_app(
     let mut devtools_mounted = false;
     let mut devtools_root_id = None;
 
-    let dom_handle = DomHandle::new(Dom::from_bundle(&bundle));
+    let mut initial_dom = Dom::from_bundle(&bundle);
+    let mut shell = crate::shell::Shell::new("welcome.plain");
+    // Start the badge from the live peer table so the first frame is truthful.
+    shell.peers = domain.peers().len();
+    crate::shell::install_chrome(&mut initial_dom, &shell);
+    let dom_handle = DomHandle::new(initial_dom);
 
     // `localStorage` persists per bundle to `~/.pwb/<bundle-hash>.json`, keyed
     // by a short hash of the bundle bytes so different sites keep separate
@@ -125,33 +137,17 @@ pub fn build_browser_app(
         is_open: devtools_start_open,
     }));
 
-    // Mirror of the selected text, readable from the (static) context-menu Copy
-    // action without holding the event-loop's `selection` state.
-    let selected_text_shared: Arc<Mutex<String>> = Arc::new(Mutex::new(String::new()));
     // Result channel from the (static) menu actions back to the event-loop
     // handler: 0 = nothing, 1 = Copy, 2 = Inspect Element. The actions only
-    // record what was chosen (plus do the clipboard write for Copy); DOM state
-    // changes happen in the handler where `DomHandle` is reachable.
+    // record what was chosen; the actual clipboard write happens on the event
+    // loop, where the long-lived `Clipboard` handle lives.
     let menu_result: Arc<Mutex<u8>> = Arc::new(Mutex::new(0));
 
-    let copy_text = selected_text_shared.clone();
     let copy_result = menu_result.clone();
     let inspect_result = menu_result.clone();
     context_menu::set_actions(ContextMenuActions {
         on_copy: Box::new(move || {
             *copy_result.lock().unwrap() = 1;
-            let text = copy_text.lock().unwrap().clone();
-            if text.is_empty() {
-                return;
-            }
-            match arboard::Clipboard::new() {
-                Ok(mut clipboard) => {
-                    if clipboard.set_text(text).is_ok() {
-                        println!("[Clipboard] Copied selection via context menu");
-                    }
-                }
-                Err(e) => eprintln!("[Clipboard] Failed to access clipboard: {}", e),
-            }
         }),
         on_inspect: Box::new(move || {
             *inspect_result.lock().unwrap() = 2;
@@ -174,8 +170,10 @@ pub fn build_browser_app(
         surface: None,
         dom_handle_render: dom_handle,
         devtools_state,
-        selected_text_shared,
         menu_result,
+        clipboard: arboard::Clipboard::new().ok(),
+        inline_menu: None,
+        swallow_click: false,
         devtools_root_id,
         devtools_mounted,
         dump_png_path,
@@ -193,6 +191,12 @@ pub fn build_browser_app(
         host,
         registry,
         identity,
+        federation,
+        domain,
+        privacy,
+        runtime,
+        pending_page: None,
+        shell,
     })
 }
 

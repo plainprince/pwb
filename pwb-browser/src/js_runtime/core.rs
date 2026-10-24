@@ -47,6 +47,10 @@ pub struct DomHandle {
     /// JS event handlers). The pipeline checks this after event dispatch and
     /// restarts the browser with the new bundle.
     pub pending_navigate: Rc<RefCell<Option<String>>>,
+    /// A connection link the page wants to dial (set by `__pwb_connect(link)`
+    /// from the `nodes.plain` connect card). The pipeline performs the dial on
+    /// its Tokio runtime and renders the outcome.
+    pub pending_connect: Rc<RefCell<Option<String>>>,
     /// Web API state: `localStorage`/`sessionStorage` maps and detached DOM
     /// nodes (`document.createElement` before they are appended).
     pub web: WebApiState,
@@ -65,6 +69,7 @@ impl DomHandle {
             selected_node_id: Rc::new(RefCell::new(None)),
             focused_input: Rc::new(RefCell::new(None)),
             pending_navigate: Rc::new(RefCell::new(None)),
+            pending_connect: Rc::new(RefCell::new(None)),
             web: WebApiState::new(),
             scroll_to_bottom: Rc::new(RefCell::new(Vec::new())),
         }

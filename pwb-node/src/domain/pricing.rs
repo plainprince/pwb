@@ -3,7 +3,12 @@
 use std::collections::{BTreeMap, VecDeque};
 
 /// Price a fresh registry charges for the first claim (credits).
-pub const INITIAL_CLAIM_PRICE: u64 = 50;
+///
+/// This is deliberately equal to [`MIN_CLAIM_PRICE`]: publishing one bundle
+/// earns one index reward (10 credits), so a fresh node can claim a name for
+/// the site it just hosted without first farming unrelated traffic. Dynamic
+/// pricing raises the price as network demand grows.
+pub const INITIAL_CLAIM_PRICE: u64 = 10;
 
 /// Per-epoch observations retained by [`RollingPricing`] (§5).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

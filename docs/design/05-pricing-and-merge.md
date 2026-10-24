@@ -25,7 +25,10 @@ Each `record_epoch` recomputes integer-only rolling averages and moves the price
   work vs the balanced baseline, so both inputs enter the price)
 
 Clamped to `[MIN_CLAIM_PRICE=10, MAX_CLAIM_PRICE=10_000]`. A fresh engine starts at
-`INITIAL_CLAIM_PRICE=50` (the old constant, now just the initial value).
+`INITIAL_CLAIM_PRICE=10`: indexing a hosted bundle of at least 640 compressed
+bytes clears the 10-credit traffic floor and pays for a first claim. A smaller
+bundle must earn the rest from served queries or relayed cells; `pwb-node`
+keeps serving and retries a deferred claim.
 
 #### API
 
@@ -35,7 +38,7 @@ Clamped to `[MIN_CLAIM_PRICE=10, MAX_CLAIM_PRICE=10_000]`. A fresh engine starts
 
 | Constant | Value | Meaning |
 |----------|-------|---------|
-| `INITIAL_CLAIM_PRICE` | 50 credits | Fresh engine starting price |
+| `INITIAL_CLAIM_PRICE` | 10 credits | Fresh engine starting price |
 | `MIN_CLAIM_PRICE` | 10 credits | Lower bound |
 | `MAX_CLAIM_PRICE` | 10,000 credits | Upper bound |
 | `PRICING_WINDOW` | 8 epochs | Observations retained |
@@ -61,7 +64,7 @@ Deterministic state reconciliation when two isolated P2P network clusters merge
 
 Resolves conflicting claims:
 - Last-writer-wins by `registered_at_epoch` (owner public key bytes break ties)
-- Takes the maximum per-owner claimed spend (a spend is never undone)
+- Repairs overdrawn attested funding groups: every record citing the same `(owner, funding.head)` spends from one attested state, so groups whose live spend exceeds the cited balance evict their lowest-priority records (oldest epoch first, then domain name — first-spent wins), plus a cumulative per-owner pass across heads. Attested spend accounting is derived from the surviving records themselves, so one certificate cannot fund two surviving claims even across partitions
 - Unions the voucher spend log
 - Merges rolling pricing
 

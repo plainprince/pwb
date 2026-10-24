@@ -207,21 +207,28 @@ pub(super) fn build_box(
                 }
                 Alignment::Start => {}
             }
-            // Vertically center children within the row's INNER content height. By
-            // default rows have no explicit height and the inner box equals the
-            // tallest child, so children stay where they were laid. But a
-            // fixed-height tab/header is taller than its icon/text content, and
-            // centering against only `row_max_h` leaves the icon pinned to the
-            // top padding — center against the real inner height instead.
-            let inner_h = explicit_height
-                .map(|h| (h - padding * 2.0).max(0.0))
-                .unwrap_or(row_max_h)
-                .max(row_max_h);
-            for b in &mut children {
-                let child_h = b.rect.height();
-                let dy = (inner_h - child_h) / 2.0;
-                if dy > 0.0 {
-                    translate_box(b, 0.0, dy);
+            // A row's explicit `height` (a tab bar, a toolbar) is the height
+            // every child is centered against and the height the flow advances
+            // by. Without it a 32px row advances by its 21px button and the
+            // next row overlaps the text.
+            let row_height = explicit_height.or_else(|| {
+                style.height.and_then(|uv| {
+                    resolve_unit(uv, containing.height(), ctx.viewport_w, ctx.viewport_h)
+                })
+            });
+            // Vertically center children within the row's inner content height,
+            // but only when asked. `align-items: start` (the default) must keep
+            // children at the top of the row.
+            if style.align_items == Alignment::Center {
+                let inner_h = row_height
+                    .map(|h| (h - padding * 2.0).max(0.0))
+                    .unwrap_or(row_max_h)
+                    .max(row_max_h);
+                for b in &mut children {
+                    let dy = (inner_h - b.rect.height()) / 2.0;
+                    if dy > 0.0 {
+                        translate_box(b, 0.0, dy);
+                    }
                 }
             }
             // Flex-row children were laid out in local coordinates (they don't
@@ -234,9 +241,10 @@ pub(super) fn build_box(
                     translate_box(b, 0.0, start_y);
                 }
             }
-            // Advance the flow cursor: top padding + tallest child (bottom padding is
-            // added by the View rect computation below).
-            *y = start_y + padding + row_max_h;
+            // Advance by the box's real height: explicit height when present,
+            // otherwise padding + tallest child (the View rect adds the bottom
+            // padding below).
+            *y = start_y + row_height.unwrap_or(padding + row_max_h);
         } else {
             // Flex column (or pass-through): stack children top-to-bottom.
             if is_view {
@@ -337,13 +345,7 @@ pub(super) fn build_box(
     // Text nodes: measure the text and create a leaf box.
     // Buttons/Links/Code are text-like but have their own sizing logic.
     let rect = match node.tag {
-        Tag::Document
-        | Tag::Head
-        | Tag::Title
-        | Tag::Image
-        | Tag::Script
-        | Tag::Component
-        | Tag::Import => {
+        Tag::Document | Tag::Head | Tag::Title | Tag::Script | Tag::Component | Tag::Import => {
             let height = explicit_height.unwrap_or_else(|| (*y - start_y).max(0.0));
             Rect::from_xywh(flow_x, start_y, max_width, height)
                 .unwrap_or_else(|| Rect::from_xywh(flow_x, start_y, max_width, 1.0).unwrap())
@@ -357,7 +359,10 @@ pub(super) fn build_box(
             // container) wins over the content size, and flow continues below it.
             let height = match explicit_height {
                 Some(h) => {
-                    *y = start_y + h + padding;
+                    // An explicit height is the whole box; adding padding here
+                    // moved the next sibling past the drawn box and opened a
+                    // gap the size of the view's padding.
+                    *y = start_y + h;
                     h
                 }
                 None => {
@@ -396,7 +401,9 @@ pub(super) fn build_box(
         }
         Tag::Button | Tag::Link | Tag::Code => {
             // Buttons, links, and code boxes use text metrics with padding.
-            // Defaults: 2.5vh font, 3.33vh padding (≈15px and 20px at 600px tall).
+            // A link is inline text and must not reserve box padding: the old
+            // 3.33vh default indented every link and stretched its hit area and
+            // underline.
             let font_size = resolve_len(
                 style.font_size,
                 UnitValue::Vh(0.025),
@@ -404,16 +411,27 @@ pub(super) fn build_box(
                 ctx.viewport_w,
                 ctx.viewport_h,
             );
+            let pad_default = if node.tag == Tag::Link {
+                UnitValue::Px(0.0)
+            } else if node.tag == Tag::Code {
+                UnitValue::Px(4.0)
+            } else {
+                UnitValue::Vh(0.0333)
+            };
             let pad = resolve_len(
                 style.padding,
-                UnitValue::Vh(0.0333),
+                pad_default,
                 containing.width(),
                 ctx.viewport_w,
                 ctx.viewport_h,
             );
             let btn_txt = node.text.as_deref().unwrap_or("");
             let text_w = measure_text_width(btn_txt, font_size, get_font());
-            let btn_width = (text_w + pad * 2.0).min(max_width);
+            // An explicit width (a form-style button) wins over the label size.
+            let explicit = style.width.and_then(|uv| {
+                resolve_unit(uv, containing.width(), ctx.viewport_w, ctx.viewport_h)
+            });
+            let btn_width = explicit.unwrap_or(text_w + pad * 2.0).clamp(1.0, max_width);
             let btn_height = match style.height {
                 Some(h) => resolve_unit(h, containing.height(), ctx.viewport_w, ctx.viewport_h)
                     .unwrap_or(font_size + pad * 2.0),
@@ -446,7 +464,19 @@ pub(super) fn build_box(
                 ctx.viewport_w,
                 ctx.viewport_h,
             );
-            let text_w = measure_text_width(&value, font_size, get_font());
+            // Size to whichever is longer: the value, or the placeholder shown
+            // while the field is empty. Sizing only from `value` clipped every
+            // placeholder to the 140px minimum.
+            let placeholder = node
+                .attributes
+                .get("placeholder")
+                .map(String::as_str)
+                .unwrap_or("");
+            let text_w = measure_text_width(&value, font_size, get_font()).max(measure_text_width(
+                placeholder,
+                font_size,
+                get_font(),
+            ));
             let explicit = style.width.and_then(|uv| {
                 resolve_unit(uv, containing.width(), ctx.viewport_w, ctx.viewport_h)
             });
@@ -457,6 +487,37 @@ pub(super) fn build_box(
             let rect = Rect::from_xywh(flow_x, *y, input_width, input_height)
                 .unwrap_or_else(|| Rect::from_xywh(flow_x, *y, 140.0, 30.0).unwrap());
             *y += input_height + 8.0;
+            rect
+        }
+        Tag::Image => {
+            // Images honor pixel `width`/`height` attributes first, then CSS
+            // lengths, and otherwise take a 320x180 default (never wider than
+            // the content box). The renderer scales the decoded PNG to fill
+            // the rect.
+            let attr_px = |name: &str| {
+                node.attributes
+                    .get(name)
+                    .and_then(|v| v.trim().parse::<f32>().ok())
+            };
+            let w = attr_px("width")
+                .or_else(|| {
+                    style.width.and_then(|uv| {
+                        resolve_unit(uv, containing.width(), ctx.viewport_w, ctx.viewport_h)
+                    })
+                })
+                .unwrap_or(max_width.min(320.0))
+                .clamp(1.0, max_width);
+            let h = attr_px("height")
+                .or_else(|| {
+                    style.height.and_then(|uv| {
+                        resolve_unit(uv, containing.height(), ctx.viewport_w, ctx.viewport_h)
+                    })
+                })
+                .unwrap_or(180.0)
+                .max(1.0);
+            let rect = Rect::from_xywh(flow_x, *y, w, h)
+                .unwrap_or_else(|| Rect::from_xywh(flow_x, *y, w, 1.0).unwrap());
+            *y += h + 8.0;
             rect
         }
         Tag::Icon => {
@@ -512,6 +573,7 @@ pub(super) fn build_box(
         value: node.attributes.get("value").cloned(),
         placeholder: node.attributes.get("placeholder").cloned(),
         icon: node.attributes.get("icon").cloned(),
+        image_src: node.attributes.get("src").cloned(),
         children,
         overflow: style.overflow,
         content_height,

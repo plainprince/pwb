@@ -70,14 +70,17 @@ fn encode_xor_mapped_address(addr: SocketAddr) -> Vec<u8> {
     out.push(0x00); // reserved
     out.push(0x01); // address family: IPv4
     out.push((xor_port >> 8) as u8); // high byte
-    out.push(xor_port as u8);        // low byte
+    out.push(xor_port as u8); // low byte
     out.extend_from_slice(&xor_ip.to_be_bytes());
     out
 }
 
 /// Parse a STUN message header. Returns `Some((msg_type, txn_id))` when the
 /// magic cookie matches and the transaction ID could be read.
-fn parse_stun_header(bytes: &[u8], expected_txn: &[u8; TRANSACTION_ID_LEN]) -> Option<(u16, [u8; TRANSACTION_ID_LEN])> {
+fn parse_stun_header(
+    bytes: &[u8],
+    expected_txn: &[u8; TRANSACTION_ID_LEN],
+) -> Option<(u16, [u8; TRANSACTION_ID_LEN])> {
     if bytes.len() < STUN_HEADER_LEN {
         return None;
     }
@@ -195,7 +198,9 @@ mod tests {
     use super::*;
 
     fn make_txn_id() -> [u8; TRANSACTION_ID_LEN] {
-        [0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77, 0x88, 0x99, 0xaa, 0xbb, 0xcc]
+        [
+            0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77, 0x88, 0x99, 0xaa, 0xbb, 0xcc,
+        ]
     }
 
     #[test]
@@ -203,7 +208,10 @@ mod tests {
         let txn = make_txn_id();
         let req = build_binding_request(&txn);
         assert_eq!(req.len(), STUN_HEADER_LEN);
-        assert_eq!(u16::from_be_bytes(req[0..2].try_into().unwrap()), STUN_BINDING_REQUEST);
+        assert_eq!(
+            u16::from_be_bytes(req[0..2].try_into().unwrap()),
+            STUN_BINDING_REQUEST
+        );
         assert_eq!(&req[4..8], &STUN_MAGIC_COOKIE.to_be_bytes());
         assert_eq!(&req[8..20], &txn);
     }

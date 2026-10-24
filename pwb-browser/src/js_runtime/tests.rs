@@ -5,6 +5,30 @@ use pwb_core::spec::Tag;
 use std::collections::HashMap;
 use std::sync::atomic::Ordering;
 
+fn first_node_with_tag(node: &DomNode, tag: Tag) -> Option<usize> {
+    if node.tag == tag {
+        return Some(node.id);
+    }
+    node.children
+        .iter()
+        .find_map(|c| first_node_with_tag(c, tag))
+}
+
+#[test]
+fn test_pwb_connect_records_pending_link() {
+    let handle = test_handle();
+    let link = "plain://nodes.plain?connect=127.0.0.1:9000/";
+    execute_script(
+        &handle,
+        &format!("__pwb_connect('{link}0000000000000000000000000000000000000000000000000000000000000000');"),
+    )
+    .expect("script runs");
+    assert_eq!(
+        handle.pending_connect.borrow().as_deref(),
+        Some("plain://nodes.plain?connect=127.0.0.1:9000/0000000000000000000000000000000000000000000000000000000000000000")
+    );
+}
+
 fn test_handle() -> DomHandle {
     let dom = Dom {
         title: "Probe".to_string(),
@@ -440,7 +464,7 @@ fn test_select_element_fills_styles_panel_and_survives_refresh() {
 
 #[test]
 fn test_devtools_tree_open_close_structure() {
-    // Mount real devtools + the real demo.pwb DOM and populate the tree.
+    // Mount real devtools + the real demo.plain DOM and populate the tree.
     let devtools_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("webpages/devtools");
     let bundle = crate::bundler::bundle_from_dir(&devtools_dir).expect("devtools bundle");
     let mut devtools_dom = Dom::from_bundle(&bundle);
@@ -448,9 +472,11 @@ fn test_devtools_tree_open_close_structure() {
         .root
         .attributes
         .insert("data-devtools".to_string(), "root".to_string());
-    let demo_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("webpages/demo.pwb");
+    let demo_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("webpages/demo.plain");
     let demo_bundle = crate::bundler::bundle_from_dir(&demo_dir).expect("demo bundle");
     let mut main = Dom::from_bundle(&demo_bundle);
+    let title_id = first_node_with_tag(&main.root, Tag::Title).expect("demo title");
+    let head_id = first_node_with_tag(&main.root, Tag::Head).expect("demo head");
     main.add_child(devtools_dom.root);
     let handle = DomHandle::new(main);
     // Real window size so the truncation budget matches runtime.
@@ -481,14 +507,18 @@ fn test_devtools_tree_open_close_structure() {
         .iter()
         .find(|(_, _, p)| p.contains(&"    <title>"))
         .expect("title open row");
-    assert_eq!(title_open.1, Some("100003"), "leaf rows carry data-node");
+    assert_eq!(
+        title_open.1.and_then(|v| v.parse::<usize>().ok()),
+        Some(title_id),
+        "leaf rows carry data-node"
+    );
     let head_close = rows
         .iter()
         .find(|(_, _, p)| p.contains(&"  </head>"))
         .expect("head close row");
     assert_eq!(
-        head_close.1,
-        Some("100002"),
+        head_close.1.and_then(|v| v.parse::<usize>().ok()),
+        Some(head_id),
         "closing rows carry data-node too (head node)"
     );
 
@@ -879,7 +909,7 @@ fn test_devtools_console_renders_with_syntax_highlighting() {
     for y in 0..800 {
         for x in 0..1200 {
             let p = pixmap.pixel(x, y).unwrap();
-            let (r, g, b) = (p.red(), p.green(), p.blue());
+            let (r, g, b) = (p.red() as i32, p.green() as i32, p.blue() as i32);
             // Antialiased keyword pixels on dark background (#1e1e1e) have b > g > r
             if b > g && g > r + 15 && b > 80 {
                 keyword_px += 1;
@@ -1184,8 +1214,10 @@ fn test_fetch_resolves_promise() {
         let mut buf = [0u8; 4096];
         let _ = std::io::Read::read(&mut stream, &mut buf);
         let body = "hello-from-server";
+        // The browser enforces CORS on cross-origin fetches by default, so
+        // the fixture blesses its own response.
         let resp = format!(
-                "HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                "HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nAccess-Control-Allow-Origin: *\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
                 body.len(),
                 body
             );
@@ -1248,7 +1280,7 @@ fn scratch_hit_elements_tree_rows() {
         .root
         .attributes
         .insert("data-devtools".to_string(), "root".to_string());
-    let demo_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("webpages/demo.pwb");
+    let demo_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("webpages/demo.plain");
     let demo_bundle = crate::bundler::bundle_from_dir(&demo_dir).expect("demo bundle");
     let mut main = Dom::from_bundle(&demo_bundle);
     main.add_child(devtools_dom.root);
@@ -1256,9 +1288,11 @@ fn scratch_hit_elements_tree_rows() {
     execute_script(&handle, "__pwb_refreshDevtools(1800, 1300);").unwrap();
 
     let dom = handle.dom.borrow();
+    let tree_id = crate::dom::find_node_by_id_ref(&dom.root, "elements-tree")
+        .expect("elements tree node")
+        .id;
     let layout_root = crate::layout::build_layout_tree(&dom, 1800, 1300, 0.0);
-    let tree = crate::layout::find_box_by_id(&layout_root, /*elements-tree id*/ 100016)
-        .expect("elements tree box");
+    let tree = crate::layout::find_box_by_id(&layout_root, tree_id).expect("elements tree box");
     println!(
         "=== elements-tree box: x={:.1} y={:.1} w={:.1} h={:.1}",
         tree.rect.left(),
@@ -1331,7 +1365,7 @@ fn test_tree_rows_hit_only_their_own_row() {
             .root
             .attributes
             .insert("data-devtools".to_string(), "root".to_string());
-        let demo_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("webpages/demo.pwb");
+        let demo_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("webpages/demo.plain");
         let demo_bundle = crate::bundler::bundle_from_dir(&demo_dir).expect("demo bundle");
         let mut main = Dom::from_bundle(&demo_bundle);
         main.add_child(devtools_dom.root);
@@ -1339,9 +1373,12 @@ fn test_tree_rows_hit_only_their_own_row() {
         execute_script(&handle, &format!("__pwb_refreshDevtools({}, {});", vw, vh)).unwrap();
 
         let dom = handle.dom.borrow();
+        let tree_id = crate::dom::find_node_by_id_ref(&dom.root, "elements-tree")
+            .expect("elements tree node")
+            .id;
         let layout_root = crate::layout::build_layout_tree(&dom, vw, vh, 0.0);
         let scrolls = std::collections::HashMap::new();
-        let tree = crate::layout::find_box_by_id(&layout_root, 100016).expect("elements tree box");
+        let tree = crate::layout::find_box_by_id(&layout_root, tree_id).expect("elements tree box");
         // The tree is `overflow: scroll`: only points inside its visible
         // viewport are clickable, so clamp the samples to `tree.rect`.
         let vp_top = tree.rect.top();

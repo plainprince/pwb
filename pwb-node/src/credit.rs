@@ -25,6 +25,7 @@
 //! hits the floor. Per-service cooldowns spread work over time (proof of
 //! time), and a per-epoch cap bounds absolute issuance.
 
+mod ledger;
 mod meter;
 mod minter;
 mod policy;
@@ -34,6 +35,7 @@ mod signing;
 #[cfg(test)]
 mod tests;
 
+pub use ledger::{CreditEntry, CreditLedger, LedgerError};
 pub use meter::TrafficMeter;
 pub use minter::CreditMinter;
 pub use policy::{MintError, MintPolicy, ServiceKind};

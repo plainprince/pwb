@@ -48,8 +48,8 @@ The browser implements a **two-tier URI resolution system** supporting both netw
 
 | URI Type | Example | Resolution Method | Security Model |
 |----------|---------|-------------------|-----------------|
-| **Network Domain** | `welcome.pwb` | DomainRegistry lookup | Registered domains only |
-| **System Domain** | `search.plain` | Built-in handler | Reserved TLD |
+| **Unofficial Network Domain** | `mysite.pwb` | DomainRegistry lookup | Registered domains only |
+| **Official Built-in Page** | `welcome.plain`, `search.plain` | Built-in handler / shipped bundle | Reserved TLD |
 | **Local File** | `file.pwb/demo.pwb` | Filesystem access | Sandboxed |
 
 ### Local File Access
@@ -116,9 +116,9 @@ Benefits:
 - **Explicit opt-in**: Requires `--file` flag or prefix
 - **No traversal**: `../` sequences blocked by path parsing
 
-### Reserved System TLD
+### Reserved official TLD
 
-**Design Decision**: `.plain` TLD strictly reserved for system domains.
+**Design Decision**: `.plain` TLD strictly reserved for the official namespace — built-in system domains and browser-shipped content pages. `.pwb` is the unofficial user namespace.
 
 ```rust
 pub fn is_reserved_system_domain(domain: &str) -> bool {

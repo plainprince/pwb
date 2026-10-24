@@ -13,6 +13,14 @@ fn write(dir: &Path, name: &str, content: &str) {
     std::fs::write(dir.join(name), content).unwrap();
 }
 
+fn rule<'a>(rules: &'a [(String, Vec<StyleProperty>)], selector: &str) -> &'a [StyleProperty] {
+    rules
+        .iter()
+        .find(|(s, _)| s == selector)
+        .map(|(_, props)| props.as_slice())
+        .unwrap_or_else(|| panic!("missing rule for {selector}"))
+}
+
 #[test]
 fn test_pml_void_elements_do_not_swallow_siblings() {
     let root = parse_pml_markup(
@@ -31,7 +39,8 @@ fn test_pml_void_elements_do_not_swallow_siblings() {
     assert_eq!(root.children[0].tag, Tag::Input);
     let next = &root.children[1];
     assert_eq!(next.attributes.get("id").map(|s| s.as_str()), Some("next"));
-    assert_eq!(next.text_content.as_deref(), Some("after"));
+    assert_eq!(next.children[0].tag, Tag::Text);
+    assert_eq!(next.children[0].text_content.as_deref(), Some("after"));
 }
 
 #[test]
@@ -64,6 +73,82 @@ fn test_icon_elements_parse() {
     assert_eq!(
         root.children[2].attributes.get("id").map(|s| s.as_str()),
         Some("after")
+    );
+}
+
+#[test]
+fn test_html_container_tags_and_inline_text() {
+    // HTML-spelled documents parse into the same tree hierarchy: doctype and
+    // `<link rel=stylesheet>` metadata are skipped, container tags become
+    // Views, and inline text becomes a renderable Text child (not a
+    // `text_content` that View layout ignores).
+    let root = parse_pml_markup(
+        "<!DOCTYPE html>\n<html>\n<head>\n<title>DevTools</title>\n<link rel=\"stylesheet\" href=\"style.pss\">\n</head>\n<body>\n<div class=\"sidebar\"><div class=\"tab\">Elements</div><button>Pick</button></div>\n</body>\n</html>",
+    )
+    .expect("HTML document parses");
+
+    assert_eq!(root.tag, Tag::View, "<html> is a View");
+    assert_eq!(root.children.len(), 2, "head and body are siblings");
+    assert_eq!(root.children[0].tag, Tag::Head);
+    assert_eq!(root.children[1].tag, Tag::View, "<body> is a View");
+
+    fn find_class<'a>(n: &'a PlainNode, class: &str) -> Option<&'a PlainNode> {
+        if n.attributes.get("class").map(|c| c.as_str()) == Some(class) {
+            return Some(n);
+        }
+        n.children.iter().find_map(|c| find_class(c, class))
+    }
+    let tab = find_class(&root, "tab").expect("tab div");
+    assert_eq!(tab.children.len(), 1);
+    assert_eq!(tab.children[0].tag, Tag::Text);
+    assert_eq!(tab.children[0].text_content.as_deref(), Some("Elements"));
+
+    fn has_tag(n: &PlainNode, tag: Tag) -> bool {
+        n.tag == tag || n.children.iter().any(|c| has_tag(c, tag))
+    }
+    assert!(
+        !has_tag(&root, Tag::Link),
+        "<link rel=stylesheet> must not become an anchor"
+    );
+}
+
+#[test]
+fn test_stylesheet_inherits_font_size_and_color() {
+    // CSS inheritance: a Text child of a styled View picks up font-size/color
+    // unless it has its own rule.
+    let mut root = parse_pml_markup(
+        "<plain><view class=\"tab\">Label<text class=\"own\">Own</text></view></plain>",
+    )
+    .expect("parses");
+    let rules =
+        parse_pss_stylesheet(".tab { font-size: 2vh; color: #ff0000; }\n.own { font-size: 3vh; }");
+    apply_stylesheet(&mut root, &rules);
+
+    let tab = &root.children[0];
+    assert_eq!(
+        tab.attributes.get("font-size").map(|s| s.as_str()),
+        Some("2vh")
+    );
+    assert_eq!(tab.children[0].tag, Tag::Text);
+    assert_eq!(
+        tab.children[0]
+            .attributes
+            .get("font-size")
+            .map(|s| s.as_str()),
+        Some("2vh"),
+        "inline text inherits the container font-size"
+    );
+    assert_eq!(
+        tab.children[0].attributes.get("color").map(|s| s.as_str()),
+        Some("#ff0000")
+    );
+    assert_eq!(
+        tab.children[1]
+            .attributes
+            .get("font-size")
+            .map(|s| s.as_str()),
+        Some("3vh"),
+        "the text's own rule wins over inheritance"
     );
 }
 
@@ -391,7 +476,7 @@ fn test_parse_pss_stylesheet_property_coverage() {
         ResizeStyle, UnitValue,
     };
 
-    let alpha = &rules[".alpha"];
+    let alpha = rule(&rules, ".alpha");
     assert_eq!(
         alpha[0],
         StyleProperty::Color(Color {
@@ -429,50 +514,112 @@ fn test_parse_pss_stylesheet_property_coverage() {
     assert_eq!(alpha[18], StyleProperty::Cursor(CursorStyle::Pointer));
     assert_eq!(alpha[19], StyleProperty::Display(DisplayStyle::Flex));
     assert_eq!(alpha[20], StyleProperty::Direction(FlexDirection::Column));
-    assert_eq!(alpha.len(), 21, "unknown-prop must be ignored");
+    assert_eq!(
+        alpha.len(),
+        22,
+        "unknown props are passed through, not dropped"
+    );
+    assert_eq!(
+        alpha[21],
+        StyleProperty::Raw("unknown-prop".to_string(), "whatever".to_string())
+    );
 
     assert_eq!(
-        rules[".beta"][0],
+        rule(&rules, ".beta")[0],
         StyleProperty::Position(PositionStyle::Relative)
     );
     assert_eq!(
-        rules[".gamma"][0],
+        rule(&rules, ".gamma")[0],
         StyleProperty::Position(PositionStyle::Static)
     );
     assert_eq!(
-        rules[".delta"][0],
+        rule(&rules, ".delta")[0],
         StyleProperty::Position(PositionStyle::Sticky)
     );
     assert_eq!(
-        rules[".eps"],
-        vec![
+        rule(&rules, ".eps"),
+        [
             StyleProperty::Display(DisplayStyle::None),
             StyleProperty::Direction(FlexDirection::Row),
             StyleProperty::Overflow(OverflowStyle::Hidden),
         ]
+        .as_slice()
     );
     assert_eq!(
-        rules[".zeta"],
-        vec![
+        rule(&rules, ".zeta"),
+        [
             StyleProperty::Display(DisplayStyle::Block),
             StyleProperty::Overflow(OverflowStyle::Auto),
             StyleProperty::Cursor(CursorStyle::Text),
         ]
+        .as_slice()
     );
-    assert_eq!(rules[".eta"][0], StyleProperty::Cursor(CursorStyle::Grab));
     assert_eq!(
-        rules[".theta"][0],
+        rule(&rules, ".eta")[0],
+        StyleProperty::Cursor(CursorStyle::Grab)
+    );
+    assert_eq!(
+        rule(&rules, ".theta")[0],
         StyleProperty::Cursor(CursorStyle::Crosshair)
     );
     assert_eq!(
-        rules[".iota"],
-        vec![
+        rule(&rules, ".iota"),
+        [
             StyleProperty::Cursor(CursorStyle::Default),
             StyleProperty::Overflow(OverflowStyle::Visible),
         ]
+        .as_slice()
     );
     // The empty-selector block is dropped.
-    assert!(!rules.contains_key(""));
+    assert!(rules.iter().all(|(selector, _)| !selector.is_empty()));
+}
+
+#[test]
+fn test_pss_passes_through_runtime_only_properties() {
+    // Properties the typed enum does not model but the runtime style engine
+    // understands (`border-bottom`, `min-width`, `flex`) must survive
+    // compilation as attributes instead of being silently dropped.
+    let rules = parse_pss_stylesheet(
+        ".row { border-bottom: 0.1vh solid #3e3e42; min-width: 3vh; flex: 1; }\n",
+    );
+    let mut root = parse_pml_markup("<view class='row'></view>").expect("parses");
+    apply_stylesheet(&mut root, &rules);
+
+    assert_eq!(
+        root.attributes.get("border-bottom").map(|s| s.as_str()),
+        Some("0.1vh solid #3e3e42")
+    );
+    assert_eq!(
+        root.attributes.get("min-width").map(|s| s.as_str()),
+        Some("3vh")
+    );
+    assert_eq!(root.attributes.get("flex").map(|s| s.as_str()), Some("1"));
+}
+
+#[test]
+fn test_pss_leading_comments_do_not_swallow_the_first_rule() {
+    // A leading `/* … */` comment must not be parsed as part of the first
+    // selector (devtools' style.pss opens with a multi-line comment).
+    let rules = parse_pss_stylesheet(
+        "/* PlainWeb DevTools - Style Sheet */\n.sidebar { width: 10px; }\n.tab { color: #ff0000; }",
+    );
+    assert_eq!(
+        rule(&rules, ".sidebar")[0],
+        StyleProperty::Width(pwb_core::spec::UnitValue::Px(10.0))
+    );
+    assert_eq!(
+        rule(&rules, ".tab")[0],
+        StyleProperty::Color(Color {
+            r: 255,
+            g: 0,
+            b: 0,
+            a: 255
+        })
+    );
+    assert!(
+        rules.iter().all(|(selector, _)| !selector.contains("/*")),
+        "comments must not leak into selectors"
+    );
 }
 
 #[test]

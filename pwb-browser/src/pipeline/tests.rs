@@ -1,7 +1,8 @@
+use super::app::insert_text_at_caret;
 use super::devtools::apply_scroll_to_bottom;
 use super::dom::{
-    ancestor_node_ids, compute_selected_text, element_node_id, find_title_for_node,
-    node_in_subtree, tree_row_target_node,
+    ancestor_node_ids, compute_selected_text, delete_selected_text, element_node_id,
+    find_title_for_node, link_href, node_in_subtree, tree_row_target_node,
 };
 use super::resize::{resize_bounds, resize_new_dimensions};
 use crate::dom::DomNode;
@@ -17,6 +18,48 @@ fn tn(id: usize, text: &str) -> DomNode {
         attributes: HashMap::new(),
         text: Some(text.to_string()),
         children: vec![],
+    }
+}
+
+#[test]
+fn test_link_href_resolves_a_click_to_the_nearest_anchor() {
+    let mut attributes = HashMap::new();
+    attributes.insert("href".to_string(), "welcome.plain".to_string());
+    let link = DomNode {
+        id: 2,
+        tag: Tag::Link,
+        attributes,
+        text: None,
+        children: vec![tn(3, "Home")],
+    };
+    let root = root_with(vec![link]);
+
+    // Clicking the link itself or the text run inside it follows `href`.
+    assert_eq!(link_href(&root, 2).as_deref(), Some("welcome.plain"));
+    assert_eq!(link_href(&root, 3).as_deref(), Some("welcome.plain"));
+    // Clicking something that is not a link does not navigate.
+    assert_eq!(link_href(&root, 1), None);
+}
+
+#[test]
+fn test_link_href_ignores_empty_and_fragment_targets() {
+    for href in ["", "   ", "#section"] {
+        let mut attributes = HashMap::new();
+        attributes.insert("href".to_string(), href.to_string());
+        let link = DomNode {
+            id: 2,
+            tag: Tag::Link,
+            attributes,
+            text: Some("x".to_string()),
+            children: vec![],
+        };
+        let root = root_with(vec![link]);
+        assert_eq!(
+            link_href(&root, 2),
+            None,
+            "href {:?} must not navigate",
+            href
+        );
     }
 }
 
@@ -223,6 +266,45 @@ fn test_compute_selected_text_across_nodes() {
 fn test_compute_selected_text_unknown_node() {
     let root = root_with(vec![tn(2, "hello")]);
     assert_eq!(compute_selected_text(&root, 2, 0, 99, 3), "");
+}
+
+#[test]
+fn test_insert_text_at_caret() {
+    assert_eq!(
+        insert_text_at_caret("hello", 5, " world"),
+        ("hello world".to_string(), 11)
+    );
+    // Caret is clamped and control characters are dropped.
+    assert_eq!(
+        insert_text_at_caret("ab", 99, "\nX\t"),
+        ("abX".to_string(), 3)
+    );
+    assert_eq!(insert_text_at_caret("ab", 1, "Z"), ("aZb".to_string(), 2));
+}
+
+#[test]
+fn test_delete_selected_text_same_node() {
+    let mut root = root_with(vec![tn(2, "hello world")]);
+    assert!(delete_selected_text(&mut root, 2, 5, 2, 11));
+    assert_eq!(root.children[0].text.as_deref(), Some("hello"));
+}
+
+#[test]
+fn test_delete_selected_text_across_nodes() {
+    let mut root = root_with(vec![tn(2, "foo"), tn(3, "bar"), tn(4, "baz")]);
+    assert!(delete_selected_text(&mut root, 2, 1, 4, 2));
+    assert_eq!(root.children[0].text.as_deref(), Some("f"));
+    assert_eq!(root.children[1].text, None, "intermediate text removed");
+    assert_eq!(root.children[2].text.as_deref(), Some("z"));
+}
+
+#[test]
+fn test_delete_selected_text_reversed_and_unknown() {
+    let mut root = root_with(vec![tn(2, "hello world")]);
+    // Reversed drag deletes the same forward range (chars 6..11 = "world").
+    assert!(delete_selected_text(&mut root, 2, 11, 2, 6));
+    assert_eq!(root.children[0].text.as_deref(), Some("hello "));
+    assert!(!delete_selected_text(&mut root, 99, 0, 2, 1));
 }
 
 #[test]

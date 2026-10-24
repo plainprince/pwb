@@ -33,8 +33,8 @@ cargo build -p pwb-browser
 # Run with a local file
 cargo run -p pwb-browser -- --file demo.pwb
 
-# Run with a network domain
-cargo run -p pwb-browser -- welcome.pwb
+# Run with an official built-in page
+cargo run -p pwb-browser -- welcome.plain
 
 # Show help
 cargo run -p pwb-browser -- --help

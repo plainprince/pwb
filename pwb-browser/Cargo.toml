@@ -14,10 +14,11 @@ name = "pwb-browser"
 path = "src/main.rs"
 
 [features]
-# Enforce CORS on `fetch` (same-origin file/relative requests always allowed;
-# cross-origin http(s) requests require `Access-Control-Allow-Origin: *`).
-# Off by default so local bundles can fetch any API during development.
-strict-cors = []
+# CORS is enforced by default on `fetch`: same-origin file/relative requests
+# are always allowed, while cross-origin http(s) requests require
+# `Access-Control-Allow-Origin: *`. `permissive-cors` opts out for local
+# development against APIs that do not send the header.
+permissive-cors = []
 
 [dependencies]
 pwb-core = { path = "../pwb-core" }
@@ -31,7 +32,9 @@ softbuffer = "0.4"
 ab_glyph = "0.2"
 rquickjs = "0.12"
 toml = "0.8"
-arboard = "3.6"
+# Wayland-first clipboard on Linux (`wayland-data-control`), falling back to
+# X11. Keeping one handle alive also lets clipboard managers read the contents.
+arboard = { version = "3.6", features = ["wayland-data-control"] }
 serde_json = "1"
 ureq = { version = "2.12", features = ["native-certs"] }
 tungstenite = { version = "0.24", features = ["rustls-tls-webpki-roots", "url"] }
@@ -39,8 +42,13 @@ base64 = "0.22"
 rand = "0.8"
 uuid = { version = "1", features = ["v4"] }
 
-# Native OS dialogs (alert/confirm/prompt) and context menu. Only used on
-# macOS today; other platforms fall back to console output / defaults.
+# Native dialogs on Linux/Windows: tinyfiledialogs maps alert/confirm/prompt
+# to zenity/kdialog/yad (Linux) or TaskDialog (Windows), and we fall back to
+# console output when no display backend is available.
+[target.'cfg(not(target_os = "macos"))'.dependencies]
+tinyfiledialogs = "3.9"
+
+# Native OS dialogs (alert/confirm/prompt) and context menu on macOS.
 [target.'cfg(target_os = "macos")'.dependencies]
 objc2 = "0.5.2"
 objc2-app-kit = { version = "0.2.2", features = ["NSMenu", "NSMenuItem", "NSView", "NSResponder", "NSAlert", "NSButton", "NSControl", "NSTextField"] }

@@ -1,9 +1,11 @@
 //! Credit-chain event records.
 
 use pwb_core::crypto::PublicKey;
+use serde::{Deserialize, Serialize};
 
 /// Whether a [`CreditEvent`] moves credits in or out.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum EventKind {
     /// Credits earned for a verified network service.
     Earned,
@@ -21,7 +23,7 @@ impl EventKind {
 }
 
 /// One subject's credit-history entry as attestors store it.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CreditEvent {
     /// Whose balance this event moves.
     pub subject: PublicKey,
@@ -36,7 +38,7 @@ pub struct CreditEvent {
 }
 
 /// A [`CreditEvent`] chained onto its subject's history.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ChainedEvent {
     /// The event itself.
     pub event: CreditEvent,

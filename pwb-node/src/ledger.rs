@@ -5,8 +5,11 @@
 //! *attestors*, chosen every epoch by ranking candidate peers under the shard
 //! key $\text{BLAKE3}(\text{NodeID} \parallel \text{Epoch})$ (XOR metric, so
 //! membership rotates with the epoch and cannot be parked by a Sybil).
-//! The earning node only holds a local hint (`identity.credits`); spendable
-//! authority is what the neighborhood attests ([`QuorumCertificate`]).
+//! `pwb-node` uses this layer for `--attested-claim` and registry sync: the
+//! local spend gate remains the signed hash chain in
+//! [`crate::credit::CreditLedger`], while a claim funded from attested balance
+//! carries the neighborhood quorum certificate ([`QuorumCertificate`]) that a
+//! verifier checks against its own live peer table.
 //!
 //! # Attestor view
 //!
@@ -27,14 +30,17 @@
 //! quorum of per-attestor Ed25519 signatures — any $k$ members must
 //! independently vouch, which is what the $k$-of-$N$ property needs.)
 //! `register.plain` claims go through [`crate::domain::DomainRegistry::register_attested`],
-//! which also prevents replaying one certificate across claims via per-subject
-//! claimed-spend accounting.
+//! which binds each claim to its funding certificate `(head, balance)` under a
+//! funding-committed owner signature and derives the spendable balance from
+//! the live funded records, so one certificate cannot fund two surviving
+//! claims — not even across partitions (merges repair overdrawn groups).
 
 mod attest;
 mod attestor;
 mod chain;
 mod error;
 mod event;
+mod wire;
 
 #[cfg(test)]
 mod tests;

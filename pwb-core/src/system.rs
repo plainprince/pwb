@@ -1,18 +1,22 @@
 //! Unified System Protocol Resolver (`pwb-core::system`).
 //!
 //! PlainWeb replaces traditional centralized web services with reserved native
-//! system domains. This module is the single source of truth for:
+//! system domains. The `.plain` TLD is the **official** namespace (reserved
+//! system domains plus browser-shipped content pages); `.pwb` is the
+//! **unofficial** user namespace. This module is the single source of truth for:
 //! - the reserved system domain list and the `.plain` TLD security rule,
 //! - parsing `plain://` URLs into a [`SystemDomain`] + query parameters,
 //! - the `nodes.plain` connection-link codec
 //!   (`plain://nodes.plain?connect=<ip:port>/<pubkey_hex>`).
 //!
-//! The five native system domains are:
+//! The native system domains are:
 //! - `search.plain`  — decentralized search engine API.
 //! - `devtools.plain`— built-in developer tools (DOM & style inspector).
 //! - `register.plain`— domain claim registry (sparse credit ledger).
 //! - `gossip.plain`  — P2P artifact gossip and index propagation.
 //! - `nodes.plain`   — peer node routing, health registry, and connection links.
+//! - `network.plain` — this node's addresses, peer table, and local services.
+//! - `help.plain`    — system-domain index plus namespace and credit rules.
 //!
 //! Page *rendering* for these domains lives in `pwb-node::system` (it needs
 //! `pwb-web`'s PML/PSS compiler, which `pwb-core` cannot depend on). Everything
@@ -47,9 +51,9 @@ pub enum SystemDomain {
     Gossip,
     /// `nodes.plain` — peer registry and connection links.
     Nodes,
-    /// `network.plain` — reserved for network status (no handler yet).
+    /// `network.plain` — live network status (addresses, peers, services).
     Network,
-    /// `help.plain` — reserved for usage help (no handler yet).
+    /// `help.plain` — usage help and the system-domain index.
     Help,
 }
 

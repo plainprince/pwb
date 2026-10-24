@@ -1,9 +1,14 @@
 use pwb_core::spec::{Color, PlainNode, StyleProperty, UnitValue};
-use std::collections::HashMap;
 
 /// Parse `.pss` Plain Stylesheet rules.
-pub fn parse_pss_stylesheet(content: &str) -> HashMap<String, Vec<StyleProperty>> {
-    let mut rules: HashMap<String, Vec<StyleProperty>> = HashMap::new();
+///
+/// Rules are returned in source order: later blocks override earlier ones
+/// (`.tab-content.active { display: block }` must beat the preceding
+/// `.tab-content { display: none }`). A repeated selector extends its first
+/// entry instead of creating a second one.
+pub fn parse_pss_stylesheet(content: &str) -> Vec<(String, Vec<StyleProperty>)> {
+    let mut rules: Vec<(String, Vec<StyleProperty>)> = Vec::new();
+    let content = strip_pss_comments(content);
 
     for block in content.split('}') {
         if let Some((selector_part, body)) = block.split_once('{') {
@@ -13,7 +18,11 @@ pub fn parse_pss_stylesheet(content: &str) -> HashMap<String, Vec<StyleProperty>
             for line in body.split(';') {
                 if let Some((prop_k, prop_v)) = line.split_once(':') {
                     let k = prop_k.trim().to_lowercase();
-                    let v = prop_v.trim().to_lowercase();
+                    // Keep the authored value for pass-through properties
+                    // (case matters for some, e.g. font names) while still
+                    // lowercasing for the typed keyword matches below.
+                    let raw_v = prop_v.trim();
+                    let v = raw_v.to_lowercase();
 
                     match k.as_str() {
                         "color" => {
@@ -159,13 +168,24 @@ pub fn parse_pss_stylesheet(content: &str) -> HashMap<String, Vec<StyleProperty>
                                 .push(StyleProperty::Overflow(pwb_core::spec::OverflowStyle::Auto)),
                             _ => {}
                         },
-                        _ => {}
+                        // Properties outside the typed set (border sides,
+                        // min/max sizes, flex, …) still reach the runtime
+                        // style engine as plain attributes.
+                        _ => {
+                            if !k.is_empty() && !raw_v.is_empty() {
+                                properties.push(StyleProperty::Raw(k.clone(), raw_v.to_string()));
+                            }
+                        }
                     }
                 }
             }
 
             if !selector.is_empty() && !properties.is_empty() {
-                rules.entry(selector).or_default().extend(properties);
+                if let Some((_, existing)) = rules.iter_mut().find(|(s, _)| *s == selector) {
+                    existing.extend(properties);
+                } else {
+                    rules.push((selector, properties));
+                }
             }
         }
     }
@@ -174,36 +194,83 @@ pub fn parse_pss_stylesheet(content: &str) -> HashMap<String, Vec<StyleProperty>
 }
 
 /// Apply parsed stylesheet rules to a node tree (tag, class, and id selectors).
-pub fn apply_stylesheet(node: &mut PlainNode, rules: &HashMap<String, Vec<StyleProperty>>) {
-    let tag_name = node.tag.name();
-    if let Some(props) = rules.get(tag_name) {
-        apply_style_properties(node, props);
+///
+/// `font-size` and `color` inherit down the tree (CSS inheritance): a `<text>`
+/// inside `<view class="tab">` with `font-size: 2vh` renders at 2vh instead of
+/// the renderer default, even though the text node has no matching rule.
+pub fn apply_stylesheet(node: &mut PlainNode, rules: &[(String, Vec<StyleProperty>)]) {
+    apply_stylesheet_inherited(node, rules, None, None);
+}
+
+fn apply_stylesheet_inherited(
+    node: &mut PlainNode,
+    rules: &[(String, Vec<StyleProperty>)],
+    inherited_font_size: Option<&str>,
+    inherited_color: Option<&str>,
+) {
+    if let Some(font_size) = inherited_font_size {
+        node.attributes
+            .entry("font-size".to_string())
+            .or_insert_with(|| font_size.to_string());
+    }
+    if let Some(color) = inherited_color {
+        node.attributes
+            .entry("color".to_string())
+            .or_insert_with(|| color.to_string());
     }
 
-    if let Some(class_attr) = node.attributes.get("class") {
-        // Support compound selectors like `.tab.active` (all classes must be present).
-        let class_attr = class_attr.clone();
-        let classes: Vec<&str> = class_attr.split_whitespace().collect();
-        for (selector, props) in rules {
-            if let Some(sel_classes) = selector.strip_prefix('.') {
-                let required: Vec<&str> =
-                    sel_classes.split('.').filter(|c| !c.is_empty()).collect();
-                if !required.is_empty() && required.iter().all(|c| classes.contains(c)) {
-                    apply_style_properties(node, props);
-                }
-            }
-        }
-    }
+    apply_node_rules(node, rules);
 
-    if let Some(id_attr) = node.attributes.get("id") {
-        let id_selector = format!("#{}", id_attr.trim());
-        if let Some(props) = rules.get(&id_selector) {
-            apply_style_properties(node, props);
-        }
-    }
-
+    // The node's own rules (or its markup attributes) win over inherited
+    // values; pass the resulting computed values on to the children.
+    let font_size = node.attributes.get("font-size").cloned();
+    let color = node.attributes.get("color").cloned();
     for child in &mut node.children {
-        apply_stylesheet(child, rules);
+        apply_stylesheet_inherited(child, rules, font_size.as_deref(), color.as_deref());
+    }
+}
+
+fn apply_node_rules(node: &mut PlainNode, rules: &[(String, Vec<StyleProperty>)]) {
+    let tag_name = node.tag.name();
+    let id_selector = node
+        .attributes
+        .get("id")
+        .map(|id| format!("#{}", id.trim()));
+    let classes: Vec<String> = node
+        .attributes
+        .get("class")
+        .map(|c| c.split_whitespace().map(str::to_string).collect())
+        .unwrap_or_default();
+
+    // Cascade by specificity (id > classes > tag), preserving source order
+    // among rules of equal specificity. This makes `.tab-content.active` beat
+    // the earlier `.tab-content` and keeps id rules authoritative.
+    let mut matched: Vec<((u32, usize), &Vec<StyleProperty>)> = Vec::new();
+    for (index, (selector, props)) in rules.iter().enumerate() {
+        let specificity = if let Some(sel_id) = selector.strip_prefix('#') {
+            let matches = id_selector
+                .as_deref()
+                .map(|id| id == format!("#{}", sel_id))
+                .unwrap_or(false);
+            (matches, 100)
+        } else if let Some(sel_classes) = selector.strip_prefix('.') {
+            // Support compound selectors like `.tab.active` (all classes must be present).
+            let required: Vec<&str> = sel_classes.split('.').filter(|c| !c.is_empty()).collect();
+            let matches = !required.is_empty()
+                && required
+                    .iter()
+                    .all(|c| classes.iter().any(|class| class == c));
+            (matches, 10 * required.len() as u32)
+        } else {
+            (selector == tag_name, 1)
+        };
+        if specificity.0 {
+            matched.push(((specificity.1, index), props));
+        }
+    }
+    matched.sort_by_key(|(key, _)| *key);
+    for (_, props) in matched {
+        apply_style_properties(node, props);
     }
 }
 
@@ -283,9 +350,29 @@ fn style_property_to_attr(prop: &StyleProperty) -> Option<(String, String)> {
                 pwb_core::spec::OverflowStyle::Auto => "auto".to_string(),
             },
         ),
+        // Pass-through property: the attribute name and value are already
+        // exactly what the runtime style engine reads.
+        StyleProperty::Raw(name, value) => return Some((name.clone(), value.clone())),
         _ => return None,
     };
     Some((k.to_string(), v))
+}
+
+/// Remove `/* … */` comments so they cannot merge into the following
+/// selector (a leading comment used to swallow the first rule of a file).
+fn strip_pss_comments(content: &str) -> String {
+    let mut out = String::with_capacity(content.len());
+    let mut rest = content;
+    while let Some(pos) = rest.find("/*") {
+        out.push_str(&rest[..pos]);
+        if let Some(end) = rest[pos + 2..].find("*/") {
+            rest = &rest[pos + 2 + end + 2..];
+        } else {
+            rest = "";
+        }
+    }
+    out.push_str(rest);
+    out
 }
 
 pub(crate) fn parse_alignment(v: &str) -> Option<pwb_core::spec::Alignment> {

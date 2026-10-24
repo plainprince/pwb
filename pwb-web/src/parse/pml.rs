@@ -37,20 +37,41 @@ pub fn parse_pml_markup(input: &str) -> Result<PlainNode, ParseError> {
                     .map_err(|e| ParseError::SyntaxError(e.to_string()))?
                     .trim();
 
+                // Doctypes and processing instructions carry no DOM node.
+                if tag_content.starts_with('!') || tag_content.starts_with('?') {
+                    cursor = end + 1;
+                    continue;
+                }
+
                 let self_closing = tag_content.ends_with('/');
                 let (tag_name, mut attrs) = parse_tag_content(tag_content.trim_end_matches('/'));
+
+                // Metadata tags describe external resources that the bundler
+                // loads separately (`<link rel="stylesheet">`, `<meta>`), so
+                // they must not become DOM nodes or open a stack frame.
+                let tag_lower = tag_name.to_lowercase();
+                if tag_lower == "meta" || (tag_lower == "link" && attrs.contains_key("rel")) {
+                    cursor = end + 1;
+                    continue;
+                }
+
                 id_counter += 1;
 
-                let tag_enum = match tag_name.to_lowercase().as_str() {
+                let tag_enum = match tag_lower.as_str() {
                     "plain" | "document" => Tag::Document,
                     "head" => Tag::Head,
                     "title" => Tag::Title,
-                    "view" => Tag::View,
-                    "text" => Tag::Text,
-                    "image" => Tag::Image,
+                    "view" | "html" | "body" | "div" | "section" | "main" | "header" | "footer"
+                    | "nav" | "article" | "aside" | "br" | "hr" => Tag::View,
+                    "text" | "span" | "p" | "label" | "h1" | "h2" | "h3" | "h4" | "h5" | "h6" => {
+                        Tag::Text
+                    }
+                    "image" | "img" => Tag::Image,
                     "button" => Tag::Button,
                     "input" => Tag::Input,
-                    "link" => Tag::Link,
+                    // `<link>` is PlainWeb's anchor; `<a>` is accepted as an
+                    // HTML-spelled alias so authored pages can use either.
+                    "link" | "a" => Tag::Link,
                     "script" => Tag::Script,
                     "component" => Tag::Component,
                     "import" => Tag::Import,
@@ -96,7 +117,6 @@ pub fn parse_pml_markup(input: &str) -> Result<PlainNode, ParseError> {
                 // HTML void elements (`<input>`, `<img>`, `<br>`, ...) have no
                 // closing tag: attach immediately instead of pushing an open frame
                 // that would swallow subsequent siblings as children.
-                let tag_lower = tag_name.to_lowercase();
                 let void_element = matches!(
                     tag_lower.as_str(),
                     "area"
@@ -152,13 +172,11 @@ pub fn parse_pml_markup(input: &str) -> Result<PlainNode, ParseError> {
                 .unwrap_or(false);
             let trimmed = text.trim();
             if !trimmed.is_empty() || is_raw_script {
-                if let Some(current) = node_stack.last_mut() {
-                    current.text_content = Some(if is_raw_script {
-                        text.to_string()
-                    } else {
-                        trimmed.to_string()
-                    });
-                }
+                attach_text(
+                    &mut node_stack,
+                    &mut id_counter,
+                    if is_raw_script { text } else { trimmed },
+                );
             }
             cursor = text_end;
         }
@@ -171,6 +189,24 @@ pub fn parse_pml_markup(input: &str) -> Result<PlainNode, ParseError> {
 /// Walk a parsed PML tree and pull out the bundling primitives:
 fn find_char(bytes: &[u8], start: usize, target: u8) -> Option<usize> {
     (start..bytes.len()).find(|&i| bytes[i] == target)
+}
+
+/// Attach a text run to the current element. Container tags (`<view>`,
+/// `<div>`, `<body>`, `<plain>`) get a `Text` child so the run is laid out and
+/// painted; leaf tags (`title`, `button`, `text`, ...) store it as
+/// `text_content`, which their layout/render path already draws.
+fn attach_text(node_stack: &mut [PlainNode], id_counter: &mut usize, text: &str) {
+    let Some(current) = node_stack.last_mut() else {
+        return;
+    };
+    if matches!(current.tag, Tag::View | Tag::Document) {
+        *id_counter += 1;
+        let mut node = PlainNode::new(*id_counter, Tag::Text);
+        node.text_content = Some(text.to_string());
+        current.children.push(node);
+    } else {
+        current.text_content = Some(text.to_string());
+    }
 }
 
 pub(crate) fn parse_tag_content(content: &str) -> (String, HashMap<String, String>) {

@@ -3,10 +3,10 @@
 ## Problem
 
 PlainWeb uses `pwb://` for all network navigation. Every domain ends in `.pwb`
-(user content) or `.plain` (reserved system protocols). This means passing a
-bare filename like `demo.pwb` on the command line collides with the domain
-resolution path — the resolver tries to look it up in the `DomainRegistry`
-instead of reading it from disk.
+(unofficial user content) or `.plain` (official built-in pages). This means
+passing a bare filename like `demo.pwb` on the command line collides with the
+domain resolution path — the resolver tries to look it up in the
+`DomainRegistry` instead of reading it from disk.
 
 ## Solution
 
@@ -28,12 +28,13 @@ The resolver evaluates URIs in this strict order:
 
 | Priority | Match Condition | Handler |
 |----------|----------------|---------|
-| 1 | `*.plain` TLD | System domain handler (search, register, devtools, …) |
+| 1 | `*.plain` TLD | Official built-in page — system handler (search, register, devtools, …) or shipped content page (welcome, demo) |
 | 2 | `file.pwb/` prefix | Local filesystem read |
-| 3 | `*.pwb` TLD or contains `.` | Network domain lookup via `DomainRegistry` |
-| 4 | Fallback | Treat raw argument as local file path |
+| 3 | `content.pwb/<hex-cid>` | Content-addressed lookup in the local artifact host (used by `search.plain` result links) |
+| 4 | `*.pwb` TLD or contains `.` | Network domain lookup via `DomainRegistry` |
+| 5 | Fallback | Treat raw argument as local file path |
 
-Placing `file.pwb/` **before** network domain lookup (priority 2 vs 3) is
+Placing `file.pwb/` **before** network domain lookup (priority 2 vs 4) is
 intentional: it guarantees that `file.pwb/…` can never be hijacked by a
 registered domain, and that the filesystem path is resolved without touching
 the network layer.
@@ -52,7 +53,7 @@ experience.
 
 ### Why Not Just Read Any `.pwb` Argument as a File?
 
-Because `welcome.pwb` is a **valid network domain**. If we silently fell back
+Because `mysite.pwb` is a **valid (unofficial) network domain**. If we silently fell back
 to disk for every `.pwb` argument, a local file could shadow a network domain
 (or vice-versa), creating confusing behaviour and a potential security issue.
 The `file.pwb/` prefix makes the intent **explicit**: the user is requesting

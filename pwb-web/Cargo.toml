@@ -17,6 +17,5 @@ path = "src/main.rs"
 pwb-core = { path = "../pwb-core" }
 lightningcss = { version = "1.0.0-alpha.72", features = ["bundler"] }
 
-# Planned (not wired in the skeleton):
-#   html5ever, cssparser  — parse markup + styles
-#   zstd / zip           — the compression half of the wire format
+# Compression lives in `pwb-core::wire` (PWBZ container: zlib + BLAKE3), so the
+# browser, node, and CLI all read and write the same format.

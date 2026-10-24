@@ -2,8 +2,9 @@
 
 ## Objective
 
-Auto-discover local peers on LAN without centralized servers, and support
-out-of-band node pairing via connection links and QR codes.
+Auto-discover local peers on LAN without centralized servers, support
+out-of-band node pairing via connection links and QR codes, and let a stranger
+join from a published join descriptor without receiving a link first.
 
 ## Components
 
@@ -54,18 +55,49 @@ Support parsing and launching node connections via
 - `pwb-browser/src/main.rs`: positional argument that parses as a connection link launches a `NodeEngine`, calls `launch_connection`, and reports the registered peer
 - `pwb-node/src/main.rs`: `--connect <link>` flag accepts a connection link after `--connect` / `-c`, launches the same flow, prints the connected peer, and sends a `PeerDiscovery` announcement so the connection is bidirectional
 - Help text in both binaries updated with `plain://nodes.plain?connect=...` example
+- `pwb_core::net::resolve_bootstrap_peer` accepts `<host:port>/<hex_pubkey>`
+  as well as a full connection link. A DNS hostname is resolved at startup
+  (five-second bound, IPv4 preferred when both families exist) while the
+  public key remains pinned, so a seed's address records can change without
+  changing its identity. `--bootstrap` and `PWB_BOOTSTRAP` both use it.
+
+### Well-known join descriptors (`pwb-core::join`, `pwb-node::join`)
+
+A node with no link fetches
+`https://raw.githubusercontent.com/plainprince/pwb/main/deploy/join.json`
+(override with `--join` / `PWB_JOIN`, disable with `--no-join`). The document
+is versioned JSON: seeds (`host:port` plus a pinned Ed25519 key), optional
+trust anchors, `generated_at`, optional `expires_at`, and an optional
+signer/signature pair.
+
+- `fetch_descriptor` accepts HTTPS, `file://`, a filesystem path, or inline
+  JSON, capped at 256 KiB and an 8 s timeout.
+- `check_descriptor` rejects an expired document, requires a signature when
+  `--require-join-signature` is set, and enforces a pinned signer. The first
+  signer a node sees is pinned in `<data>/join-signer.json` (trust on first
+  use), so a later mirror cannot silently replace the seed list;
+  `--join-signer` pins it before the first fetch.
+- Seeds resolve through the normal `resolve_bootstrap_peer` path (DNS name,
+  pinned key) and are only counted as joined after a Ping/Pong round-trip.
+  Explicit `--bootstrap` entries suppress the default fetch so private/LAN
+  deployments stay independent of GitHub; `--join-required` turns an unusable
+  source, an empty seed list, or seeds that all fail the liveness probe into a
+  startup error instead of a LAN/standalone fallback.
+- `pwb-node --write-join` publishes a descriptor from `--join-seed`,
+  `--trust-anchor`, and `--join-expires`, signed by the node identity or
+  `--write-join-key`, and refuses an expiry that is already in the past.
 
 ### NodeEngine integration
 
 `pwb-core::net::NodeEngine::start()` now binds a UDP socket and spawns:
 - a **sender loop** that transmits queued `(SocketAddr, bytes)` datagrams to peers,
 - a **receiver loop** that deserializes inbound `NetworkMessage` JSON datagrams and hands them to the handler loop,
-- a **peer maintenance loop** that evicts stale peers after 5 minutes,
+- a **peer maintenance loop** that refreshes `last_seen` on every authenticated datagram, pings peers each heartbeat, and evicts peers quiet for more than `PEER_TIMEOUT` (5 minutes),
 - a [`DiscoveryService`] sharing the engine's [`PeerInfo`] table, so LAN beacons (broadcast + multicast on port 7922) immediately populate the peer table.
 
-`NodeEngine::send_to` and `NodeEngine::broadcast` serialize [`NetworkMessage`] as JSON and transmit it to every registered peer's UDP address, in addition to local in-process enqueue (preserving existing behavior). `NodeEngine::generate_connection_link` uses the engine's actual bound socket address when started, so connection links always contain a dialable endpoint.
+`NodeEngine::send_to` and `NodeEngine::broadcast` serialize [`NetworkMessage`] into signed, fragmented envelopes and transmit them to registered peers' UDP addresses. Nothing is delivered locally: the sender already knows what it sent, and self-injection previously registered the sender's own key at a peer address. `NodeEngine::generate_connection_link` uses the STUN-discovered public address when available and falls back to the engine's actual bound socket address.
 
-### QR Code Encoding & Scanning Support
+### QR Code Encoding & Payload Parsing
 
 From-scratch byte-mode QR encoder for versions 1..=10 at error-correction level M (no new dependencies).
 

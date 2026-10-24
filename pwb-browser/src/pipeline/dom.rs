@@ -141,6 +141,30 @@ pub(super) fn element_node_id(root: &crate::dom::DomNode, hit: usize) -> usize {
     }
 }
 
+/// The `href` a click on `node_id` (or on text inside it) should follow.
+///
+/// Walks up from the hit node to the nearest `<a>`/Link, exactly like a real
+/// browser's click target resolution, and returns `None` for non-links, empty
+/// hrefs, and `href="#…"` fragments (which stay on the current page).
+pub(crate) fn link_href(root: &crate::dom::DomNode, node_id: usize) -> Option<String> {
+    let mut ids = vec![node_id];
+    ids.extend(ancestor_node_ids(root, node_id));
+    for id in ids {
+        let Some(node) = crate::dom::find_node_by_id_ref(root, &id.to_string()) else {
+            continue;
+        };
+        if node.tag != Tag::Link {
+            continue;
+        }
+        return node
+            .attributes
+            .get("href")
+            .map(|href| href.trim().to_string())
+            .filter(|href| !href.is_empty() && !href.starts_with('#'));
+    }
+    None
+}
+
 /// Ancestor node ids of `node_id`, nearest first (excluding the node itself).
 /// Used to bubble clicks from a text run up to the element containing it
 /// (e.g. a `<div class="tab">Label</div>` where the label is a Text child).
@@ -218,4 +242,65 @@ pub(super) fn compute_selected_text(
         out.push_str(&spans[e_idx].1.chars().take(e_char).collect::<String>());
     }
     out
+}
+
+/// Delete the text between `(start_node, start_char)` and
+/// `(end_node, end_char)`, walking the DOM in document order (the same range
+/// [`compute_selected_text`] reads). Empty text nodes are removed. Returns
+/// `false` when either endpoint is no longer a text-bearing node.
+pub(super) fn delete_selected_text(
+    root: &mut crate::dom::DomNode,
+    start_node: usize,
+    start_char: usize,
+    end_node: usize,
+    end_char: usize,
+) -> bool {
+    let mut spans = Vec::new();
+    collect_text_spans(root, &mut spans);
+
+    let Some(si) = spans.iter().position(|s| s.0 == start_node) else {
+        return false;
+    };
+    let Some(ei) = spans.iter().position(|s| s.0 == end_node) else {
+        return false;
+    };
+
+    // Normalize to a forward range, exactly like compute_selected_text.
+    let (s_idx, s_char, e_idx, e_char) = if (si, start_char) <= (ei, end_char) {
+        (si, start_char, ei, end_char)
+    } else {
+        (ei, end_char, si, start_char)
+    };
+
+    let mut edits: Vec<(usize, Option<String>)> = Vec::new();
+    for (idx, (node_id, text)) in spans.iter().enumerate().take(e_idx + 1).skip(s_idx) {
+        let chars: Vec<char> = text.chars().collect();
+        let kept: Vec<char> = if s_idx == e_idx {
+            let from = s_char.min(chars.len());
+            let to = e_char.min(chars.len());
+            chars[..from].iter().chain(&chars[to..]).copied().collect()
+        } else if idx == s_idx {
+            chars[..s_char.min(chars.len())].to_vec()
+        } else if idx == e_idx {
+            chars[e_char.min(chars.len())..].to_vec()
+        } else {
+            Vec::new()
+        };
+        let new_text: String = kept.into_iter().collect();
+        edits.push((
+            *node_id,
+            if new_text.is_empty() {
+                None
+            } else {
+                Some(new_text)
+            },
+        ));
+    }
+
+    for (node_id, text) in edits {
+        if let Some(node) = find_node_by_id(root, &node_id.to_string()) {
+            node.text = text;
+        }
+    }
+    true
 }

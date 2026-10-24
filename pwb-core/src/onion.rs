@@ -70,8 +70,10 @@
 //!   datagrams hide sizes, and the remaining unencryptable socket metadata
 //!   (prev-relay IP → next-relay IP, randomized timing) carries no
 //!   actionable signal about the originator.
-//! - **Bulk payloads**: [`PAYLOAD_MAX`] is the per-cell capacity; larger
-//!   transfers will fragment into multi-cell streams above this layer.
+//! - **Bulk payloads & circuits**: [`PAYLOAD_MAX`] is the per-cell capacity;
+//!   `crate::net` fragments larger messages into multiple cells and reassembles
+//!   them at the exit, and `NodeEngine::send_onion_request` attaches a return
+//!   path so an exit can answer through the circuit.
 //!
 //! [`DhPublicKey`]: crate::crypto::DhPublicKey
 

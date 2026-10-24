@@ -1,0 +1,28 @@
+[Unit]
+Description=PlainWeb seed / rendezvous node
+Documentation=file:///usr/local/share/doc/pwb/seed-node.md
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=pwb
+Group=pwb
+# A public VPS with a directly routable address does not need STUN. Remove
+# --no-stun when the host is behind NAT and should advertise its mapped address.
+ExecStart=/usr/local/bin/pwb-node \
+    --listen 0.0.0.0:7921 \
+    --no-stun \
+    --data /var/lib/pwb \
+    --health-addr 127.0.0.1:7711
+Restart=on-failure
+RestartSec=3
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/var/lib/pwb
+LimitNOFILE=65536
+
+[Install]
+WantedBy=multi-user.target

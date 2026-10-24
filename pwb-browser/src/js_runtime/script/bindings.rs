@@ -269,6 +269,20 @@ pub(super) fn install<'js>(dom_handle: &DomHandle, ctx: &Ctx<'js>, global: &Obje
         )
         .unwrap();
 
+    // `__pwb_connect(link)`: ask the pipeline to dial a connection link from
+    // the nodes.plain connect card. The dial is async; the pipeline renders
+    // the success/failure status page when it completes.
+    let connect = dom_handle.clone();
+    global
+        .set(
+            "__pwb_connect",
+            Function::new(ctx.clone(), move |link: String| {
+                *connect.pending_connect.borrow_mut() = Some(link);
+            })
+            .unwrap(),
+        )
+        .unwrap();
+
     // DevTools management APIs
     let dom_c8 = dom_handle.clone();
     global

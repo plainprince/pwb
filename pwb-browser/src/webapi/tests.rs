@@ -3,7 +3,7 @@ use crate::dom::DomNode;
 use std::collections::HashMap;
 use std::time::Duration;
 
-#[cfg(feature = "strict-cors")]
+#[cfg(not(feature = "permissive-cors"))]
 use crate::webapi::network::cors_validate;
 
 #[test]
@@ -91,7 +91,7 @@ fn test_detached_nodes() {
     assert!(take_detached(&state, 1).is_none());
 }
 
-#[cfg(feature = "strict-cors")]
+#[cfg(not(feature = "permissive-cors"))]
 #[test]
 fn test_cors_validate() {
     assert!(cors_validate("file:///x/y.pwb", &[]).is_ok());
@@ -222,7 +222,7 @@ fn test_local_storage_persists_through_storage_path() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
-#[cfg(feature = "strict-cors")]
+#[cfg(not(feature = "permissive-cors"))]
 #[test]
 fn test_cors_validate_direct() {
     // Local/file URLs are always allowed.

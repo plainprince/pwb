@@ -19,6 +19,11 @@ pub fn get_font() -> Option<&'static ab_glyph::FontArc> {
                 // most Linux distros (Fedora, Debian/Ubuntu non-Noto setups).
                 "/usr/share/fonts/liberation/LiberationSans-Regular.ttf",
                 "/usr/share/fonts/truetype/liberation/LiberationSans-Regular.ttf",
+                // Fedora/Arch package layouts; the first Liberation path only
+                // exists on Debian-style systems.
+                "/usr/share/fonts/liberation-sans-fonts/LiberationSans-Regular.ttf",
+                "/usr/share/fonts/liberation/LiberationSans-Regular.ttf",
+                "/usr/share/fonts/truetype/liberation2/LiberationSans-Regular.ttf",
                 "/usr/share/fonts/noto/NotoSans-Regular.ttf",
                 "/usr/share/fonts/truetype/noto/NotoSans-Regular.ttf",
                 "C:\\Windows\\Fonts\\arial.ttf",
@@ -50,6 +55,9 @@ pub struct LayoutBox {
     pub placeholder: Option<String>,
     /// Builtin feather icon name (`icon="home"`) for `<icon-...>` elements.
     pub icon: Option<String>,
+    /// `<image src="...">` source (file path, `file://` URL, or base64 data
+    /// URL) — decoded and painted by [`crate::render::layout_box`].
+    pub image_src: Option<String>,
     pub children: Vec<LayoutBox>,
     /// Overflow behavior; `Scroll`/`Auto` boxes clip their children and can
     /// scroll them (see `content_height`).

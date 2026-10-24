@@ -25,6 +25,7 @@ fn test_draw_hover_highlight_paints() {
         value: None,
         placeholder: None,
         icon: None,
+        image_src: None,
         children: vec![crate::layout::LayoutBox {
             node_id: 2,
             tag: Tag::View,
@@ -35,6 +36,7 @@ fn test_draw_hover_highlight_paints() {
             value: None,
             placeholder: None,
             icon: None,
+            image_src: None,
             children: vec![],
             overflow: pwb_core::spec::OverflowStyle::Visible,
             content_height: 50.0,
@@ -78,6 +80,7 @@ fn test_draw_selected_highlight_by_node_id() {
         value: None,
         placeholder: None,
         icon: None,
+        image_src: None,
         children: vec![crate::layout::LayoutBox {
             node_id: 2,
             tag: Tag::View,
@@ -88,6 +91,7 @@ fn test_draw_selected_highlight_by_node_id() {
             value: None,
             placeholder: None,
             icon: None,
+            image_src: None,
             children: vec![],
             overflow: pwb_core::spec::OverflowStyle::Visible,
             content_height: 50.0,
@@ -130,6 +134,7 @@ fn test_scroll_container_hit_test_and_finder() {
         value: None,
         placeholder: None,
         icon: None,
+        image_src: None,
         children: vec![],
         overflow: OverflowStyle::Visible,
         content_height: 100.0,
@@ -144,6 +149,7 @@ fn test_scroll_container_hit_test_and_finder() {
         value: None,
         placeholder: None,
         icon: None,
+        image_src: None,
         children: vec![
             child(11, 0.0),
             child(12, 100.0),
@@ -163,6 +169,7 @@ fn test_scroll_container_hit_test_and_finder() {
         value: None,
         placeholder: None,
         icon: None,
+        image_src: None,
         children: vec![container],
         overflow: OverflowStyle::Visible,
         content_height: 400.0,
@@ -231,6 +238,7 @@ fn test_scroll_container_renders_scrollbar_and_clips() {
         value: None,
         placeholder: None,
         icon: None,
+        image_src: None,
         children: vec![],
         overflow: OverflowStyle::Visible,
         content_height: 100.0,
@@ -245,6 +253,7 @@ fn test_scroll_container_renders_scrollbar_and_clips() {
         value: None,
         placeholder: None,
         icon: None,
+        image_src: None,
         children: vec![child],
         overflow: OverflowStyle::Scroll,
         content_height: 100.0,
@@ -342,6 +351,7 @@ fn test_icon_renders_stroked_pixels() {
         value: None,
         placeholder: None,
         icon: Some("home".to_string()),
+        image_src: None,
         children: vec![],
         overflow: pwb_core::spec::OverflowStyle::Visible,
         content_height: 48.0,
@@ -424,6 +434,7 @@ fn test_icon_centered_in_rectangular_box() {
         value: None,
         placeholder: None,
         icon: Some("home".to_string()),
+        image_src: None,
         children: vec![],
         overflow: pwb_core::spec::OverflowStyle::Visible,
         content_height: 100.0,
@@ -519,6 +530,7 @@ fn test_input_renders_border_value_and_caret() {
         value: Some("Hi".to_string()),
         placeholder: None,
         icon: None,
+        image_src: None,
         children: vec![],
         overflow: pwb_core::spec::OverflowStyle::Visible,
         content_height: 30.0,
@@ -744,6 +756,7 @@ fn test_border_draws_lines_on_view_edges() {
         value: None,
         placeholder: None,
         icon: None,
+        image_src: None,
         children: vec![],
         overflow: pwb_core::spec::OverflowStyle::Visible,
         content_height: 60.0,
@@ -802,6 +815,7 @@ fn test_border_draws_lines_on_view_edges() {
         value: None,
         placeholder: None,
         icon: None,
+        image_src: None,
         children: vec![],
         overflow: pwb_core::spec::OverflowStyle::Visible,
         content_height: 60.0,
@@ -886,6 +900,7 @@ fn test_code_box_paints_highlighted_tokens() {
         value: None,
         placeholder: None,
         icon: None,
+        image_src: None,
         children: vec![],
         overflow: pwb_core::spec::OverflowStyle::Visible,
         content_height: 60.0,
@@ -957,6 +972,7 @@ fn test_code_tokens_advance_by_real_width_not_font_size() {
         value: None,
         placeholder: None,
         icon: None,
+        image_src: None,
         children: vec![],
         overflow: pwb_core::spec::OverflowStyle::Visible,
         content_height: 60.0,
@@ -1322,5 +1338,150 @@ fn test_hit_test_cursor_from_layout_variants() {
     assert_eq!(
         hit_test_cursor_from_layout(&layout_root, -10.0, -10.0),
         CursorIcon::Default
+    );
+}
+
+#[test]
+fn test_image_paints_a_scaled_png_inside_its_box() {
+    // A 2x2 solid red PNG, written to a temp path and referenced by `src`.
+    let mut source = Pixmap::new(2, 2).unwrap();
+    source.fill(SkiaColor::from_rgba8(255, 0, 0, 255));
+    let png = source.encode_png().expect("encode png");
+    let path = std::env::temp_dir().join(format!("pwb-img-{}.png", std::process::id()));
+    std::fs::write(&path, png).expect("write png");
+
+    let image = crate::layout::LayoutBox {
+        node_id: 9,
+        tag: Tag::Image,
+        element_id: None,
+        rect: Rect::from_xywh(10.0, 10.0, 40.0, 20.0).unwrap(),
+        style: Default::default(),
+        text: None,
+        value: None,
+        placeholder: None,
+        icon: None,
+        image_src: Some(path.to_string_lossy().into_owned()),
+        children: vec![],
+        overflow: pwb_core::spec::OverflowStyle::Visible,
+        content_height: 20.0,
+    };
+    let mut pixmap = Pixmap::new(80, 60).unwrap();
+    pixmap.fill(SkiaColor::BLACK);
+    render_layout_box(
+        &image,
+        &mut pixmap,
+        80,
+        60,
+        &TextSelection::default(),
+        &HashMap::new(),
+        None,
+        RenderState::identity(),
+    );
+
+    // The whole box is covered by the scaled image…
+    for (x, y) in [(12, 12), (30, 20), (48, 28)] {
+        let c = pixmap.pixel(x, y).unwrap();
+        assert!(
+            c.red() > 200 && c.green() < 30 && c.blue() < 30,
+            "pixel ({x},{y}) should be red, got {:?}",
+            c
+        );
+    }
+    // …and nothing paints outside the box rect.
+    let outside = pixmap.pixel(5, 5).unwrap();
+    assert!(
+        outside.red() < 10 && outside.green() < 10 && outside.blue() < 10,
+        "outside the image box must stay untouched, got {:?}",
+        outside
+    );
+    let _ = std::fs::remove_file(&path);
+}
+
+#[test]
+fn test_image_with_missing_source_paints_a_placeholder() {
+    let image = crate::layout::LayoutBox {
+        node_id: 10,
+        tag: Tag::Image,
+        element_id: None,
+        rect: Rect::from_xywh(0.0, 0.0, 20.0, 20.0).unwrap(),
+        style: Default::default(),
+        text: None,
+        value: None,
+        placeholder: None,
+        icon: None,
+        image_src: Some("/definitely/not/a/real/image.png".to_string()),
+        children: vec![],
+        overflow: pwb_core::spec::OverflowStyle::Visible,
+        content_height: 20.0,
+    };
+    let mut pixmap = Pixmap::new(30, 30).unwrap();
+    pixmap.fill(SkiaColor::BLACK);
+    render_layout_box(
+        &image,
+        &mut pixmap,
+        30,
+        30,
+        &TextSelection::default(),
+        &HashMap::new(),
+        None,
+        RenderState::identity(),
+    );
+    let c = pixmap.pixel(10, 10).unwrap();
+    assert!(
+        c.red() > 25 && c.blue() > 35,
+        "missing images paint a visible placeholder, got {:?}",
+        c
+    );
+}
+
+#[test]
+fn test_link_paints_its_label_and_underline() {
+    // Search results and the welcome page rely on native links being visible:
+    // the label paints in the accent color and a 1px underline sits below it.
+    let style = crate::style::ComputedStyle {
+        padding: Some(pwb_core::spec::UnitValue::Px(0.0)),
+        ..Default::default()
+    };
+    let link = crate::layout::LayoutBox {
+        node_id: 11,
+        tag: Tag::Link,
+        element_id: None,
+        rect: Rect::from_xywh(10.0, 10.0, 140.0, 30.0).unwrap(),
+        style,
+        text: Some("Visit Site →".to_string()),
+        value: None,
+        placeholder: None,
+        icon: None,
+        image_src: None,
+        children: vec![],
+        overflow: pwb_core::spec::OverflowStyle::Visible,
+        content_height: 30.0,
+    };
+    let mut pixmap = Pixmap::new(200, 100).unwrap();
+    pixmap.fill(SkiaColor::BLACK);
+    render_layout_box(
+        &link,
+        &mut pixmap,
+        200,
+        600,
+        &TextSelection::default(),
+        &HashMap::new(),
+        None,
+        RenderState::identity(),
+    );
+
+    // Default 2.5vh font at a 600px-high viewport is 15px, so the underline is
+    // at y = top + 16.
+    let underline = pixmap.pixel(20, 26).unwrap();
+    assert!(
+        underline.blue() > 150 && underline.blue() > underline.red(),
+        "link underline should be accent blue, got {:?}",
+        underline
+    );
+    let outside = pixmap.pixel(20, 60).unwrap();
+    assert!(
+        outside.red() < 10 && outside.green() < 10 && outside.blue() < 10,
+        "nothing paints outside the link box, got {:?}",
+        outside
     );
 }
