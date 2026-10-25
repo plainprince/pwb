@@ -304,8 +304,7 @@ async fn anchored_stranger_discovers_and_collects_from_pinned_anchors_via_dht() 
     // Five loopback engines: stranger, non-anchor seed, three anchors.
     let engine_stranger = engine(stranger.clone());
     let engine_seed = engine(seed.clone());
-    let engine_anchors: Vec<NodeEngine> =
-        anchors.iter().map(|kp| engine(kp.clone())).collect();
+    let engine_anchors: Vec<NodeEngine> = anchors.iter().map(|kp| engine(kp.clone())).collect();
     engine_stranger.start().await.unwrap();
     engine_seed.start().await.unwrap();
     for anchor_engine in &engine_anchors {
@@ -317,16 +316,10 @@ async fn anchored_stranger_discovers_and_collects_from_pinned_anchors_via_dht() 
     let addr_seed = engine_seed.local_addr().unwrap().unwrap();
     for (anchor_engine, anchor_kp) in engine_anchors.iter().zip(anchors.iter()) {
         let addr = anchor_engine.local_addr().unwrap().unwrap();
-        engine_seed
-            .connect_to(addr, anchor_kp.public)
-            .unwrap();
-        anchor_engine
-            .connect_to(addr_seed, seed.public)
-            .unwrap();
+        engine_seed.connect_to(addr, anchor_kp.public).unwrap();
+        anchor_engine.connect_to(addr_seed, seed.public).unwrap();
     }
-    engine_stranger
-        .connect_to(addr_seed, seed.public)
-        .unwrap();
+    engine_stranger.connect_to(addr_seed, seed.public).unwrap();
 
     // Every anchor has verified the stranger's work and will vouch for its
     // balance when asked.

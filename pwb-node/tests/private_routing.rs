@@ -119,7 +119,7 @@ fn spawn_responder(
     })
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn private_search_fetch_and_domain_resolution_use_onion_circuits() {
     // Requester + four relays, all directly reachable (full mesh).
     let requester_key = Keypair::generate();

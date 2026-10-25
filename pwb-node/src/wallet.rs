@@ -236,12 +236,7 @@ pub fn neighborhood(domain: &DomainService, subject: &PublicKey, epoch: u64) -> 
 /// reachability, it never removes a live peer.
 async fn ensure_attestors_reachable(engine: &NodeEngine, attestors: &[PublicKey]) {
     for anchor in attestors {
-        if engine
-            .peer_table()
-            .lock()
-            .unwrap()
-            .contains_key(anchor)
-        {
+        if engine.peer_table().lock().unwrap().contains_key(anchor) {
             continue;
         }
         let target = NodeId::from_public_key(anchor);
@@ -302,8 +297,7 @@ pub async fn attested_claim(
     let attestors = neighborhood(domain, &subject, epoch);
     if attestors.is_empty() {
         return Err(ClaimError::Attestation(
-            "no attestors are configured and no live peers can attest this balance"
-                .to_string(),
+            "no attestors are configured and no live peers can attest this balance".to_string(),
         ));
     }
     ensure_attestors_reachable(engine, &attestors).await;
