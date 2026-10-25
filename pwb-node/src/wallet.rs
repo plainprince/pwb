@@ -1,16 +1,25 @@
 //! Operator wallet: attested claims and blind-voucher custody for the CLI.
 //!
 //! Attested claims need a $k$-of-$N$ balance certificate gathered from the
-//! deterministic neighborhood of live peers ([`attested_claim`]); blind claims
-//! spend a bearer voucher withdrawn earlier ([`withdraw_from_peers`]) and keep
-//! only its secret locally ([`Wallet`]). Vouchers are bearer instruments, so
-//! the file is written with owner-only permissions on Unix.
+//! attestor set: the operator-pinned anchors when the node has them, the
+//! deterministic neighborhood of live peers otherwise ([`attested_claim`]);
+//! blind claims spend a bearer voucher withdrawn earlier
+//! ([`withdraw_from_peers`]) and keep only its secret locally ([`Wallet`]).
+//! Vouchers are bearer instruments, so the file is written with owner-only
+//! permissions on Unix.
+//!
+//! The collect side must agree with the verify side
+//! ([`DomainService::attestor_quorum`]): a certificate signed by the live-peer
+//! neighborhood is worthless on a node (or network) that pins anchors, so the
+//! wallet collects from the anchors themselves — dialling them through the
+//! DHT when they are not direct peers.
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use pwb_core::crypto::{BlindVoucher, ContentId, PublicKey, VoucherSecret};
+use pwb_core::dht::NodeId;
 use pwb_core::net::{IssuerBindingWire, NodeEngine};
 use serde::{Deserialize, Serialize};
 
@@ -192,8 +201,20 @@ fn restrict_permissions(_path: &Path) -> Result<(), String> {
     Ok(())
 }
 
-/// Deterministic attestor set for `subject` at `epoch` from the live peers.
+/// Attestor set for `subject` at `epoch`: the pinned anchors when the node
+/// has them, otherwise the deterministic neighborhood of live peers.
+///
+/// The collect side must match [`DomainService::attestor_quorum`], which is
+/// what verifies every funding certificate. Collecting from the live-peer
+/// neighborhood while the node pins anchors would produce a certificate the
+/// verifier immediately rejects (`SignerNotInNeighborhood`) — exactly the
+/// state a stranger is in on a fresh bootstrap, where the only live peer is
+/// the seed and the anchors are unknown keys from the descriptor.
 pub fn neighborhood(domain: &DomainService, subject: &PublicKey, epoch: u64) -> Vec<PublicKey> {
+    let anchors = domain.trust_anchors();
+    if !anchors.is_empty() {
+        return anchors.to_vec();
+    }
     let mut candidates: Vec<PublicKey> = domain.peers().into_iter().map(|(key, _)| key).collect();
     candidates.push(domain.public_key());
     candidates.sort_unstable_by_key(|key| key.0);
@@ -201,7 +222,52 @@ pub fn neighborhood(domain: &DomainService, subject: &PublicKey, epoch: u64) -> 
     select_attestors(subject, epoch, &candidates, DEFAULT_ATTESTOR_N)
 }
 
-/// Gather a quorum certificate for this node's balance from its neighborhood.
+/// Make `attestors` dialable before a collect round.
+///
+/// Pinned anchors arrive as bare public keys — the descriptor carries no
+/// addresses — so on a fresh bootstrap they are not in the peer table and a
+/// plain `send_to` would silently reach nobody. For each unknown key, run a
+/// Kademlia `find_node` walk and dial the discovered contact. The dial is
+/// safe against a hostile address: the key is pinned, so only a host that
+/// actually holds that identity answers the Ping/Pong probe, and
+/// `dial_resilient` falls back to hole punching and relays for NATed anchors.
+///
+/// Anchors already in the peer table are left untouched; this only adds
+/// reachability, it never removes a live peer.
+async fn ensure_attestors_reachable(engine: &NodeEngine, attestors: &[PublicKey]) {
+    for anchor in attestors {
+        if engine
+            .peer_table()
+            .lock()
+            .unwrap()
+            .contains_key(anchor)
+        {
+            continue;
+        }
+        let target = NodeId::from_public_key(anchor);
+        let contacts = engine.find_node(target, Duration::from_secs(3)).await;
+        // `find_node` returns contacts nearest-first; prefer one that is
+        // actually the pinned key, falling back to the nearest contact when
+        // the exact node was not discovered (the dial below then verifies
+        // the pinned key and rejects a wrong identity).
+        let contact = contacts
+            .iter()
+            .find(|contact| contact.public_key == *anchor)
+            .or_else(|| contacts.first());
+        let Some(contact) = contact else {
+            continue;
+        };
+        let _ = engine
+            .dial_resilient(contact.address, *anchor, Duration::from_secs(2))
+            .await;
+    }
+}
+
+/// Gather a quorum certificate for this node's balance from its attestor set.
+///
+/// With pinned anchors this is the anchors themselves (dialled through the DHT
+/// when they are not direct peers); without anchors it is the deterministic
+/// live-peer neighborhood, which is already reachable.
 pub async fn balance_certificate(
     engine: &NodeEngine,
     domain: &DomainService,
@@ -213,11 +279,17 @@ pub async fn balance_certificate(
     if attestors.is_empty() {
         return None;
     }
+    ensure_attestors_reachable(engine, &attestors).await;
     let need = DEFAULT_QUORUM_K.min(attestors.len()).max(1);
     collect_balance_certificate(engine, subject, epoch, &attestors, need, timeout).await
 }
 
 /// Claim `name -> target` against a fresh attested balance certificate.
+///
+/// The certificate is collected from the node's attestor set — the pinned
+/// anchors when configured — so it is verified by the same authority that
+/// collected it, including on a fresh bootstrap where the anchors were never
+/// direct peers.
 pub async fn attested_claim(
     engine: &NodeEngine,
     domain: &DomainService,
@@ -230,9 +302,11 @@ pub async fn attested_claim(
     let attestors = neighborhood(domain, &subject, epoch);
     if attestors.is_empty() {
         return Err(ClaimError::Attestation(
-            "no live peers to attest this balance".to_string(),
+            "no attestors are configured and no live peers can attest this balance"
+                .to_string(),
         ));
     }
+    ensure_attestors_reachable(engine, &attestors).await;
     let need = DEFAULT_QUORUM_K.min(attestors.len()).max(1);
     let certificate =
         collect_balance_certificate(engine, subject, epoch, &attestors, need, timeout)
@@ -246,8 +320,13 @@ pub async fn attested_claim(
     domain.claim_attested(name, target, &certificate, &attestors)
 }
 
-/// Withdraw one voucher of `denomination` credits from the first peer that
-/// attests a sufficient balance. Returns the receipt and the issuer key.
+/// Withdraw one voucher of `denomination` credits from the first attestor
+/// that vouches a sufficient balance. Returns the receipt and the issuer key.
+///
+/// With pinned anchors and no explicit `--issuer`, only the anchors are asked:
+/// a voucher from a non-anchor issuer is unverifiable on an anchored network,
+/// because the blind-claim verifier checks the issuer binding's attestor
+/// membership against the same anchor set.
 pub async fn withdraw_from_peers(
     engine: &NodeEngine,
     domain: &DomainService,
@@ -257,8 +336,10 @@ pub async fn withdraw_from_peers(
 ) -> Result<(crate::blind::WithdrawalReceipt, PublicKey), String> {
     let subject = domain.public_key();
     let epoch = current_epoch();
+    let anchors = domain.trust_anchors();
     let peers: Vec<PublicKey> = match issuer {
         Some(issuer) => vec![issuer],
+        None if !anchors.is_empty() => anchors.to_vec(),
         None => domain
             .peers()
             .into_iter()
@@ -267,8 +348,13 @@ pub async fn withdraw_from_peers(
             .collect(),
     };
     if peers.is_empty() {
-        return Err("no peers are connected, so no attestor can back a withdrawal".to_string());
+        return Err(if anchors.is_empty() {
+            "no peers are connected, so no attestor can back a withdrawal".to_string()
+        } else {
+            "no pinned attestor can back a withdrawal; add --trust-anchor or --issuer".to_string()
+        });
     }
+    ensure_attestors_reachable(engine, &peers).await;
     let mut failures = Vec::new();
     for peer in peers {
         match withdraw_blind(engine, peer, subject, epoch, denomination, 1, timeout).await {
@@ -277,7 +363,7 @@ pub async fn withdraw_from_peers(
         }
     }
     Err(format!(
-        "no peer attested enough balance for a {denomination}-credit voucher ({})",
+        "no attestor attested enough balance for a {denomination}-credit voucher ({})",
         failures.join("; ")
     ))
 }
@@ -318,4 +404,83 @@ pub fn earnings_by_kind(domain: &DomainService) -> BTreeMap<String, u64> {
 /// First eight hex characters of a public key, for log lines.
 pub fn short_key(key: &PublicKey) -> String {
     key.to_hex()[..8].to_string()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::domain::{DomainRegistry, DomainService};
+    use pwb_core::crypto::Keypair;
+    use pwb_core::net::{NodeConfig, PeerInfo};
+    use std::net::SocketAddr;
+    use std::sync::{Arc, Mutex};
+
+    fn test_engine(keypair: &Keypair) -> NodeEngine {
+        NodeEngine::new(NodeConfig {
+            listen_addr: "127.0.0.1:0".parse().unwrap(),
+            keypair: keypair.clone(),
+            bootstrap_peers: Vec::new(),
+            stun_server: None,
+            max_peers: 16,
+            heartbeat_interval: Duration::from_secs(30),
+        })
+    }
+
+    fn domain_with_peers(
+        keypair: &Keypair,
+        anchors: Vec<PublicKey>,
+        live_peers: &[PublicKey],
+    ) -> DomainService {
+        let engine = test_engine(keypair);
+        for peer in live_peers {
+            engine.add_peer(PeerInfo {
+                public_key: *peer,
+                last_seen: std::time::Instant::now(),
+                address: "127.0.0.1:9999".parse::<SocketAddr>().unwrap(),
+                reputation: 0,
+            });
+        }
+        DomainService::new_with_trust(
+            engine,
+            Arc::new(Mutex::new(DomainRegistry::new())),
+            keypair.clone(),
+            0,
+            None,
+            anchors,
+        )
+    }
+
+    /// The collect side must agree with the verify side: with pinned anchors,
+    /// the wallet gathers attestations from the anchors — never from the
+    /// live-peer neighborhood — so the resulting certificate is one the
+    /// anchored verifier accepts. This is the stranger-on-fresh-bootstrap
+    /// case: the only live peer is the seed, which is not an anchor.
+    #[test]
+    fn test_neighborhood_prefers_pinned_anchors_over_live_peers() {
+        let owner = Keypair::generate();
+        let anchors: Vec<Keypair> = (0..3).map(|_| Keypair::generate()).collect();
+        let seed = Keypair::generate();
+
+        let anchored = domain_with_peers(
+            &owner,
+            anchors.iter().map(|a| a.public).collect(),
+            &[seed.public],
+        );
+        let collected = neighborhood(&anchored, &owner.public, 1);
+        let mut expected: Vec<PublicKey> = anchors.iter().map(|a| a.public).collect();
+        expected.sort_unstable_by_key(|key| key.0);
+        assert_eq!(
+            collected, expected,
+            "pinned anchors are the attestor set regardless of live peers"
+        );
+        assert!(
+            !collected.contains(&seed.public),
+            "a non-anchor live peer must never be asked to attest"
+        );
+
+        // Without anchors the historical live-peer neighborhood still applies.
+        let unanchored = domain_with_peers(&owner, Vec::new(), &[seed.public]);
+        let collected = neighborhood(&unanchored, &owner.public, 1);
+        assert!(collected.contains(&seed.public));
+    }
 }

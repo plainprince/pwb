@@ -1,0 +1,72 @@
+name: Fuzz
+
+on:
+  schedule:
+    # Weekly longer run; a crash uploads the minimized input as an artifact.
+    - cron: "0 4 * * 1"
+  workflow_dispatch:
+  pull_request:
+    paths:
+      - "fuzz/**"
+      - "pwb-core/src/onion/**"
+      - "pwb-core/src/net/**"
+      - "pwb-core/src/wire/**"
+      - "pwb-web/src/parse/**"
+      - ".github/workflows/fuzz.yml"
+
+permissions:
+  contents: read
+
+jobs:
+  fuzz:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    strategy:
+      fail-fast: false
+      matrix:
+        target: [onion_cell, network_message, bundle, pml]
+    env:
+      # PRs get a quick smoke run; scheduled/manual runs explore longer.
+      FUZZ_SECONDS: ${{ github.event_name == 'pull_request' && '30' || '300' }}
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install nightly Rust (cargo-fuzz requirement)
+        uses: dtolnay/rust-toolchain@nightly
+
+      - name: Install cargo-fuzz
+        uses: taiki-e/install-action@cargo-fuzz
+
+      - name: Cache cargo registry
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+          key: ${{ runner.os }}-fuzz-cargo-${{ hashFiles('fuzz/Cargo.lock') }}
+
+      - name: Cache fuzz corpus
+        uses: actions/cache@v4
+        with:
+          path: fuzz/corpus/${{ matrix.target }}
+          key: fuzz-corpus-${{ matrix.target }}-${{ github.run_id }}
+          restore-keys: |
+            fuzz-corpus-${{ matrix.target }}-
+
+      - name: Fuzz ${{ matrix.target }}
+        working-directory: fuzz
+        run: |
+          cargo +nightly fuzz run "${{ matrix.target }}" -- \
+            -max_total_time="$FUZZ_SECONDS" \
+            -rss_limit_mb=2048 \
+            -print_final_stats=1
+
+      - name: Upload crash artifacts
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: fuzz-${{ matrix.target }}-artifacts
+          path: fuzz/artifacts/${{ matrix.target }}
+          retention-days: 14
+          if-no-files-found: ignore

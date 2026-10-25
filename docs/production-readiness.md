@@ -115,8 +115,12 @@ funding verification uses the receiver's live peer view unless the operator
 pins attestors. A fresh node whose only peer is malicious can therefore still
 be lied to during bootstrap. `--trust-anchor` / `PWB_TRUST_ANCHORS` closes
 that hole when the anchor identities are obtained independently of the seed;
-shipping a well-known anchor set remains deployment work. Onion-cell rate
-limiting and relay-credit accounting were closed in the 2026-10-21 pass.---
+shipping a well-known anchor set remains deployment work. The collect side
+(attested claims, withdrawals, and the `--status` balance certificate) now
+uses the same anchor set when configured, and dials anchors through the DHT
+when they are not direct peers, so a stranger on a fresh bootstrap can collect
+a certificate the anchored verifier accepts. Onion-cell rate limiting and
+relay-credit accounting were closed in the 2026-10-21 pass.---
 
 ## Public-internet hardening (2026-10-21)
 

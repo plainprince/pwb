@@ -1,6 +1,11 @@
 # Rust build output (workspace target lives at the repo root)
 /target
 
+# cargo-fuzz output
+/fuzz/target
+/fuzz/corpus
+/fuzz/artifacts
+
 # editor / OS cruft
 *.rs.bk
 .DS_Store

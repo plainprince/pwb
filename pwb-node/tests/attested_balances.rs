@@ -289,5 +289,98 @@ async fn remote_peer_verifies_index_proof_against_real_bytes() {
     b.stop().await;
 }
 
+/// A stranger on a fresh bootstrap: its only direct peer is a non-anchor
+/// seed, and its pinned anchors are never in its peer table. The collect side
+/// must discover the anchors through the seed's routing table (DHT walk),
+/// dial them, collect their attestations, and produce a certificate the
+/// anchored verifier accepts — proving the collect and verify sides agree
+/// even when the anchors were never direct peers.
+#[tokio::test]
+async fn anchored_stranger_discovers_and_collects_from_pinned_anchors_via_dht() {
+    let stranger = Keypair::generate();
+    let seed = Keypair::generate();
+    let anchors: Vec<Keypair> = (0..3).map(|_| Keypair::generate()).collect();
+
+    // Five loopback engines: stranger, non-anchor seed, three anchors.
+    let engine_stranger = engine(stranger.clone());
+    let engine_seed = engine(seed.clone());
+    let engine_anchors: Vec<NodeEngine> =
+        anchors.iter().map(|kp| engine(kp.clone())).collect();
+    engine_stranger.start().await.unwrap();
+    engine_seed.start().await.unwrap();
+    for anchor_engine in &engine_anchors {
+        anchor_engine.start().await.unwrap();
+    }
+
+    // Each anchor connects to the seed (so the seed's routing table knows
+    // all three), and the stranger connects only to the seed.
+    let addr_seed = engine_seed.local_addr().unwrap().unwrap();
+    for (anchor_engine, anchor_kp) in engine_anchors.iter().zip(anchors.iter()) {
+        let addr = anchor_engine.local_addr().unwrap().unwrap();
+        engine_seed
+            .connect_to(addr, anchor_kp.public)
+            .unwrap();
+        anchor_engine
+            .connect_to(addr_seed, seed.public)
+            .unwrap();
+    }
+    engine_stranger
+        .connect_to(addr_seed, seed.public)
+        .unwrap();
+
+    // Every anchor has verified the stranger's work and will vouch for its
+    // balance when asked.
+    let epoch = pwb_node::attestation::current_epoch();
+    let balance = 100u64;
+    let mut anchor_handles = Vec::new();
+    for (anchor_engine, anchor_kp) in engine_anchors.iter().zip(anchors.iter()) {
+        let service = Arc::new(AttestationService::new(
+            anchor_engine.clone(),
+            anchor_kp.clone(),
+            &anchor_kp.secret.0,
+        ));
+        service
+            .record_earned(stranger.public, epoch, balance, [7; 32])
+            .expect("attestor records verified work");
+        anchor_handles.push(tokio::spawn(Arc::clone(&service).run()));
+    }
+
+    // The stranger's domain pins the three anchors as its funding authority.
+    let registry = Arc::new(Mutex::new(DomainRegistry::new()));
+    let domain = Arc::new(DomainService::new_with_trust(
+        engine_stranger.clone(),
+        registry,
+        stranger.clone(),
+        0,
+        None,
+        anchors.iter().map(|a| a.public).collect(),
+    ));
+    let domain_handle = tokio::spawn(Arc::clone(&domain).run());
+
+    // Collect + claim through the normal wallet path. The stranger never
+    // connects directly to the anchors; `ensure_attestors_reachable` must
+    // discover them through the seed's routing table and dial them.
+    let record = pwb_node::wallet::attested_claim(
+        &engine_stranger,
+        &domain,
+        "stranger.pwb",
+        ContentId([9; 32]),
+        Duration::from_secs(4),
+    )
+    .await
+    .expect("anchored stranger claims a name against DHT-discovered anchors");
+    assert_eq!(record.target_content_id, ContentId([9; 32]));
+
+    domain_handle.abort();
+    for handle in anchor_handles {
+        handle.abort();
+    }
+    engine_stranger.stop().await;
+    engine_seed.stop().await;
+    for anchor_engine in &engine_anchors {
+        anchor_engine.stop().await;
+    }
+}
+
 #[allow(dead_code)]
 fn _assert_send_sync(_: PublicKey, _: SocketAddr, _: fn(NetworkMessage)) {}

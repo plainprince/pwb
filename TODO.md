@@ -249,7 +249,11 @@ listed here so they are not mistaken for finished work.
   remaining work is a well-known anchor set whose signer key clients obtain
   independently of the descriptor host (a release note or project site).
   Shrinking `k` is a deliberate trade-off for small networks, not a
-  verification bypass.
+  verification bypass. The collect side (attested claims, withdrawals, and
+  the `--status` balance certificate) now uses the same anchor set when
+  configured, and dials anchors through the DHT when they are not direct
+  peers, so a stranger on a fresh bootstrap can collect a certificate the
+  anchored verifier accepts.
 - **No public seed is hosted yet.** Clients can now discover seeds from a
   published descriptor (`deploy/join.json`, or `--join` / `PWB_JOIN` with
   `--join-signer` pinning), and `--write-join` produces signed descriptors, but

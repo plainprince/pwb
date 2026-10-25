@@ -6,6 +6,27 @@ No central servers. No pools. No duplicate work. Indexing, ranking, verification
 
 Browse official built-in pages on `.plain` and publish unofficial `.pwb` sites, with built-in decentralized search and domain registration — powered by Rust.
 
+## The network needs a seed — help start it
+
+PlainWeb has no built-in bootstrap list. For a stranger to join from anywhere on
+the public internet, someone has to run a **seed** (a long-running `pwb-node`
+with a public address) and publish a signed join descriptor.
+
+**Want to help? Run a seed and open a PR (or issue) with the published
+descriptor.** The two steps:
+
+1. Run a seed node: follow [docs/seed-node.md](docs/seed-node.md). Open UDP
+   `7921` on a public VPS, install the systemd unit, and grab the printed
+   connection link.
+2. Publish the signed join descriptor with [deploy/publish-join.sh](deploy/publish-join.sh).
+   It writes `deploy/join.json`, verifies the signature, and prints the signer
+   public key. Commit that file and open a PR — or just open an issue with the
+   seed link, the signer key, and the `deploy/join.json` contents.
+
+Once merged, every new clone of this repository bootstraps from your seed with
+no flags. The full procedure (rotation, withdrawal, emergency shutdown) is in
+[docs/runbooks/publish-a-seed.md](docs/runbooks/publish-a-seed.md).
+
 ## What it is
 
 PlainWeb replaces legacy URLs and central search engines with peer-to-peer system protocols: `search.plain`, `register.plain`, `gossip.plain`, `nodes.plain`, `network.plain`, `help.plain`, and `devtools.plain`. The `.plain` TLD is the **official** namespace — the browser-shipped system pages plus the built-in content pages `welcome.plain` and `demo.plain`. The `.pwb` TLD is the **unofficial** namespace: user/network sites claimed by participants using sparse credits.
