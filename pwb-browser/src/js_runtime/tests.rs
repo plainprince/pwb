@@ -581,13 +581,10 @@ fn test_devtools_tree_open_close_structure() {
 fn test_devtools_leaf_content_truncated_to_fit() {
     // Long leaf text must be ellipsized so the closing tag stays visible
     // (it used to be pushed past the tree's right edge and clipped).
+    const LABEL: &str = "This is an extremely long button label that would overflow the tree row";
     let handle = test_handle();
     // Node 2 is the button with text "Click me"; make its text very long.
-    execute_script(
-            &handle,
-            "__pwb_setText('2', 'This is an extremely long button label that would overflow the tree row');",
-        )
-        .unwrap();
+    execute_script(&handle, &format!("__pwb_setText('2', '{LABEL}');")).unwrap();
     execute_script(&handle, "__pwb_refreshDevtools(1800, 1300);").unwrap();
     let dom = handle.dom.borrow();
     let row = find_node_by_id(&dom.root, "tree-row-2").expect("row exists");
@@ -606,11 +603,25 @@ fn test_devtools_leaf_content_truncated_to_fit() {
         Some("</button>"),
         "closing tag always present"
     );
-    // Content has a leading space and is truncated with an ellipsis.
+    // Content keeps its leading space and is truncated with an ellipsis. How
+    // many characters fit is decided by the host's font metrics (a machine
+    // with no usable system font measures with the fallback advance), so
+    // assert the shape of a valid truncation instead of a fixed prefix length.
     let content = parts.iter().find(|p| p.ends_with('…')).unwrap();
     assert!(
-        content.starts_with(" This is"),
+        content.starts_with(' '),
         "content preserved with leading space: {:?}",
+        content
+    );
+    // How much survives is up to the font, but whatever survives must be a
+    // prefix of the source text — the row never invents characters.
+    let kept = content
+        .strip_prefix(' ')
+        .and_then(|c| c.strip_suffix('…'))
+        .expect("content is a space, some text, then an ellipsis");
+    assert!(
+        LABEL.starts_with(kept),
+        "truncated content is a prefix of the source text: {:?}",
         content
     );
 }

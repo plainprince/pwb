@@ -2,9 +2,8 @@ use super::*;
 use crate::dom::Dom;
 use crate::layout::box_types::test_font;
 use crate::layout::build_layout_tree;
-use crate::layout::{get_font, glyph_advance_px, LayoutBox, ResizeEdge};
+use crate::layout::{LayoutBox, ResizeEdge};
 use crate::style::ComputedStyle;
-use ab_glyph::Font;
 use pwb_core::spec::{OverflowStyle, Tag};
 use std::collections::HashMap;
 use tiny_skia::Rect;
@@ -225,10 +224,9 @@ fn test_hit_test_text_char_empty_text_returns_zero() {
 fn test_caret_index_at_x_mid_character_rounding() {
     let _ = test_font();
     // Advances are positive; half-advance boundaries pick the nearer edge.
-    let adv = {
-        let font = get_font().expect("test font");
-        glyph_advance_px(font, font.glyph_id('h'), 16.0)
-    };
+    // Measure through the same helper `caret_index_at_x` steps by, so the
+    // bound holds whether or not this machine has a system font to load.
+    let adv = crate::layout::measure_text("h", 16.0);
     assert_eq!(caret_index_at_x("hello", 16.0, adv * 0.4), 0);
     assert_eq!(caret_index_at_x("hello", 16.0, adv * 0.6), 1);
     assert_eq!(caret_index_at_x("", 16.0, 5.0), 0);
