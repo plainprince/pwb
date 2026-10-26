@@ -225,6 +225,15 @@ fn test_register_page_renders_claim_form_and_known_domains() {
         has_text_containing(&bundle.root_node, "Claimed alice.pwb"),
         "status message renders"
     );
+
+    // The claim hint lists the namespace from UNOFFICIAL_TLDS (never a
+    // hand-written copy), so every claimable TLD shows up on the page.
+    for tld in pwb_core::system::UNOFFICIAL_TLDS {
+        assert!(
+            has_text_containing(&bundle.root_node, &format!(".{tld}")),
+            "register page must list .{tld}"
+        );
+    }
 }
 
 #[test]

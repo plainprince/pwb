@@ -771,7 +771,8 @@ fn print_help() {
     println!("PlainWeb Browser Usage:");
     println!("  pwb-browser [options] [target]");
     println!(
-        "  (.plain = official; .pwb .non .yep .lam .arch .org .net .com = unofficial user sites)"
+        "  (.plain = official; {} = unofficial user sites)",
+        pwb_core::system::unofficial_tld_list()
     );
     println!();
     println!("Options:");

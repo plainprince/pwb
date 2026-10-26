@@ -26,6 +26,7 @@ through the registry, and is recognized by the browser as an address.
 | `.yep` | Playful, personal, micro-pages | `hello.yep` |
 | `.lam` | Short, punchy one-liner sites | `toot.lam` |
 | `.arch` | Archives and long-lived snapshots | `1994.arch` |
+| `.vio` | Vivid, visual and expressive pages | `canvas.vio` |
 | `.org` | Communities, collectives, projects | `commons.org` |
 | `.net` | Networks and services | `relay.net` |
 | `.com` | Commercial and project homepages | `shop.com` |
@@ -74,10 +75,14 @@ The bare `devtools` domain is likewise an internal browser tool with no TLD.
 
 ## Adding a TLD
 
-1. Append it to `UNOFFICIAL_TLDS` in `pwb-core/src/system.rs`.
-2. Add a row to the table above.
-3. Update the one-line lists in the help pages (`help.plain`, `register.plain`)
-   and `pwb-browser --help`.
+1. Append it to `UNOFFICIAL_TLDS` in `pwb-core/src/system.rs` — **that one line
+   is the whole system**. Validation, the shared error text, the
+   `register.plain` claim hint, the `help.plain` namespace row, the browser's
+   address recognition, and the `pwb-browser --help` summary all derive from
+   the list (tests assert each rendered page mentions every entry).
+2. Add a row to the table above, and mirror it in the prose enumerations in
+   `README.md`, `docs/protocol.md`, and the crate READMEs — prose can't be
+   derived from code.
 
 Because validation happens on every claim path *and* on gossiped relay, a new
 TLD only takes effect once nodes run the updated binary — older nodes refuse

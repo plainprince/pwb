@@ -84,7 +84,7 @@ pub fn render_register_page_bundle(
             <head><title>register.plain</title></head>
             <view class="reg-container">
                 <text class="reg-title">register.plain — PlainWeb Domain Registry</text>
-                <text class="reg-info">Claim an unofficial name (.pwb, .non, .yep, .lam, .arch, .org, .net or .com) for a site you host. Claims are signed by your identity and gossiped across the swarm.</text>
+                <text class="reg-info">Claim an unofficial name ({tlds}) for a site you host. Claims are signed by your identity and gossiped across the swarm.</text>
                 <text class="reg-info">Identity: {owner}</text>
                 <text class="reg-info">Balance: {balance} credits — current price: {cost} credits</text>
                 <text class="reg-info">Registered domains: {count}</text>
@@ -93,6 +93,7 @@ pub fn render_register_page_bundle(
         balance = balance,
         cost = cost,
         count = domains.len(),
+        tlds = pwb_core::system::unofficial_tld_list(),
     );
 
     if let Some(message) = message {

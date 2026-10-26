@@ -6,10 +6,9 @@
 /// `help.plain`, `devtools.plain`) and the
 /// browser-shipped content pages (`welcome.plain`, `demo.plain`). The
 /// **unofficial** namespace is the [`pwb_core::system::UNOFFICIAL_TLDS`] list
-/// (`.pwb`, `.non`, `.yep`, `.lam`, `.arch`, `.org`, `.net`, `.com` — see
-/// `docs/tlds.md`): user/network sites claimed by participants (e.g.
-/// `mysite.pwb`, `club.non`). The bare `devtools` domain is a special internal
-/// browser tool with no TLD.
+/// (one entry per claimable TLD — see `docs/tlds.md`): user/network sites
+/// claimed by participants (e.g. `mysite.pwb`, `club.non`). The bare `devtools`
+/// domain is a special internal browser tool with no TLD.
 ///
 /// URL matching is centralized in `pwb-core::system` ([`SystemUrl`] /
 /// [`SystemDomain`]); this module only picks the native page to render for

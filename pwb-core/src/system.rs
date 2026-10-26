@@ -175,7 +175,7 @@ pub fn is_reserved_system_domain(domain: &str) -> bool {
 pub const UNOFFICIAL_TLDS: &[&str] = &[
     // PlainWeb's own unofficial namespace (the original).
     "pwb", // Playful / purpose-flavoured namespaces.
-    "non", "yep", "lam", "arch",
+    "non", "yep", "lam", "arch", "vio",
     // The legacy trio, resolvable inside PlainWeb like any other name here.
     "org", "net", "com",
 ];
@@ -216,6 +216,22 @@ pub fn unknown_tld_message() -> &'static str {
             format!("unknown TLD: names must end in one of {list}")
         })
         .as_str()
+}
+
+/// Render [`UNOFFICIAL_TLDS`] as a human-readable, dot-prefixed list
+/// (`.pwb, .non, …, .vio`). The register console, the `help.plain` namespace
+/// row, and the CLI help print this instead of enumerating the TLDs, so
+/// adding a TLD stays a single-line change to [`UNOFFICIAL_TLDS`].
+pub fn unofficial_tld_list() -> &'static str {
+    static LIST: OnceLock<String> = OnceLock::new();
+    LIST.get_or_init(|| {
+        UNOFFICIAL_TLDS
+            .iter()
+            .map(|tld| format!(".{tld}"))
+            .collect::<Vec<_>>()
+            .join(", ")
+    })
+    .as_str()
 }
 
 /// Build a `nodes.plain` connection link from an address and public key.
@@ -300,6 +316,22 @@ mod tests {
             );
         }
         assert!(message.starts_with("unknown TLD"));
+    }
+
+    #[test]
+    fn test_unofficial_tld_list_lists_every_tld_once() {
+        let list = unofficial_tld_list();
+        for tld in UNOFFICIAL_TLDS {
+            assert!(
+                list.contains(&format!(".{tld}")),
+                "list must mention .{tld}: {list}"
+            );
+        }
+        assert_eq!(
+            list.split(", ").count(),
+            UNOFFICIAL_TLDS.len(),
+            "one dot-prefixed entry per TLD: {list}"
+        );
     }
 
     #[test]

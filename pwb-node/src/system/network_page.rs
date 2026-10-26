@@ -178,7 +178,11 @@ pub fn render_network_page_bundle(
 /// the namespace and credit rules a new participant needs.
 pub fn render_help_page_bundle() -> Bundle {
     let title = format!("{} — PlainWeb Help", SystemDomain::Help.as_str());
-    let pml_markup = r##"<plain>
+    // The namespace row is derived from UNOFFICIAL_TLDS so the page can never
+    // drift from the claimable namespace (adding a TLD is a one-line change).
+    let tlds = pwb_core::system::unofficial_tld_list();
+    let pml_markup = format!(
+        r##"<plain>
         <head><title>help.plain</title></head>
         <view class="help-container">
             <text class="help-title">help.plain — PlainWeb Help</text>
@@ -197,7 +201,7 @@ pub fn render_help_page_bundle() -> Bundle {
             <view class="help-card">
                 <text class="help-heading">Namespaces</text>
                 <text class="help-row">.plain is reserved for official system pages and browser-shipped content and can never be claimed.</text>
-                <text class="help-row">.pwb, .non, .yep, .lam, .arch, .org, .net and .com are the unofficial namespace: names are signed claims backed by earned credits and gossiped across the swarm.</text>
+                <text class="help-row">{tlds} are the unofficial namespace: names are signed claims backed by earned credits and gossiped across the swarm.</text>
                 <text class="help-row">content.pwb/&lt;content-id&gt; addresses a bundle directly by its BLAKE3 hash, with no registry lookup.</text>
             </view>
 
@@ -216,9 +220,10 @@ pub fn render_help_page_bundle() -> Bundle {
                 <text class="help-row">A domain claim spends credits. Attested claims and blind (unlinkable) vouchers are available from the pwb-node CLI.</text>
             </view>
         </view>
-    </plain>"##;
+    </plain>"##
+    );
 
-    compile(title, pml_markup, HELP_STYLES, None)
+    compile(title, &pml_markup, HELP_STYLES, None)
 }
 
 fn compile(title: String, pml_markup: &str, styles: &str, script: Option<&str>) -> Bundle {
@@ -322,6 +327,20 @@ mod tests {
         assert!(text.contains("0707070707070707"), "peer key renders");
         assert!(text.contains("Indexed documents: 1"));
         assert!(text.contains("Indexed terms: 1"));
+    }
+
+    #[test]
+    fn help_page_lists_every_unofficial_tld() {
+        // The namespace row is interpolated from UNOFFICIAL_TLDS, so every
+        // claimable TLD must appear in the rendered help page.
+        let bundle = render_help_page_bundle();
+        let text = format!("{:?}", bundle.root_node);
+        for tld in pwb_core::system::UNOFFICIAL_TLDS {
+            assert!(
+                text.contains(&format!(".{tld}")),
+                "help page must list .{tld}"
+            );
+        }
     }
 
     #[test]
