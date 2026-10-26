@@ -45,6 +45,7 @@ pub struct FetchResponse {
     pub url: String,
 }
 
+#[derive(Debug)]
 pub enum WsEvent {
     Open,
     Message(String),

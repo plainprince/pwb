@@ -4,7 +4,7 @@ use std::collections::HashMap;
 
 use pwb_core::crypto::{ContentId, PublicKey, Signature, VoucherSpendLog};
 use pwb_core::discovery::unix_time;
-use pwb_core::system::is_reserved_system_domain;
+use pwb_core::system::{is_reserved_system_domain, is_unofficial_domain, unknown_tld_message};
 
 use super::pricing::{PricingEpochStats, RollingPricing};
 
@@ -210,6 +210,10 @@ impl DomainRegistry {
     ///
     /// SECURITY RULE: The `.plain` TLD is the reserved official namespace (built-in system protocols plus browser-shipped content pages).
     /// Attempts by network participants to claim `.plain` domains will be rejected!
+    ///
+    /// Every other name must carry one of the unofficial TLDs (`docs/tlds.md`);
+    /// names outside the namespace are refused so a claim can never point at a
+    /// name the browser would not resolve.
     pub fn register(
         &mut self,
         domain: &str,
@@ -225,7 +229,12 @@ impl DomainRegistry {
             );
         }
 
-        // 2. Reject duplicates
+        // 2. Enforce the unofficial namespace: only listed TLDs are claimable.
+        if !is_unofficial_domain(&clean_domain) {
+            return Err(unknown_tld_message());
+        }
+
+        // 3. Reject duplicates
         if self.records.contains_key(&clean_domain) {
             return Err("Domain name already registered");
         }

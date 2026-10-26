@@ -28,6 +28,36 @@ fn test_domain_registry_security_rules() {
     assert_eq!(resolved.target_content_id, cid);
 }
 
+#[test]
+fn test_unofficial_tld_list_is_the_claimable_namespace() {
+    let mut reg = DomainRegistry::new();
+    let cid = ContentId([1; 32]);
+    let pk = PublicKey([2; 32]);
+
+    // Every TLD on the list registers (docs/tlds.md mirrors this list).
+    for tld in pwb_core::system::UNOFFICIAL_TLDS {
+        let name = format!("site-{tld}.{tld}");
+        assert!(reg.register(&name, cid, pk).is_ok(), "{name} is claimable");
+        assert!(reg.resolve(&name).is_some());
+    }
+    // Nested labels stay claimable (matching the original `.pwb` rule).
+    assert!(reg.register("deep.sub.example.com", cid, pk).is_ok());
+
+    // Names outside the namespace are refused with the shared error text.
+    for bad in ["mysite.xyz", "no-tld-at-all", ".pwb", ""] {
+        assert_eq!(
+            reg.register(bad, cid, pk),
+            Err(pwb_core::system::unknown_tld_message()),
+            "{bad:?} is not claimable"
+        );
+    }
+    // `.plain` is refused by the reserved rule, which is more specific.
+    assert_eq!(
+        reg.register("evil.plain", cid, pk),
+        Err("Reserved system domain: .plain TLD is restricted to built-in system protocols")
+    );
+}
+
 fn attest_quorum(
     subject: PublicKey,
     epoch: u64,
@@ -279,6 +309,11 @@ fn test_attested_claim_requires_valid_quorum_and_spends_balance() {
     assert_eq!(
         reg.register_attested("search.plain", cid, &cert, 2, &neighborhood),
         Err(LedgerError::ReservedSystemDomain)
+    );
+    // So does the unofficial-namespace rule.
+    assert_eq!(
+        reg.register_attested("offlist.xyz", cid, &cert, 2, &neighborhood),
+        Err(LedgerError::UnknownTld)
     );
 
     // k=2 of the 3-member neighborhood claims and records the spend at

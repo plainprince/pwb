@@ -770,7 +770,9 @@ async fn main() {
 fn print_help() {
     println!("PlainWeb Browser Usage:");
     println!("  pwb-browser [options] [target]");
-    println!("  (.plain = official built-in pages; .pwb = unofficial user sites)");
+    println!(
+        "  (.plain = official; .pwb .non .yep .lam .arch .org .net .com = unofficial user sites)"
+    );
     println!();
     println!("Options:");
     println!("  -f, --file <path>    Open a local .pwb file");

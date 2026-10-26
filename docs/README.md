@@ -9,6 +9,7 @@ Everything you need to understand how PlainWeb works, linked in one place.
 ## Protocol
 
 - [Protocol Reference](protocol.md) — pinned constants, network parameters, and the `.plain` security rule, across every layer.
+- [TLDs](tlds.md) — the full list of namespaces: reserved `.plain` and every claimable unofficial TLD.
 
 ## Security
 

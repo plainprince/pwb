@@ -29,7 +29,7 @@ no flags. The full procedure (rotation, withdrawal, emergency shutdown) is in
 
 ## What it is
 
-PlainWeb replaces legacy URLs and central search engines with peer-to-peer system protocols: `search.plain`, `register.plain`, `gossip.plain`, `nodes.plain`, `network.plain`, `help.plain`, and `devtools.plain`. The `.plain` TLD is the **official** namespace — the browser-shipped system pages plus the built-in content pages `welcome.plain` and `demo.plain`. The `.pwb` TLD is the **unofficial** namespace: user/network sites claimed by participants using sparse credits.
+PlainWeb replaces legacy URLs and central search engines with peer-to-peer system protocols: `search.plain`, `register.plain`, `gossip.plain`, `nodes.plain`, `network.plain`, `help.plain`, and `devtools.plain`. The `.plain` TLD is the **official** namespace — the browser-shipped system pages plus the built-in content pages `welcome.plain` and `demo.plain`. The **unofficial** namespace (`.pwb`, `.non`, `.yep`, `.lam`, `.arch`, `.org`, `.net`, `.com` — [full list](docs/tlds.md)) holds user/network sites claimed by participants using sparse credits.
 
 ## Security
 

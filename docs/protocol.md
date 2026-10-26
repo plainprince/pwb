@@ -231,22 +231,22 @@ new_price    = clamp(price + (target - price) / ADJUSTMENT_DIVISOR,
 
 ---
 
-## 5. Official (`.plain`) vs unofficial (`.pwb`) namespaces
+## 5. Official (`.plain`) vs unofficial (TLD list) namespaces
 
 `.plain` is the **official** namespace and is **strictly reserved**. It holds the built-in system protocols and the browser-shipped content pages. No user, miner, or node can claim, register, or overwrite `.plain` domains.
 
 | Domain | Role |
 |--------|------|
 | `*.plain` | Official built-in pages only: system endpoints (`search.plain`, `devtools.plain`, `register.plain`, `gossip.plain`, `nodes.plain`, `network.plain`, `help.plain`) and shipped content pages (`welcome.plain`, `demo.plain`). Registration attempts by network participants are rejected. |
-| `*.pwb` | **Unofficial** user/network sites, claimed by participants using sparse credits (e.g. `mysite.pwb`). |
+| `*.pwb`, `*.non`, `*.yep`, `*.lam`, `*.arch`, `*.org`, `*.net`, `*.com` | **Unofficial** user/network sites, claimed by participants using sparse credits (e.g. `mysite.pwb`, `club.non`). The list lives in `UNOFFICIAL_TLDS` (`pwb-core::system`); names outside it are refused by every claim path. Full list and rules: [docs/tlds.md](tlds.md). |
 
 ### 5.1 Networked domain service (`pwb-node::domain::DomainService`)
 
 `register.plain` is backed by a real, decentralized namespace rather than a local table:
 
-- **Signed claims.** A claim is a canonical statement `domain → content-id` + owner + `credits_spent`, signed by the owner key (`domain_claim_sign_message`, prefix `PWBDOMAIN1`) and broadcast as `ClaimDomain`. Receivers re-derive the statement, verify the signature, reject reserved names and underpaid claims (`credits_spent < claim_cost()`), apply the registry's last-writer-wins merge, and re-gossip (flood with per-claim digest dedup, so propagation terminates).
+- **Signed claims.** A claim is a canonical statement `domain → content-id` + owner + `credits_spent`, signed by the owner key (`domain_claim_sign_message`, prefix `PWBDOMAIN1`) and broadcast as `ClaimDomain`. Receivers re-derive the statement, verify the signature, reject reserved names, names outside the unofficial TLD list, and underpaid claims (`credits_spent < claim_cost()`), apply the registry's last-writer-wins merge, and re-gossip (flood with per-claim digest dedup, so propagation terminates).
 - **Registry sync.** On startup a node broadcasts `RegistrySyncRequest`; peers answer with their full record set (`RegistrySyncResponse`), so late joiners converge without replaying history.
-- **On-demand resolution.** A `.pwb` name not held locally is resolved by broadcasting `DomainQuery`; the first valid `DomainResponse` wins and is cached.
+- **On-demand resolution.** An unofficial name not held locally is resolved by broadcasting `DomainQuery`; the first valid `DomainResponse` wins and is cached.
 - **Persistence.** Records are mirrored to disk and reloaded on start.
 
 Receivers verify the owner's signature and the declared price but not the signer's earned balance, so this is a functional namespace gated by the local spend; the `k`-of-`N` attestation path above is the Sybil-resistant extension.

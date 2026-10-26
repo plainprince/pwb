@@ -1,7 +1,7 @@
 //! Attested and private (blind) domain-claim paths.
 
 use pwb_core::crypto::{ContentId, PublicKey, VoucherSpendError};
-use pwb_core::system::is_reserved_system_domain;
+use pwb_core::system::{is_reserved_system_domain, is_unofficial_domain};
 
 use super::registry::{ClaimFunding, DomainRecord, DomainRegistry};
 use crate::blind::{BlindClaim, BlindClaimError};
@@ -28,6 +28,9 @@ impl DomainRegistry {
         let clean_domain = domain.trim().to_lowercase();
         if is_reserved_system_domain(&clean_domain) {
             return Err(LedgerError::ReservedSystemDomain);
+        }
+        if !is_unofficial_domain(&clean_domain) {
+            return Err(LedgerError::UnknownTld);
         }
         if self.records.contains_key(&clean_domain) {
             return Err(LedgerError::DomainAlreadyRegistered);
@@ -81,6 +84,9 @@ impl DomainRegistry {
         let clean_domain = domain.trim().to_lowercase();
         if is_reserved_system_domain(&clean_domain) {
             return Err(BlindClaimError::ReservedSystemDomain);
+        }
+        if !is_unofficial_domain(&clean_domain) {
+            return Err(BlindClaimError::UnknownTld);
         }
         if self.records.contains_key(&clean_domain) {
             return Err(BlindClaimError::DomainAlreadyRegistered);

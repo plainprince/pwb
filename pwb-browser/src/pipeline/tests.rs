@@ -384,3 +384,293 @@ fn test_find_title_for_node() {
     assert_eq!(find_title_for_node(&root, 1), None);
     assert_eq!(find_title_for_node(&root, 99), None);
 }
+
+// ---------------------------------------------------------------------------
+// Full BrowserApp harness: a real embedded node (loopback engine, domain
+// service, federated search) behind `build_browser_app`, so navigation, the
+// chrome actions, and the claim console run end-to-end without a window.
+// ---------------------------------------------------------------------------
+
+use super::app::BrowserApp;
+use super::{build_browser_app, PipelineError};
+use crate::shell::ChromeAction;
+use pwb_core::crypto::{ContentId, Keypair};
+use pwb_core::net::{NodeConfig, NodeEngine};
+use pwb_core::spec::PlainNode;
+use pwb_core::wire::{Bundle, CURRENT_VERSION};
+use pwb_node::domain::{DomainRegistry, DomainService};
+use pwb_node::federation::DistributedSearch;
+use pwb_node::host::ArtifactHost;
+use pwb_node::identity::IdentityManager;
+use pwb_node::privacy::PrivacyMode;
+use pwb_node::search::SearchEngine;
+use std::sync::{Arc, Mutex};
+use std::time::Duration;
+
+fn page_bytes() -> Vec<u8> {
+    let mut title = PlainNode::new(2, Tag::Title);
+    title.text_content = Some("Harness".to_string());
+    let mut head = PlainNode::new(1, Tag::Head);
+    head.children.push(title);
+    let mut root = PlainNode::new(0, Tag::Document);
+    root.children.push(head);
+    root.children
+        .push(with_attr_node(3, Tag::View, "class", "body"));
+    Bundle {
+        version: CURRENT_VERSION,
+        title: "Harness".to_string(),
+        author_pubkey: None,
+        root_node: root,
+        script_payload: None,
+        components: HashMap::new(),
+        modules: HashMap::new(),
+    }
+    .serialize()
+}
+
+fn with_attr_node(id: usize, tag: Tag, key: &str, value: &str) -> PlainNode {
+    let mut node = PlainNode::new(id, tag);
+    node.attributes.insert(key.to_string(), value.to_string());
+    node
+}
+
+/// Build a `BrowserApp` over a live loopback node, returning the runtime so
+/// the caller can keep it (and the engine's tasks) alive for the test.
+fn build_app(bytes: &[u8]) -> Result<(BrowserApp, tokio::runtime::Runtime), PipelineError> {
+    let runtime = tokio::runtime::Runtime::new().expect("tokio runtime");
+    let kp = Keypair::generate();
+    let engine = runtime.block_on(async {
+        let engine = NodeEngine::new(NodeConfig {
+            listen_addr: "127.0.0.1:0".parse().unwrap(),
+            keypair: kp.clone(),
+            bootstrap_peers: Vec::new(),
+            stun_server: None,
+            max_peers: 16,
+            heartbeat_interval: Duration::from_secs(30),
+        });
+        engine.start().await.expect("engine start");
+        engine
+    });
+    let registry = Arc::new(Mutex::new(DomainRegistry::new()));
+    let domain = Arc::new(DomainService::new(
+        engine.clone(),
+        Arc::clone(&registry),
+        kp.clone(),
+        0,
+        None,
+    ));
+    let federation = Arc::new(DistributedSearch::new(
+        engine,
+        Arc::new(SearchEngine::new()),
+        Arc::new(ArtifactHost::new()),
+        kp,
+    ));
+    let app = build_browser_app(
+        bytes,
+        Arc::new(SearchEngine::new()),
+        Arc::new(ArtifactHost::new()),
+        registry,
+        Arc::new(IdentityManager::new()),
+        federation,
+        domain,
+        PrivacyMode::Direct,
+        runtime.handle().clone(),
+    )?;
+    Ok((app, runtime))
+}
+
+struct Harness {
+    // Declared after the app so it drops last: the engine's tasks stay alive
+    // for as long as the app holds the runtime handle.
+    app: BrowserApp,
+    _runtime: tokio::runtime::Runtime,
+}
+
+fn harness() -> Harness {
+    let (app, runtime) = build_app(&page_bytes()).expect("app builds");
+    let mut app = app;
+    // `Shell::new` restores whatever session file `$PWB_DATA`/`$HOME/.pwb`
+    // holds — and other tests (and the developer's own browser) persist tabs
+    // and bookmarks there. Reset to a pristine single-tab shell so harness
+    // assertions never depend on on-disk state.
+    app.shell.tabs.clear();
+    app.shell.tabs.push(crate::shell::Tab {
+        url: "welcome.plain".into(),
+        title: "welcome.plain".into(),
+        history: vec!["welcome.plain".into()],
+        index: 0,
+    });
+    app.shell.active = 0;
+    app.shell.bookmarks.clear();
+    Harness {
+        app,
+        _runtime: runtime,
+    }
+}
+
+fn has_chrome(dom: &crate::dom::Dom) -> bool {
+    dom.root
+        .children
+        .iter()
+        .any(|c| c.attributes.get("id").map(String::as_str) == Some("__pwb_chrome"))
+}
+
+#[test]
+fn build_browser_app_installs_chrome_devtools_and_a_storage_path() {
+    let h = harness();
+    {
+        let dom = h.app.dom_handle_render.dom.borrow();
+        assert_eq!(dom.title, "Harness", "page title comes from the bundle");
+        assert!(has_chrome(&dom), "browser chrome wraps the page");
+    }
+    assert!(
+        h.app.dom_handle_render.web.storage_path.borrow().is_some(),
+        "per-bundle localStorage path is set"
+    );
+    assert!(
+        h.app.devtools_root_id.is_some(),
+        "devtools DOM mounted from webpages/devtools"
+    );
+    assert_eq!(
+        h.app.window_size(),
+        (800, 600),
+        "no window yet → the default size"
+    );
+}
+
+#[test]
+fn build_browser_app_rejects_garbage_bytes() {
+    let err = build_app(b"definitely not a PlainWeb bundle")
+        .err()
+        .expect("garbage bytes must not build an app");
+    assert!(matches!(err, PipelineError::Wire(_)), "got {err:?}");
+}
+
+#[test]
+fn navigate_to_swaps_the_dom_for_each_native_page() {
+    let mut h = harness();
+    for target in [
+        "welcome.plain",
+        "demo.plain",
+        "help.plain",
+        "network.plain",
+        "register.plain",
+        "search.plain?q=untrackable",
+    ] {
+        assert!(h.app.navigate_to(target), "{target} must navigate");
+        let dom = h.app.dom_handle_render.dom.borrow();
+        assert!(!dom.title.is_empty(), "{target} rendered a titled page");
+        assert!(has_chrome(&dom), "chrome is reinstalled around {target}");
+    }
+
+    // A target that resolves nowhere returns false so the caller can fall
+    // back to a background swarm resolve.
+    assert!(
+        !h.app.navigate_to("no/such/file-xyz123"),
+        "unresolvable target returns false"
+    );
+}
+
+#[test]
+fn register_plain_claim_submissions_render_the_console_response() {
+    let mut h = harness();
+    // A claim with an empty ledger is refused — the console renders the
+    // error instead of crashing the navigation.
+    let cid = ContentId([3; 32]).to_hex();
+    assert!(
+        h.app
+            .navigate_to(&format!("register.plain?claim=mine.non&cid={cid}")),
+        "the claim console always renders"
+    );
+    {
+        let dom = h.app.dom_handle_render.dom.borrow();
+        assert!(!dom.title.is_empty());
+        assert!(has_chrome(&dom));
+    }
+}
+
+#[test]
+fn go_canonicalizes_bare_words_and_resolves_unofficial_tlds() {
+    let mut h = harness();
+    h.app.set_initial_url("welcome.plain");
+    assert_eq!(h.app.shell.current_url(), "welcome.plain");
+
+    // A bare word (or words) is a search, like a browser omnibox.
+    h.app.go("hello world");
+    assert_eq!(h.app.shell.current_url(), "search.plain?q=hello world");
+
+    // A dotted unofficial-TLD name is an address: the browser tries the
+    // local registry first, then resolves the name from the swarm in the
+    // background (pending_page is armed).
+    h.app.pending_page = None;
+    h.app.go("club.non");
+    assert_eq!(h.app.shell.current_url(), "club.non");
+    assert!(
+        h.app.pending_page.is_some(),
+        "an unregistered name arms a background swarm resolve"
+    );
+
+    // A dotted name with a TLD outside the namespace is not an address the
+    // browser can resolve remotely: a native message page explains it.
+    h.app.pending_page = None;
+    h.app.go("site.xyz");
+    assert_eq!(h.app.shell.current_url(), "site.xyz");
+    assert!(
+        h.app.pending_page.is_none(),
+        "unknown TLDs never trigger a swarm resolve"
+    );
+    {
+        let dom = h.app.dom_handle_render.dom.borrow();
+        assert_eq!(
+            dom.title, "cannot open page",
+            "a native message page explains the miss"
+        );
+    }
+
+    // Re-navigating through set_initial_url on an existing tab just moves it.
+    h.app.set_initial_url("demo.plain");
+    assert_eq!(h.app.shell.current_url(), "demo.plain");
+}
+
+#[test]
+fn chrome_actions_drive_tabs_history_bookmarks_and_pages() {
+    let mut h = harness();
+    h.app.set_initial_url("welcome.plain");
+
+    // Bookmarks toggle round-trips through the persisted shell state.
+    assert!(h.app.handle_chrome_action(ChromeAction::ToggleBookmark));
+    assert!(h.app.shell.is_bookmarked("welcome.plain"));
+    assert!(h.app.handle_chrome_action(ChromeAction::ToggleBookmark));
+    assert!(!h.app.shell.is_bookmarked("welcome.plain"));
+
+    // New tab: a second tab opens on the start page.
+    assert!(h.app.handle_chrome_action(ChromeAction::NewTab));
+    assert_eq!(h.app.shell.tabs.len(), 2);
+    assert_eq!(h.app.shell.current_url(), "welcome.plain");
+
+    // Back/Forward with no per-tab history are no-ops.
+    let before = h.app.shell.current_url().to_string();
+    assert!(h.app.handle_chrome_action(ChromeAction::Back));
+    assert_eq!(h.app.shell.current_url(), before);
+    assert!(h.app.handle_chrome_action(ChromeAction::Forward));
+    assert_eq!(h.app.shell.current_url(), before);
+
+    // Reload re-enters the current URL.
+    assert!(h.app.handle_chrome_action(ChromeAction::Reload));
+    assert_eq!(h.app.shell.current_url(), before);
+
+    // The native list and system pages open through the shell.
+    for (action, url) in [
+        (ChromeAction::OpenBookmarks, "bookmarks.plain"),
+        (ChromeAction::OpenHistory, "history.plain"),
+        (ChromeAction::OpenNetwork, "network.plain"),
+    ] {
+        assert!(h.app.handle_chrome_action(action));
+        assert_eq!(h.app.shell.current_url(), url);
+    }
+
+    // Tab selection switches back to the first tab's page.
+    assert!(h.app.handle_chrome_action(ChromeAction::SelectTab(0)));
+    assert_eq!(h.app.shell.current_url(), "welcome.plain");
+    assert!(has_chrome(&h.app.dom_handle_render.dom.borrow()));
+}

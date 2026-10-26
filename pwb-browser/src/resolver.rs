@@ -4,16 +4,18 @@
 /// strictly reserved — it holds the built-in system protocols (`search.plain`,
 /// `register.plain`, `gossip.plain`, `nodes.plain`, `network.plain`,
 /// `help.plain`, `devtools.plain`) and the
-/// browser-shipped content pages (`welcome.plain`, `demo.plain`). `.pwb` is the
-/// **unofficial** namespace: user/network sites claimed by participants (e.g.
-/// `mysite.pwb`). The bare `devtools` domain is a special internal browser tool
-/// with no TLD.
+/// browser-shipped content pages (`welcome.plain`, `demo.plain`). The
+/// **unofficial** namespace is the [`pwb_core::system::UNOFFICIAL_TLDS`] list
+/// (`.pwb`, `.non`, `.yep`, `.lam`, `.arch`, `.org`, `.net`, `.com` — see
+/// `docs/tlds.md`): user/network sites claimed by participants (e.g.
+/// `mysite.pwb`, `club.non`). The bare `devtools` domain is a special internal
+/// browser tool with no TLD.
 ///
 /// URL matching is centralized in `pwb-core::system` ([`SystemUrl`] /
 /// [`SystemDomain`]); this module only picks the native page to render for
 /// each recognized domain.
 use pwb_core::crypto::ContentId;
-use pwb_core::system::{SystemDomain, SystemUrl};
+use pwb_core::system::{is_unofficial_domain, SystemDomain, SystemUrl};
 use pwb_node::domain::DomainRegistry;
 use pwb_node::host::ArtifactHost;
 use pwb_node::identity::IdentityManager;
@@ -80,11 +82,12 @@ pub fn content_id_of(target: &str) -> Option<ContentId> {
     Some(ContentId(cid))
 }
 
-/// The bare `name.pwb` when `target` is a claimable user domain (not a
-/// `file.pwb/` path or `content.pwb/<cid>` lookup).
+/// The bare `name.tld` when `target` is a claimable user domain of the
+/// unofficial namespace (see [`is_unofficial_domain`]) — not a `file.pwb/`
+/// path or a `content.pwb/<cid>` lookup.
 pub fn pwb_name_of(target: &str) -> Option<String> {
     let clean = target.trim().trim_start_matches("plain://");
-    (clean.ends_with(".pwb")
+    (is_unofficial_domain(clean)
         && !clean.starts_with("file.pwb/")
         && !clean.starts_with("content.pwb/"))
     .then(|| clean.to_string())
@@ -214,8 +217,10 @@ pub fn resolve_url_or_file_with_context(
         };
     }
 
-    // 4. Unofficial user network domains (`.pwb` TLD or custom user domain)
-    if clean.ends_with(".pwb") || clean.contains('.') {
+    // 4. Unofficial user network domains (any dotted name consults the
+    // registry; the unofficial TLDs are what the browser treats as a
+    // claimable address in `pwb_name_of`).
+    if clean.contains('.') {
         if let Some(record) = registry.resolve(clean) {
             if let Some(bundle_bytes) = host.get(&record.target_content_id) {
                 return Ok(bundle_bytes);
@@ -454,6 +459,17 @@ mod tests {
         assert_eq!(pwb_name_of("file.pwb/site.pwb"), None);
         assert_eq!(pwb_name_of("content.pwb/deadbeef"), None);
         assert_eq!(pwb_name_of("welcome.plain"), None);
+        // Every unofficial TLD is a claimable address (docs/tlds.md).
+        for tld in pwb_core::system::UNOFFICIAL_TLDS {
+            assert_eq!(
+                pwb_name_of(&format!("site.{tld}")),
+                Some(format!("site.{tld}")),
+                ".{tld} is claimable"
+            );
+        }
+        // Names outside the namespace are not addresses.
+        assert_eq!(pwb_name_of("site.xyz"), None);
+        assert_eq!(pwb_name_of("nodot"), None);
     }
 
     #[test]

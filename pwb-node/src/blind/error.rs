@@ -58,6 +58,8 @@ impl std::error::Error for BlindError {}
 pub enum BlindClaimError {
     /// The `.plain` TLD is reserved for built-in system protocols.
     ReservedSystemDomain,
+    /// The name carries no TLD from the unofficial namespace.
+    UnknownTld,
     /// The domain is already registered.
     DomainAlreadyRegistered,
     /// The issuer binding's signature does not verify.
@@ -79,6 +81,9 @@ impl fmt::Display for BlindClaimError {
         match self {
             BlindClaimError::ReservedSystemDomain => {
                 write!(f, "reserved system domain: .plain TLD is restricted")
+            }
+            BlindClaimError::UnknownTld => {
+                write!(f, "{}", pwb_core::system::unknown_tld_message())
             }
             BlindClaimError::DomainAlreadyRegistered => write!(f, "domain name already registered"),
             BlindClaimError::BadBinding => write!(f, "issuer binding signature is invalid"),

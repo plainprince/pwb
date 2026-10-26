@@ -265,8 +265,13 @@ pub fn ws_close(state: &WebApiState, id: u64) {
 #[cfg(all(test, not(feature = "permissive-cors")))]
 mod tests {
     use super::perform_fetch;
+    use super::{drain_outbound, spawn_fetch, ws_close, ws_open, ws_send};
+    use crate::webapi::state::{drain_async, AsyncEvent, WebApiState, WsEvent, WsOutbound};
+    use std::collections::{HashMap, VecDeque};
     use std::io::{Read, Write};
     use std::net::TcpListener;
+    use std::sync::Mutex;
+    use std::time::{Duration, Instant};
 
     /// Serve one HTTP response and return the bound address.
     fn serve_once(extra_headers: &'static str) -> std::net::SocketAddr {
@@ -288,6 +293,37 @@ mod tests {
         addr
     }
 
+    /// Drain the session queue until `pred` sees the events it wants (or fail
+    /// after a bounded wait), returning everything drained so far.
+    fn wait_for_events(
+        state: &WebApiState,
+        mut pred: impl FnMut(&[AsyncEvent]) -> bool,
+    ) -> Vec<AsyncEvent> {
+        let mut log = Vec::new();
+        let deadline = Instant::now() + Duration::from_secs(5);
+        loop {
+            log.extend(drain_async(state));
+            if pred(&log) {
+                return log;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "timed out waiting for async events"
+            );
+            std::thread::sleep(Duration::from_millis(20));
+        }
+    }
+
+    fn ws_events(events: &[AsyncEvent], id: u64) -> Vec<&WsEvent> {
+        events
+            .iter()
+            .filter_map(|e| match e {
+                AsyncEvent::Ws { id: i, event } if *i == id => Some(event),
+                _ => None,
+            })
+            .collect()
+    }
+
     #[test]
     fn default_build_blocks_cross_origin_response_without_cors() {
         let addr = serve_once("");
@@ -305,5 +341,210 @@ mod tests {
             .expect("ACAO:* allows the response");
         assert_eq!(response.status, 200);
         assert_eq!(response.body, b"ok");
+    }
+
+    #[test]
+    fn spawn_fetch_delivers_its_result_to_the_session_queue() {
+        let addr = serve_once("Access-Control-Allow-Origin: *\r\n");
+        let state = WebApiState::new();
+        spawn_fetch(
+            &state,
+            42,
+            format!("http://{addr}/data"),
+            "GET".to_string(),
+            Vec::new(),
+            String::new(),
+        );
+        let events = wait_for_events(&state, |ev| {
+            ev.iter()
+                .any(|e| matches!(e, AsyncEvent::Fetch { id: 42, .. }))
+        });
+        match &events[0] {
+            AsyncEvent::Fetch { id, result } => {
+                assert_eq!(*id, 42);
+                let response = result.as_ref().expect("blessed response succeeds");
+                assert_eq!(response.status, 200);
+                assert_eq!(response.body, b"ok");
+                assert_eq!(response.url, format!("http://{addr}/data"));
+            }
+            other => panic!(
+                "expected a fetch event, got something else: {:?}",
+                other as *const _
+            ),
+        }
+    }
+
+    #[test]
+    fn ws_send_and_ws_close_queue_outbound_messages() {
+        let state = WebApiState::new();
+        ws_send(&state, 5, "hello");
+        ws_close(&state, 5);
+        let mut guard = state.ws_outbound.lock().unwrap();
+        let queued = guard
+            .get_mut(&5)
+            .expect("outbound queue for the connection");
+        assert_eq!(queued.len(), 2);
+        assert!(matches!(&queued[0], WsOutbound::Send(data) if data == "hello"));
+        assert!(matches!(queued[1], WsOutbound::Close));
+    }
+
+    /// A connected socket pair wrapped as raw websockets (no handshake): the
+    /// outbound queue must flush to the wire and a close must stop the loop.
+    #[test]
+    fn drain_outbound_flushes_sends_and_reports_close() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let client = std::net::TcpStream::connect(addr).unwrap();
+        let (peer, _) = listener.accept().unwrap();
+        peer.set_read_timeout(Some(Duration::from_secs(2))).unwrap();
+
+        let mut ws = tungstenite::WebSocket::from_raw_socket(
+            tungstenite::stream::MaybeTlsStream::Plain(client),
+            tungstenite::protocol::Role::Client,
+            None,
+        );
+        let mut peer_ws = tungstenite::WebSocket::from_raw_socket(
+            peer,
+            tungstenite::protocol::Role::Server,
+            None,
+        );
+
+        let outbound = Mutex::new(HashMap::from([(
+            7u64,
+            VecDeque::from([WsOutbound::Send("hi".to_string())]),
+        )]));
+        let queue = Mutex::new(VecDeque::new());
+        assert!(
+            !drain_outbound(&outbound, &queue, &mut ws, 7),
+            "a queued send does not stop the reader"
+        );
+        match peer_ws.read() {
+            Ok(tungstenite::Message::Text(text)) => assert_eq!(text, "hi"),
+            other => panic!("peer receives the queued frame, got {other:?}"),
+        }
+
+        // A close drains the remaining sends, reports `Close`, and stops the loop.
+        outbound.lock().unwrap().insert(
+            7,
+            VecDeque::from([WsOutbound::Send("bye".to_string()), WsOutbound::Close]),
+        );
+        assert!(drain_outbound(&outbound, &queue, &mut ws, 7));
+        match peer_ws.read() {
+            Ok(tungstenite::Message::Text(text)) => assert_eq!(text, "bye"),
+            other => panic!("remaining send flushes before close, got {other:?}"),
+        }
+        let events: Vec<AsyncEvent> = queue.lock().unwrap().drain(..).collect();
+        assert!(
+            events.iter().any(|e| matches!(
+                e,
+                AsyncEvent::Ws {
+                    id: 7,
+                    event: WsEvent::Close
+                }
+            )),
+            "close is reported to the JS side"
+        );
+    }
+
+    /// Connect failure: the JS side sees an error and then a close, never a
+    /// hung promise.
+    #[test]
+    fn ws_open_reports_a_failed_connect_as_error_then_close() {
+        // Bind and immediately release a port so nothing listens on it.
+        let addr = {
+            let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+            listener.local_addr().unwrap()
+        };
+        let state = WebApiState::new();
+        let id = ws_open(&state, &format!("ws://{addr}/"));
+        let events = wait_for_events(&state, |ev| {
+            ev.iter()
+                .any(|e| matches!(e, AsyncEvent::Ws { id: i, event: WsEvent::Close } if *i == id))
+        });
+        let seen = ws_events(&events, id);
+        assert!(
+            matches!(seen.first(), Some(WsEvent::Error(_))),
+            "error comes first: {seen:?}"
+        );
+        assert!(
+            matches!(seen.last(), Some(WsEvent::Close)),
+            "close follows the error: {seen:?}"
+        );
+    }
+
+    /// Full happy path: handshake, open event, send → server echo → message
+    /// event, then close is delivered to both sides.
+    #[test]
+    fn ws_open_roundtrips_messages_and_close() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let (tx, rx) = std::sync::mpsc::channel::<String>();
+        std::thread::spawn(move || {
+            let (stream, _) = listener.accept().unwrap();
+            let mut server = match tungstenite::accept(stream) {
+                Ok(server) => server,
+                Err(error) => {
+                    let _ = tx.send(format!("handshake failed: {error}"));
+                    return;
+                }
+            };
+            loop {
+                match server.read() {
+                    Ok(tungstenite::Message::Text(text)) => {
+                        let _ = tx.send(format!("recv:{text}"));
+                        let _ = server.send(tungstenite::Message::Text(format!("echo:{text}")));
+                    }
+                    Ok(tungstenite::Message::Close(_)) | Err(_) => break,
+                    _ => {}
+                }
+            }
+            let _ = tx.send("done".to_string());
+        });
+
+        let state = WebApiState::new();
+        let id = ws_open(&state, &format!("ws://{addr}/"));
+        let open_events = wait_for_events(&state, |ev| {
+            ev.iter()
+                .any(|e| matches!(e, AsyncEvent::Ws { id: i, event: WsEvent::Open } if *i == id))
+        });
+        assert!(
+            open_events
+                .iter()
+                .any(|e| matches!(e, AsyncEvent::Ws { id: i, event: WsEvent::Open } if *i == id)),
+            "open was reported"
+        );
+
+        ws_send(&state, id, "ping");
+        wait_for_events(&state, |ev| {
+            ev.iter().any(|e| {
+                matches!(e, AsyncEvent::Ws { id: i, event: WsEvent::Message(m) } if *i == id && m == "echo:ping")
+            })
+        });
+
+        ws_close(&state, id);
+        let close_events = wait_for_events(&state, |ev| {
+            ev.iter()
+                .any(|e| matches!(e, AsyncEvent::Ws { id: i, event: WsEvent::Close } if *i == id))
+        });
+        assert!(
+            close_events
+                .iter()
+                .any(|e| matches!(e, AsyncEvent::Ws { id: i, event: WsEvent::Close } if *i == id)),
+            "close was reported"
+        );
+
+        // The server saw the client's frame and its close frame.
+        let mut seen = Vec::new();
+        while let Ok(msg) = rx.recv_timeout(Duration::from_secs(2)) {
+            let done = msg == "done";
+            seen.push(msg);
+            if done {
+                break;
+            }
+        }
+        assert!(
+            seen.iter().any(|m| m == "recv:ping"),
+            "server received the send: {seen:?}"
+        );
     }
 }

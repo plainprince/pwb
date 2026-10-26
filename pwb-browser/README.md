@@ -27,11 +27,11 @@
 | **`network.plain`** | Live node status: listen/discovery/STUN addresses, peer table, and local index/store/registry counts. |
 | **`help.plain`** | Help index linking every system domain, plus namespace, hosting, and credit rules. |
 
-## Official (`.plain`) vs unofficial (`.pwb`) sites
+## Official (`.plain`) vs unofficial (TLD list) sites
 
 `.plain` is the **official** namespace. It is strictly reserved for the browser's built-in pages: the system protocols (`search.plain`, `devtools.plain`, `register.plain`, `gossip.plain`, `nodes.plain`, `network.plain`, `help.plain`) and the shipped content pages (`welcome.plain`, `demo.plain`). No user, miner, or node can claim or register a `.plain` domain — registration attempts are rejected by `pwb-node::domain`.
 
-`.pwb` is the **unofficial** namespace: any site created and claimed by network participants (e.g. `mysite.pwb`).
+The **unofficial** namespace is the claimable TLD list `.pwb`, `.non`, `.yep`, `.lam`, `.arch`, `.org`, `.net`, `.com`: any site created and claimed by network participants (e.g. `mysite.pwb`, `club.non`). Names outside the list are refused. See [docs/tlds.md](../docs/tlds.md).
 
 ## PlainJS (`.pjs`) `document` API
 

@@ -165,11 +165,11 @@ signing key inside the repository. The surrounding procedure is the
 
 `pwb-node` serves native system protocols and dynamic interfaces:
 - **`search.plain`**: Sharded decentralized search engine index & ranking math. Querying `search.plain` returns verified index search results. Each result title and its "Visit Site" affordance are native `content.pwb/<cid>` links, so opening a hit needs no JavaScript.
-- **`register.plain`**: Sparse credit domain registry interface. Backed by `domain::DomainService`: signed `.pwb` claims gossip across the swarm, late joiners sync the registry, unknown names resolve on demand, and records persist to disk. Claims debit the signed credit ledger, which is funded by verified query/index/relay work; a fresh node starts at 0 credits.
+- **`register.plain`**: Sparse credit domain registry interface. Backed by `domain::DomainService`: signed claims for the unofficial TLDs (`.pwb`, `.non`, `.yep`, `.lam`, `.arch`, `.org`, `.net`, `.com` — see [docs/tlds.md](../docs/tlds.md)) gossip across the swarm, late joiners sync the registry, unknown names resolve on demand, and records persist to disk. Claims debit the signed credit ledger, which is funded by verified query/index/relay work; a fresh node starts at 0 credits.
 - **`gossip.plain`**: P2P gossip engine for artifact propagation.
 - **`nodes.plain`**: Peer routing table and network health.
 - **`network.plain`**: Live listen/discovery/STUN addresses, the peer table, and this node's index/store/registry counts, claim price, and balance.
-- **`help.plain`**: System-domain index plus the `.plain`/`.pwb` namespace, hosting, and credit rules.
+- **`help.plain`**: System-domain index plus the namespace, hosting, and credit rules.
 
 ## Module Structure
 

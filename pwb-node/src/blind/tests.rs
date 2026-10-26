@@ -403,6 +403,17 @@ fn test_claim_build_and_registry_redemption() {
         ),
         Err(BlindClaimError::ReservedSystemDomain)
     );
+    // So does the unofficial-namespace rule: names must carry a listed TLD.
+    assert_eq!(
+        registry.register_blind(
+            "private.xyz",
+            ContentId([1; 32]),
+            pseudonym,
+            &claim,
+            &neighborhood,
+        ),
+        Err(BlindClaimError::UnknownTld)
+    );
     assert_eq!(
         registry.register_blind(
             "private.pwb",

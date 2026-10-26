@@ -42,7 +42,7 @@ use pwb_core::net::{
     domain_claim_funding_sign_message, domain_claim_sign_message, BlindClaimWire, DomainRecordWire,
     NetworkMessage, NodeEngine, QuorumCertificateWire, SyncRecordWire,
 };
-use pwb_core::system::is_reserved_system_domain;
+use pwb_core::system::{is_reserved_system_domain, is_unofficial_domain};
 use rand::seq::SliceRandom;
 use rand::RngCore;
 use tokio::sync::mpsc;
@@ -147,6 +147,8 @@ pub enum ClaimError {
     EmptyDomain,
     /// The name falls under the reserved official `.plain` namespace.
     ReservedDomain,
+    /// The name carries no TLD from the unofficial namespace.
+    UnknownTld,
     /// The name is already registered (locally or via gossip).
     AlreadyRegistered,
     /// The owner's local credit balance is below the current price.
@@ -166,6 +168,7 @@ impl std::fmt::Display for ClaimError {
             ClaimError::ReservedDomain => {
                 write!(f, "'.plain' is reserved for official built-in pages")
             }
+            ClaimError::UnknownTld => write!(f, "{}", pwb_core::system::unknown_tld_message()),
             ClaimError::AlreadyRegistered => write!(f, "that domain is already registered"),
             ClaimError::InsufficientCredits { balance, cost } => {
                 write!(f, "need {cost} credits, have {balance}")
@@ -363,6 +366,9 @@ impl DomainService {
         if is_reserved_system_domain(&domain) {
             return Err(ClaimError::ReservedDomain);
         }
+        if !is_unofficial_domain(&domain) {
+            return Err(ClaimError::UnknownTld);
+        }
         // A name is first-come-first-served, but its owner may re-point it at
         // a new content id (for example after publishing an updated bundle).
         // Re-pointing does not buy the name again, so it is free; other
@@ -447,6 +453,9 @@ impl DomainService {
         }
         if is_reserved_system_domain(&domain) {
             return Err(ClaimError::ReservedDomain);
+        }
+        if !is_unofficial_domain(&domain) {
+            return Err(ClaimError::UnknownTld);
         }
         if self.registry.lock().unwrap().contains(&domain) {
             return Err(ClaimError::AlreadyRegistered);
@@ -544,6 +553,9 @@ impl DomainService {
         }
         if is_reserved_system_domain(&domain) {
             return Err(ClaimError::ReservedDomain);
+        }
+        if !is_unofficial_domain(&domain) {
+            return Err(ClaimError::UnknownTld);
         }
         if self.registry.lock().unwrap().contains(&domain) {
             return Err(ClaimError::AlreadyRegistered);
@@ -1050,7 +1062,7 @@ impl DomainService {
         if !signature.verify(&owner, &canonical) {
             return;
         }
-        if is_reserved_system_domain(&domain) {
+        if is_reserved_system_domain(&domain) || !is_unofficial_domain(&domain) {
             return;
         }
         // The owner re-pointing an existing name pays nothing; every other
@@ -1130,6 +1142,7 @@ impl DomainService {
     ) {
         let domain = domain.trim().to_lowercase();
         if is_reserved_system_domain(&domain)
+            || !is_unofficial_domain(&domain)
             || credited_claim_epoch_invalid(registered_at_epoch)
             || credits_spent < self.claim_cost()
         {
@@ -1225,6 +1238,7 @@ impl DomainService {
     ) {
         let domain = domain.trim().to_lowercase();
         if is_reserved_system_domain(&domain)
+            || !is_unofficial_domain(&domain)
             || credited_claim_epoch_invalid(registered_at_epoch)
             || credits_spent < self.claim_cost()
         {

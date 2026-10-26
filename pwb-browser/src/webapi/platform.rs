@@ -65,6 +65,17 @@ mod native {
         if cfg!(test) || std::env::var_os("PWB_HEADLESS").is_some() {
             return false;
         }
+        gui_backend_available()
+    }
+
+    /// Probe the environment for a usable dialog backend: a display server
+    /// plus one of the tinyfiledialogs Unix backends on `PATH` (Windows uses
+    /// its native TaskDialog and needs no probe). Split from [`available`] so
+    /// tests can exercise the probe without a modal ever opening.
+    ///
+    /// Probing first keeps alert/confirm from silently turning into no-ops
+    /// (and confirm into a spurious `false`).
+    pub(super) fn gui_backend_available() -> bool {
         #[cfg(unix)]
         {
             let has_display = std::env::var_os("DISPLAY").is_some()
@@ -72,9 +83,6 @@ mod native {
             if !has_display {
                 return false;
             }
-            // tinyfiledialogs shells out to one of these on Unix. Probing
-            // first keeps alert/confirm from silently turning into no-ops
-            // (and confirm into a spurious `false`).
             if !["zenity", "kdialog", "yad"]
                 .iter()
                 .any(|name| in_path(name))
@@ -85,7 +93,7 @@ mod native {
         true
     }
 
-    fn in_path(name: &str) -> bool {
+    pub(super) fn in_path(name: &str) -> bool {
         std::env::var_os("PATH")
             .map(|paths| {
                 std::env::split_paths(&paths).any(|dir| {
@@ -225,4 +233,94 @@ static PERF_ORIGIN: OnceLock<Instant> = OnceLock::new();
 pub fn performance_now() -> f64 {
     let origin = *PERF_ORIGIN.get_or_init(Instant::now);
     origin.elapsed().as_secs_f64() * 1000.0
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn performance_now_never_goes_backwards() {
+        let first = performance_now();
+        assert!(first >= 0.0);
+        let second = performance_now();
+        assert!(second >= first, "{second} must not precede {first}");
+    }
+
+    #[test]
+    fn base64_helpers_roundtrip_and_reject_junk() {
+        assert_eq!(btoa("hello").unwrap(), "aGVsbG8=");
+        assert_eq!(atob("aGVsbG8=").unwrap(), "hello");
+        let binary = "\u{0}\u{ff}\u{7f}";
+        let encoded = btoa(binary).unwrap();
+        assert_eq!(atob(&encoded).unwrap(), binary);
+        assert!(btoa("€").is_err(), "code point above U+00FF is rejected");
+        assert!(atob("!!! not base64 !!!").is_err());
+        assert!(atob("aGVsbG8=").is_ok());
+    }
+
+    #[test]
+    fn random_helpers_produce_well_formed_values() {
+        let bytes = random_bytes(32);
+        assert_eq!(bytes.chars().count(), 32);
+        assert!(bytes.chars().all(|c| (c as u32) <= 0xFF), "Latin-1 only");
+        assert!(random_bytes(0).is_empty());
+
+        let a = random_uuid();
+        let b = random_uuid();
+        assert_ne!(a, b, "uuid v4 values differ");
+        assert_eq!(a.parse::<uuid::Uuid>().unwrap().to_string(), a);
+    }
+
+    /// The GUI probe must answer from the environment without ever opening a
+    /// modal — headless processes take the console fallback instead.
+    #[cfg(all(unix, not(target_os = "macos")))]
+    #[test]
+    fn gui_probe_reads_the_environment_and_path() {
+        use super::native::{gui_backend_available, in_path};
+
+        // PATH lookup: nothing probes as a binary that is not there.
+        assert!(
+            !in_path("pwb-definitely-not-installed-tool"),
+            "a missing backend is not on PATH"
+        );
+
+        // Without a display the probe refuses (when this machine has none).
+        let headless =
+            std::env::var_os("DISPLAY").is_none() && std::env::var_os("WAYLAND_DISPLAY").is_none();
+        if headless {
+            assert!(!gui_backend_available());
+        }
+
+        // With a display set, the probe evaluates the backend check too.
+        struct Restore;
+        impl Drop for Restore {
+            fn drop(&mut self) {
+                std::env::remove_var("DISPLAY");
+            }
+        }
+        let had_display = std::env::var_os("DISPLAY");
+        std::env::set_var("DISPLAY", ":0");
+        let _restore = Restore;
+        let _ = gui_backend_available();
+        drop(_restore);
+        match had_display {
+            Some(value) => std::env::set_var("DISPLAY", value),
+            None => std::env::remove_var("DISPLAY"),
+        }
+    }
+
+    /// In tests `available()` is always false, so every dialog takes the
+    /// console fallback path instead of opening a modal nobody could see.
+    #[cfg(not(target_os = "macos"))]
+    #[test]
+    fn dialogs_fall_back_to_the_console_when_no_gui_is_available() {
+        show_alert("alert without a dialog");
+        assert!(show_confirm("confirm without a dialog"), "default is yes");
+        assert_eq!(
+            show_prompt("prompt without a dialog", "dflt"),
+            Some("dflt".to_string()),
+            "no GUI prompt falls back to the default value"
+        );
+    }
 }

@@ -98,6 +98,61 @@ async fn wait_for<F: Fn() -> bool>(cond: F, timeout: Duration) -> bool {
     cond()
 }
 
+/// Every TLD in the unofficial namespace (docs/tlds.md) claims and gossips
+/// exactly like `.pwb`; names outside the list never leave the claiming node.
+#[tokio::test]
+async fn test_unofficial_tlds_claim_and_gossip() {
+    let kp_a = Keypair::generate();
+    let kp_b = Keypair::generate();
+    let (engine_a, addr_a) = start_engine(kp_a.clone()).await;
+    let (engine_b, addr_b) = start_engine(kp_b.clone()).await;
+
+    let service_a = service(engine_a.clone(), registry(), &kp_a, 1_000);
+    let service_b = service(engine_b.clone(), registry(), &kp_b, 1_000);
+    tokio::spawn(Arc::clone(&service_a).run());
+    tokio::spawn(Arc::clone(&service_b).run());
+    connect(&engine_a, addr_a, &kp_a, &engine_b, addr_b, &kp_b);
+
+    for (i, tld) in pwb_core::system::UNOFFICIAL_TLDS.iter().enumerate() {
+        let name = format!("tld-{i}.{tld}");
+        service_a
+            .claim(&name, ContentId([i as u8; 32]))
+            .unwrap_or_else(|e| panic!("{name} must claim: {e}"));
+        let probe_service = Arc::clone(&service_b);
+        let probe = name.clone();
+        let learned = wait_for(
+            move || probe_service.resolve_local(&probe).is_some(),
+            Duration::from_secs(5),
+        )
+        .await;
+        assert!(learned, "B learns {name} by gossip");
+    }
+
+    // Names outside the namespace are refused before any credit is spent.
+    for bad in ["site.xyz", "no-tld-at-all", ".pwb"] {
+        assert!(
+            matches!(
+                service_a.claim(bad, ContentId([9; 32])),
+                Err(ClaimError::UnknownTld)
+            ),
+            "{bad} is refused"
+        );
+    }
+    // `.plain` keeps its more specific reserved error.
+    assert!(matches!(
+        service_a.claim("evil.plain", ContentId([9; 32])),
+        Err(ClaimError::ReservedDomain)
+    ));
+
+    // Nothing outside the namespace ever reached B.
+    for bad in ["site.xyz", "no-tld-at-all", ".pwb", "evil.plain"] {
+        assert!(
+            service_b.resolve_local(bad).is_none(),
+            "{bad} must not gossip"
+        );
+    }
+}
+
 #[tokio::test]
 async fn test_claim_gossips_to_a_connected_peer() {
     let kp_a = Keypair::generate();

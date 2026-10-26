@@ -51,5 +51,5 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: llvm-cov-html
-          path: target/llvm-cov-html
+          path: target/llvm-cov-html/html
           retention-days: 7

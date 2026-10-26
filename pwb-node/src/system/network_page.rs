@@ -187,7 +187,7 @@ pub fn render_help_page_bundle() -> Bundle {
             <view class="help-card">
                 <text class="help-heading">System domains</text>
                 <link class="help-link" href="search.plain">search.plain — query the swarm's sharded index</link>
-                <link class="help-link" href="register.plain">register.plain — claim a .pwb name and view credits</link>
+                <link class="help-link" href="register.plain">register.plain — claim an unofficial name and view credits</link>
                 <link class="help-link" href="nodes.plain">nodes.plain — live peers and connection links</link>
                 <link class="help-link" href="gossip.plain">gossip.plain — hosted artifacts and registry size</link>
                 <link class="help-link" href="network.plain">network.plain — this node's addresses and services</link>
@@ -197,14 +197,14 @@ pub fn render_help_page_bundle() -> Bundle {
             <view class="help-card">
                 <text class="help-heading">Namespaces</text>
                 <text class="help-row">.plain is reserved for official system pages and browser-shipped content and can never be claimed.</text>
-                <text class="help-row">.pwb is the unofficial namespace: names are signed claims backed by earned credits and gossiped across the swarm.</text>
+                <text class="help-row">.pwb, .non, .yep, .lam, .arch, .org, .net and .com are the unofficial namespace: names are signed claims backed by earned credits and gossiped across the swarm.</text>
                 <text class="help-row">content.pwb/&lt;content-id&gt; addresses a bundle directly by its BLAKE3 hash, with no registry lookup.</text>
             </view>
 
             <view class="help-card">
                 <text class="help-heading">Hosting and sharing</text>
                 <text class="help-row">1. Compile a site directory into a .pwb bundle and publish it from a node running with --host.</text>
-                <text class="help-row">2. Claim a .pwb name on register.plain, pointing it at the bundle's content ID.</text>
+                <text class="help-row">2. Claim a name (e.g. mysite.pwb or club.non) on register.plain, pointing it at the bundle's content ID.</text>
                 <text class="help-row">3. Share a plain://nodes.plain?connect=&lt;ip:port&gt;/&lt;pubkey&gt; link so peers can dial you.</text>
                 <text class="help-row">Once published, peers that index the bundle can serve search results and fetch it from you.</text>
             </view>

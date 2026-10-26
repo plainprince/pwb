@@ -35,6 +35,8 @@ pub enum LedgerError {
     },
     /// The `.plain` TLD is reserved for built-in system protocols.
     ReservedSystemDomain,
+    /// The name carries no TLD from the unofficial namespace.
+    UnknownTld,
     /// The domain is already registered.
     DomainAlreadyRegistered,
 }
@@ -84,6 +86,7 @@ impl fmt::Display for LedgerError {
             LedgerError::ReservedSystemDomain => {
                 write!(f, "reserved system domain: .plain TLD is restricted")
             }
+            LedgerError::UnknownTld => write!(f, "{}", pwb_core::system::unknown_tld_message()),
             LedgerError::DomainAlreadyRegistered => write!(f, "domain name already registered"),
         }
     }

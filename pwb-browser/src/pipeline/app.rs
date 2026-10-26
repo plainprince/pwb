@@ -434,7 +434,7 @@ impl BrowserApp {
 
     /// Execute a chrome button click. Returns `false` for actions this shell
     /// does not implement.
-    fn handle_chrome_action(&mut self, action: ChromeAction) -> bool {
+    pub(super) fn handle_chrome_action(&mut self, action: ChromeAction) -> bool {
         match action {
             ChromeAction::Back => {
                 if let Some(url) = self.shell.back() {
@@ -484,7 +484,7 @@ impl BrowserApp {
         true
     }
 
-    fn window_size(&self) -> (u32, u32) {
+    pub(super) fn window_size(&self) -> (u32, u32) {
         self.window
             .as_ref()
             .map(|window| {

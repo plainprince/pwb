@@ -25,6 +25,7 @@
 
 use crate::crypto::PublicKey;
 use std::net::SocketAddr;
+use std::sync::OnceLock;
 
 /// Reserved system domain names in the PlainWeb network.
 pub const RESERVED_SYSTEM_DOMAINS: &[&str] = &[
@@ -165,6 +166,58 @@ pub fn is_reserved_system_domain(domain: &str) -> bool {
     domain_part.ends_with(".plain") || RESERVED_SYSTEM_DOMAINS.contains(&domain_part)
 }
 
+/// The **unofficial** namespace: every TLD a participant may claim on
+/// `register.plain`. `.plain` stays reserved for the official system pages;
+/// anything not listed here is not part of PlainWeb's namespace at all.
+///
+/// The full list with per-TLD notes lives in `docs/tlds.md` — keep the two in
+/// sync when adding a TLD.
+pub const UNOFFICIAL_TLDS: &[&str] = &[
+    // PlainWeb's own unofficial namespace (the original).
+    "pwb", // Playful / purpose-flavoured namespaces.
+    "non", "yep", "lam", "arch",
+    // The legacy trio, resolvable inside PlainWeb like any other name here.
+    "org", "net", "com",
+];
+
+/// The unofficial TLD `name` ends in (lowercased input, matched case-insensitively),
+/// or `None` when the name carries no listed TLD — including `.plain` names and
+/// bare names without a dot.
+pub fn unofficial_tld(name: &str) -> Option<&'static str> {
+    let lower = name.trim().to_lowercase();
+    UNOFFICIAL_TLDS.iter().copied().find(|tld| {
+        lower
+            .strip_suffix(&format!(".{tld}"))
+            .is_some_and(|label| !label.is_empty())
+    })
+}
+
+/// Whether `name` is a claimable name of the unofficial namespace: it ends in
+/// one of [`UNOFFICIAL_TLDS`] with a non-empty label in front of the dot.
+///
+/// Reserved `.plain` names never pass this check either — `.plain` is not in
+/// the list — but callers should still report the reserved rule first, since
+/// it is the more specific error.
+pub fn is_unofficial_domain(name: &str) -> bool {
+    unofficial_tld(name).is_some()
+}
+
+/// The shared error text for a name outside the unofficial namespace, built
+/// once from [`UNOFFICIAL_TLDS`] so messages never drift from the list.
+pub fn unknown_tld_message() -> &'static str {
+    static MESSAGE: OnceLock<String> = OnceLock::new();
+    MESSAGE
+        .get_or_init(|| {
+            let list = UNOFFICIAL_TLDS
+                .iter()
+                .map(|tld| format!(".{tld}"))
+                .collect::<Vec<_>>()
+                .join(", ");
+            format!("unknown TLD: names must end in one of {list}")
+        })
+        .as_str()
+}
+
 /// Build a `nodes.plain` connection link from an address and public key.
 ///
 /// Format: `plain://nodes.plain?connect=<ip:port>/<pubkey_hex>`
@@ -198,6 +251,55 @@ mod tests {
         assert!(is_reserved_system_domain("devtools"));
         assert!(!is_reserved_system_domain("welcome.pwb"));
         assert!(!is_reserved_system_domain("mysite.pwb"));
+    }
+
+    #[test]
+    fn test_unofficial_tld_list_recognizes_every_listed_tld() {
+        for tld in UNOFFICIAL_TLDS {
+            let name = format!("site.{tld}");
+            assert_eq!(unofficial_tld(&name), Some(*tld), "{name} is claimable");
+            assert!(is_unofficial_domain(&name));
+            // Case-insensitive and whitespace-tolerant, like the registry.
+            assert!(is_unofficial_domain(&format!(
+                "  SITE.{}  ",
+                tld.to_uppercase()
+            )));
+            // A label must precede the dot: the bare TLD is not a name.
+            assert!(!is_unofficial_domain(&format!(".{tld}")));
+        }
+        // Nested labels stay claimable (matching the previous `.pwb` rule).
+        assert!(is_unofficial_domain("a.b.com"));
+    }
+
+    #[test]
+    fn test_non_namespace_names_are_not_unofficial_domains() {
+        for name in [
+            "search.plain",
+            "welcome.plain",
+            "devtools",
+            "mysite.xyz", // valid-looking but not on the list
+            "no-tld-at-all",
+            "",
+            ".",
+        ] {
+            assert!(!is_unofficial_domain(name), "{name} must not be claimable");
+            assert_eq!(unofficial_tld(name), None);
+        }
+        // `.plain` is reserved, not merely "another TLD".
+        assert!(!is_reserved_system_domain("site.non"));
+        assert!(is_reserved_system_domain("site.plain"));
+    }
+
+    #[test]
+    fn test_unknown_tld_message_lists_every_tld() {
+        let message = unknown_tld_message();
+        for tld in UNOFFICIAL_TLDS {
+            assert!(
+                message.contains(&format!(".{tld}")),
+                "message must mention .{tld}: {message}"
+            );
+        }
+        assert!(message.starts_with("unknown TLD"));
     }
 
     #[test]

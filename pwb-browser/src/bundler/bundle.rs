@@ -41,3 +41,72 @@ fn offset_ids(node: &mut PlainNode) {
         offset_ids(child);
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::fs;
+
+    const INDEX: &str = r#"<plain>
+    <head><title>Test Site</title></head>
+    <component name="Card"><view><text>card body</text></view></component>
+    <view class="hero"><text class="heading">Hello</text></view>
+</plain>"#;
+
+    fn site_dir(tag: &str) -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join(format!("pwb-bundler-{tag}-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    fn collect_ids(node: &PlainNode, out: &mut Vec<usize>) {
+        out.push(node.id);
+        for child in &node.children {
+            collect_ids(child, out);
+        }
+    }
+
+    #[test]
+    fn bundle_from_dir_offsets_every_id_including_components() {
+        let dir = site_dir("ok");
+        fs::write(dir.join("index.pml"), INDEX).unwrap();
+
+        let bundle = bundle_from_dir(&dir).expect("site bundles");
+        assert_eq!(bundle.title, "Test Site");
+
+        let mut ids = Vec::new();
+        collect_ids(&bundle.root_node, &mut ids);
+        assert!(!ids.is_empty());
+        assert!(
+            ids.iter().all(|id| *id >= BUNDLED_ID_OFFSET),
+            "page ids live in the bundler range: {ids:?}"
+        );
+
+        // Component bodies mount into the same DOM, so they are offset too.
+        assert!(
+            !bundle.components.is_empty(),
+            "the Card component was extracted"
+        );
+        for (name, body) in &bundle.components {
+            let mut ids = Vec::new();
+            collect_ids(body, &mut ids);
+            assert!(
+                ids.iter().all(|id| *id >= BUNDLED_ID_OFFSET),
+                "component {name} ids are offset: {ids:?}"
+            );
+        }
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn bundle_from_dir_reports_a_missing_site_as_invalid_manifest() {
+        let dir = std::env::temp_dir().join(format!("pwb-bundler-missing-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        match bundle_from_dir(&dir) {
+            Ok(_) => panic!("a missing directory must not bundle"),
+            Err(BundlerError::InvalidManifest(msg)) => assert!(!msg.is_empty()),
+            Err(other) => panic!("expected InvalidManifest, got {other:?}"),
+        }
+    }
+}

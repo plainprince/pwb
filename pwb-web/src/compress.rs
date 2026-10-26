@@ -23,3 +23,58 @@ pub fn decompress_bundle(bytes: &[u8]) -> Result<Bundle, WireError> {
 pub fn is_compressed(bytes: &[u8]) -> bool {
     Bundle::is_compressed(bytes)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use pwb_core::spec::{PlainNode, Tag};
+    use pwb_core::wire::CURRENT_VERSION;
+    use std::collections::HashMap;
+
+    fn sample_bundle() -> Bundle {
+        let mut root = PlainNode::new(0, Tag::Document);
+        let mut text = PlainNode::new(1, Tag::Text);
+        text.text_content = Some("hello plainweb".to_string());
+        root.children.push(text);
+        Bundle {
+            version: CURRENT_VERSION,
+            title: "sample".to_string(),
+            author_pubkey: None,
+            root_node: root,
+            script_payload: None,
+            components: HashMap::new(),
+            modules: HashMap::new(),
+        }
+    }
+
+    #[test]
+    fn compress_decompress_roundtrips() {
+        let bundle = sample_bundle();
+        let bytes = compress_bundle(&bundle);
+        assert!(is_compressed(&bytes), "PWBZ container flags as compressed");
+        let back = decompress_bundle(&bytes).expect("compressed bytes decode");
+        assert_eq!(back.title, bundle.title);
+        assert_eq!(back.serialize(), bundle.serialize());
+    }
+
+    #[test]
+    fn legacy_uncompressed_artifacts_still_load() {
+        let legacy = sample_bundle().serialize();
+        assert!(!is_compressed(&legacy), "legacy PWB1 bytes are not PWBZ");
+        let back = decompress_bundle(&legacy).expect("legacy bytes decode");
+        assert_eq!(back.serialize(), legacy);
+    }
+
+    #[test]
+    fn garbage_and_truncated_containers_are_rejected() {
+        assert!(!is_compressed(b"definitely not a bundle"));
+        assert!(decompress_bundle(b"definitely not a bundle").is_err());
+
+        let mut cut = compress_bundle(&sample_bundle());
+        cut.truncate(20);
+        assert!(
+            decompress_bundle(&cut).is_err(),
+            "truncated PWBZ is rejected"
+        );
+    }
+}
