@@ -60,6 +60,21 @@ fn bundle_bytes(title: &str, body: &str) -> Vec<u8> {
     .serialize()
 }
 
+/// Poll until `cond` holds or `timeout` elapses. Waiting on the real
+/// condition instead of a fixed delay keeps these loopback tests honest on a
+/// loaded CI runner, where a handshake or a batched write can take far longer
+/// than the sleep it was originally given.
+async fn wait_for<F: Fn() -> bool>(cond: F, timeout: Duration) -> bool {
+    let deadline = std::time::Instant::now() + timeout;
+    while std::time::Instant::now() < deadline {
+        if cond() {
+            return true;
+        }
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
+    cond()
+}
+
 #[tokio::test]
 async fn test_term_sharded_index_is_queryable_across_nodes_with_receipt() {
     let kp_a = Keypair::generate();
@@ -160,7 +175,20 @@ async fn test_large_document_postings_arrive_in_batches() {
     engine_a
         .launch_connection(&link_b)
         .expect("A connects to B");
-    tokio::time::sleep(Duration::from_millis(250)).await;
+    // Indexing routes postings to the shard peers it can already see, so wait
+    // for the handshake rather than guessing how long it takes.
+    assert!(
+        wait_for(
+            || engine_a
+                .peer_table()
+                .lock()
+                .unwrap()
+                .contains_key(&kp_b.public),
+            Duration::from_secs(10),
+        )
+        .await,
+        "A must know B before postings can be sharded to it"
+    );
 
     // 600 distinct non-trivial terms: well past the 256-message burst bucket.
     let body: String = (0..600)
@@ -169,14 +197,23 @@ async fn test_large_document_postings_arrive_in_batches() {
         .join(" ");
     let bytes = bundle_bytes("Large Index", &body);
     service_a.index_and_publish(&bytes).expect("indexed");
-    tokio::time::sleep(Duration::from_millis(500)).await;
 
+    // Batched delivery over loopback takes as long as it takes on a busy
+    // machine; wait for both ends of the batch instead of a fixed delay.
     assert!(
-        !service_b.index().postings_wire("uniqueterm0000").is_empty(),
+        wait_for(
+            || !service_b.index().postings_wire("uniqueterm0000").is_empty(),
+            Duration::from_secs(10),
+        )
+        .await,
         "the first posting batch must reach the shard peer"
     );
     assert!(
-        !service_b.index().postings_wire("uniqueterm0599").is_empty(),
+        wait_for(
+            || !service_b.index().postings_wire("uniqueterm0599").is_empty(),
+            Duration::from_secs(10),
+        )
+        .await,
         "the final posting batch must not be dropped by the rate limiter"
     );
 
