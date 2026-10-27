@@ -29,6 +29,19 @@ fn test_pwb_connect_records_pending_link() {
     );
 }
 
+#[test]
+fn test_pwb_chat_send_records_pending_message() {
+    let handle = test_handle();
+    let peer = "0000000000000000000000000000000000000000000000000000000000000001";
+    execute_script(&handle, &format!("__pwb_chat_send('{peer}', 'hi there');"))
+        .expect("script runs");
+    assert_eq!(
+        handle.pending_chat.borrow().clone(),
+        Some((peer.to_string(), "hi there".to_string())),
+        "the composer action reaches the pipeline as (peer, text)"
+    );
+}
+
 fn test_handle() -> DomHandle {
     let dom = Dom {
         title: "Probe".to_string(),

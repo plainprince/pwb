@@ -98,6 +98,11 @@ fn print_help() {
     println!("      --host <dir|file>      Publish a site directory or .pwb bundle");
     println!("      --search <query>       Run one federated query over the live swarm and exit");
     println!("      --private-search <query>  Run one query over onion circuits and exit");
+    println!(
+        "      --chat <peer_hex>       Open an E2EE chat REPL with a peer (runs with the daemon)"
+    );
+    println!("      --chat-via <route>      REPL send route: direct (default), onion, or auto");
+    println!("      --room <name>           Join a public room and open a REPL to post in it");
     println!("      --demo                 Run the synthetic workload instead of real work");
     println!();
     println!("Domains and credits:");
@@ -160,6 +165,9 @@ async fn main() {
     let mut demo_mode = false;
     let mut search_query: Option<String> = None;
     let mut private_search_query: Option<String> = None;
+    let mut chat_peer_arg: Option<String> = None;
+    let mut chat_via_arg: Option<String> = None;
+    let mut room_arg: Option<String> = None;
     let mut attested_claim: Option<String> = None;
     let mut blind_claim: Option<String> = None;
     let mut withdraw_amount: Option<u64> = None;
@@ -435,6 +443,33 @@ async fn main() {
                     std::process::exit(1);
                 }
             }
+            "--chat" => {
+                if arg_index + 1 < args.len() {
+                    chat_peer_arg = Some(args[arg_index + 1].clone());
+                    arg_index += 2;
+                } else {
+                    eprintln!("Error: --chat requires a peer public key (64 hex characters)");
+                    std::process::exit(1);
+                }
+            }
+            "--chat-via" => {
+                if arg_index + 1 < args.len() {
+                    chat_via_arg = Some(args[arg_index + 1].clone());
+                    arg_index += 2;
+                } else {
+                    eprintln!("Error: --chat-via requires a route (direct, onion, or auto)");
+                    std::process::exit(1);
+                }
+            }
+            "--room" => {
+                if arg_index + 1 < args.len() {
+                    room_arg = Some(args[arg_index + 1].clone());
+                    arg_index += 2;
+                } else {
+                    eprintln!("Error: --room requires a room name (up to 32 characters)");
+                    std::process::exit(1);
+                }
+            }
             "--attested-claim" => {
                 if arg_index + 1 < args.len() {
                     attested_claim = Some(args[arg_index + 1].clone());
@@ -579,6 +614,43 @@ async fn main() {
             std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".pwb").join("data"))
         })
         .unwrap_or_else(|| PathBuf::from("pwb-data"));
+
+    // `--chat <hex>` pairs the stdin REPL below with one peer identity.
+    let chat_peer = chat_peer_arg.as_deref().map(|hex| {
+        parse_public_key(hex).unwrap_or_else(|| {
+            eprintln!("Error: --chat requires a 64-hex-character peer public key");
+            std::process::exit(1);
+        })
+    });
+
+    // `--chat-via` picks how REPL lines travel: sealed straight to the peer,
+    // across a three-hop circuit, or a circuit when one can be built (with a
+    // visible note when it falls back to revealing both addresses).
+    let chat_via = chat_via_arg.as_deref().map(str::to_ascii_lowercase);
+    let chat_route = match chat_via.as_deref() {
+        None | Some("direct") => pwb_node::chat::ChatRoute::Direct,
+        Some("onion") => pwb_node::chat::ChatRoute::Onion,
+        Some("auto") => pwb_node::chat::ChatRoute::Auto,
+        Some(other) => {
+            eprintln!("Error: --chat-via must be direct, onion, or auto (got {other})");
+            std::process::exit(1);
+        }
+    };
+
+    // `--room <name>` opens a second REPL, this one posting to a public
+    // room. `--chat` and `--room` both own stdin, so run one at a time.
+    let room_arg = room_arg.map(|name| {
+        let normalized = name.trim().to_lowercase();
+        if !pwb_core::net::is_valid_room_name(&normalized) {
+            eprintln!("Error: --room needs up to 32 letters, digits, - _ . (got {name:?})");
+            std::process::exit(1);
+        }
+        normalized
+    });
+    if room_arg.is_some() && chat_peer.is_some() {
+        eprintln!("Error: --chat and --room each open a REPL; run one at a time");
+        std::process::exit(1);
+    }
 
     let identity_path = identity_path
         .or_else(IdentityManager::default_identity_path)
@@ -1032,6 +1104,84 @@ async fn main() {
             }
         }
     });
+
+    // `chat.plain`: E2EE chat with this node's identity. The daemon
+    // receives, stores, and prints inbound chats; transcripts persist under
+    // `--data` (`chat.json`) so conversations survive a restart, and
+    // `--chat <peer>` adds a stdin REPL so an operator can answer them. The
+    // interactive composer lives on the chat.plain page (rendered by the
+    // browser's embedded node).
+    let chat = pwb_node::chat::ChatService::with_data_dir(engine.clone(), &data_dir);
+    let chat_handle = tokio::spawn(Arc::clone(&chat).run());
+    if let Some(peer) = chat_peer {
+        println!(
+            "[Chat] REPL with {} (via {}) — type a message, Ctrl-D to stop",
+            peer.to_hex(),
+            match chat_route {
+                pwb_node::chat::ChatRoute::Direct => "direct",
+                pwb_node::chat::ChatRoute::Onion => "onion",
+                pwb_node::chat::ChatRoute::Auto => "auto",
+            }
+        );
+        let chat = Arc::clone(&chat);
+        tokio::task::spawn_blocking(move || {
+            use std::io::BufRead;
+            for line in std::io::stdin().lock().lines() {
+                let Ok(line) = line else { break };
+                let line = line.trim();
+                if line.is_empty() {
+                    continue;
+                }
+                // Failures are recorded on the service (and shown by the
+                // page); echo them here too, since a headless operator has
+                // no page to look at.
+                if let Err(error) = chat.send_via(&peer, line, chat_route) {
+                    eprintln!("[Chat] {error}");
+                }
+            }
+            println!("[Chat] Chat input closed; the node keeps running until Ctrl+C.");
+        });
+    }
+
+    // Public rooms (`chat.plain?room=`): every node joins the default room
+    // so the square has members to flood through and history to serve, and
+    // prints what arrives. `--room <name>` adds a stdin REPL for posting to
+    // a room, the headless counterpart to the browser's composer.
+    let rooms = pwb_node::room::RoomService::with_data_dir(
+        engine.clone(),
+        identity.keypair.clone(),
+        &data_dir,
+    );
+    let room_handle = tokio::spawn(Arc::clone(&rooms).run());
+    if let Err(error) = rooms.join(pwb_node::room::DEFAULT_ROOM) {
+        eprintln!("[Room] {error}");
+    }
+    if let Some(room) = room_arg.as_deref() {
+        if let Err(error) = rooms.join(room) {
+            eprintln!("[Room] {error}");
+        } else {
+            println!("[Room] REPL in {room} — type a message, Ctrl-D to stop");
+            let rooms = Arc::clone(&rooms);
+            let room = room.to_string();
+            tokio::task::spawn_blocking(move || {
+                use std::io::BufRead;
+                for line in std::io::stdin().lock().lines() {
+                    let Ok(line) = line else { break };
+                    let line = line.trim();
+                    if line.is_empty() {
+                        continue;
+                    }
+                    // Failures are recorded on the service (and shown by the
+                    // page); echo them here too, since a headless operator
+                    // has no page to look at.
+                    if let Err(error) = rooms.post(&room, line) {
+                        eprintln!("[Room] {error}");
+                    }
+                }
+                println!("[Room] Room input closed; the node keeps running until Ctrl+C.");
+            });
+        }
+    }
 
     // Answer onion-delivered system requests through their return circuit, so
     // a private search reaches this node without exposing the requester's
@@ -1690,6 +1840,8 @@ async fn main() {
     domain_handle.abort();
     federation_handle.abort();
     system_handle.abort();
+    chat_handle.abort();
+    room_handle.abort();
     attestation_handle.abort();
     relay_handle.abort();
     onion_handle.abort();

@@ -32,16 +32,16 @@ two crates.
 
 Centralize native `.plain` system domain handlers inside `pwb-core::system`:
 
-- `search.plain`, `devtools.plain`, `register.plain`, `gossip.plain`, `nodes.plain`, `network.plain`, `help.plain`
+- `search.plain`, `devtools.plain`, `register.plain`, `gossip.plain`, `nodes.plain`, `network.plain`, `help.plain`, `chat.plain`
 - Single source of truth for:
   - Reserved-domain list
   - `.plain` = official namespace rule (system protocols + shipped content pages); `.pwb` = unofficial user namespace
-  - `plain://` URL parsing (`SystemUrl` / `SystemDomain` with `q=` / `connect=` parameter extraction)
+  - `plain://` URL parsing (`SystemUrl` / `SystemDomain` with `q=` / `connect=` / `peer=` / `room=` parameter extraction)
   - `nodes.plain` connection-link codec (`build_connection_link` / `parse_connection_link`, previously inlined in `NodeEngine`)
 
 ### Cross-crate delegation
 
 - `pwb-node::domain` re-exports the canonical reserved-domain list and rule
 - `NodeEngine`'s link methods delegate to `pwb-core::system`
-- `pwb-node::system` renders every native domain, including `gossip.plain`, `nodes.plain` (connection links render as a connect card), `network.plain` (live addresses, peers, and local-service counts), and `help.plain`
-- `pwb-browser`'s resolver dispatches all seven domains through the core parser; `network.plain` receives a `NetworkSnapshot` (listen/discovery/STUN addresses plus the live peer table) from the owning app
+- `pwb-node::system` renders every native domain, including `gossip.plain`, `nodes.plain` (connection links render as a connect card), `network.plain` (live addresses, peers, and local-service counts), `chat.plain` (peer picker and transcript composer over `ChatService`, routed direct or over an onion circuit per the browser's privacy mode, with daemon transcripts persisted under `--data`; `chat.plain?room=<name>` renders a public room over `RoomService` — signed, flooded posts, roster, composer), and `help.plain`
+- `pwb-browser`'s resolver dispatches all eight domains through the core parser; `network.plain` receives a `NetworkSnapshot` (listen/discovery/STUN addresses plus the live peer table), `chat.plain` a `ChatSnapshot` (transcripts plus the last send error), and `chat.plain?room=` a `RoomSnapshot` (room history, roster, last failure) from the owning app

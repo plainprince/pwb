@@ -19,9 +19,10 @@ use crate::telemetry::Metrics;
 
 use crate::onion::{CoverConfig, OnionCell};
 
+use super::e2ee::{self, E2eeState};
 use super::envelope::{self, Reassembler, ReplayGuard, MAX_MESSAGE_SIZE};
 use super::loops;
-use super::messages::{NetworkError, NetworkMessage, OutgoingDatagram};
+use super::messages::{NetworkError, NetworkMessage, OutgoingDatagram, SendFlags};
 use super::onion_transport::{
     self, OnionAssembly, OnionKind, OnionRequest, OnionReturnPath, RelayEvent,
 };
@@ -208,6 +209,9 @@ pub struct NodeEngine {
     /// Opt-in decoy dispatch. `None` (the default) sends no cover traffic;
     /// enabling it costs bandwidth and is a local privacy decision.
     cover: Mutex<Option<CoverConfig>>,
+    /// Anti-replay state for inbound [`NetworkMessage::Sealed`] payloads
+    /// opened with [`SendFlags::E2EE`].
+    e2ee: Arc<E2eeState>,
 }
 
 impl NodeEngine {
@@ -245,6 +249,7 @@ impl NodeEngine {
             relay_routes: Arc::new(Mutex::new(HashMap::new())),
             punch_waiters: Arc::new(Mutex::new(HashMap::new())),
             cover: Mutex::new(None),
+            e2ee: Arc::new(E2eeState::default()),
         }
     }
 
@@ -352,6 +357,7 @@ impl NodeEngine {
         let punch_waiters_for_receiver = Arc::clone(&self.punch_waiters);
         let relay_routes_for_handler = Arc::clone(&self.relay_routes);
         let advertised_addr = self.advertised_addr().unwrap_or(bound_addr);
+        let e2ee_for_receiver = Arc::clone(&self.e2ee);
 
         // Spawn message handler loop (processes inbound messages and forwards
         // them to application subscribers).
@@ -423,6 +429,7 @@ impl NodeEngine {
                     local_key,
                     local_keypair,
                     local_dh,
+                    e2ee: e2ee_for_receiver,
                     metrics: metrics_for_receiver,
                     relay_routes: relay_routes_for_receiver,
                     punch_waiters: punch_waiters_for_receiver,
@@ -563,7 +570,22 @@ impl NodeEngine {
     /// key at the peer's address). Returns [`NetworkError::PeerNotFound`] when
     /// the peer is not in the peer table.
     pub fn send_to(&self, peer: &PublicKey, message: NetworkMessage) -> Result<(), NetworkError> {
+        self.send_to_with(peer, message, SendFlags::EMPTY)
+    }
+
+    /// [`Self::send_to`] with send flags. Passing [`SendFlags::E2EE`] seals
+    /// `message` for the peer before it is serialized (see
+    /// `pwb-core::net::e2ee`); the receiver opens it and delivers the inner
+    /// message to its subscribers as if it had arrived unsealed.
+    pub fn send_to_with(
+        &self,
+        peer: &PublicKey,
+        message: NetworkMessage,
+        flags: SendFlags,
+    ) -> Result<(), NetworkError> {
         let key = *peer;
+        // Resolve the peer first so an unknown peer reports PeerNotFound
+        // before any per-message crypto work.
         let (addr, via) = {
             let peer_table = self.peer_table.lock().unwrap();
             let Some(info) = peer_table.get(&key) else {
@@ -573,6 +595,11 @@ impl NodeEngine {
             (info.address, via)
         };
 
+        let message = if flags.contains(SendFlags::E2EE) {
+            self.seal_message(peer, message)?
+        } else {
+            message
+        };
         let datagrams = self.encode_message_for(peer, &message)?;
         match via {
             Some(relay) => self.send_relayed(&relay, peer, addr, datagrams),
@@ -623,6 +650,20 @@ impl NodeEngine {
         Ok(())
     }
 
+    /// Seal `message` for `recipient` as a [`NetworkMessage::Sealed`] wrapper.
+    ///
+    /// This is the composable E2EE primitive: use it directly when the flag
+    /// form does not apply, e.g.
+    /// `engine.send_onion_to(addr, &path, &engine.seal_message(&target, msg)?)`
+    /// to carry an end-to-end-encrypted payload across an onion circuit.
+    pub fn seal_message(
+        &self,
+        recipient: &PublicKey,
+        message: NetworkMessage,
+    ) -> Result<NetworkMessage, NetworkError> {
+        e2ee::seal(&self.config.keypair.public, recipient, &message)
+    }
+
     /// Broadcast a message to all connected peers.
     ///
     /// Encodes one copy per recipient (each with its own ephemeral key), then
@@ -630,6 +671,16 @@ impl NodeEngine {
     /// Like [`Self::send_to`], nothing is delivered
     /// locally: the sender already knows the message it just sent.
     pub fn broadcast(&self, message: NetworkMessage) -> Result<(), NetworkError> {
+        self.broadcast_with(message, SendFlags::EMPTY)
+    }
+
+    /// [`Self::broadcast`] with send flags (e.g. [`SendFlags::E2EE`]). Each
+    /// recipient gets its own sealed ciphertext.
+    pub fn broadcast_with(
+        &self,
+        message: NetworkMessage,
+        flags: SendFlags,
+    ) -> Result<(), NetworkError> {
         let peers = {
             let peer_table = self.peer_table.lock().unwrap();
             peer_table.keys().copied().collect::<Vec<_>>()
@@ -638,7 +689,7 @@ impl NodeEngine {
             // Each peer has its own ciphertext, and relayed peers go through
             // their relay rather than being sent a direct datagram they cannot
             // receive.
-            self.send_to(&public_key, message.clone())?;
+            self.send_to_with(&public_key, message.clone(), flags)?;
         }
         Ok(())
     }
@@ -1574,6 +1625,7 @@ impl Clone for NodeEngine {
             relay_routes: Arc::clone(&self.relay_routes),
             punch_waiters: Arc::clone(&self.punch_waiters),
             cover: Mutex::new(self.cover.lock().unwrap().clone()),
+            e2ee: Arc::clone(&self.e2ee),
         }
     }
 }

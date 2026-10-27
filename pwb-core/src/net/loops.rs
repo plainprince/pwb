@@ -18,10 +18,12 @@ use crate::discovery::unix_time;
 use crate::onion::{CoverConfig, CoverDispatch, OnionAction, OnionCell, CELL_SIZE, MIN_HOPS};
 use crate::telemetry::Metrics;
 
+use super::e2ee::{self, E2eeState};
 use super::engine::{NodeConfig, PeerInfo, PEER_TIMEOUT};
 use super::envelope::{self, Reassembler, ReplayGuard};
 use super::messages::{
-    decode_punch_probe, encode_punch_probe, NetworkMessage, OutgoingDatagram, PUNCH_MAGIC,
+    decode_punch_probe, encode_punch_probe, NetworkMessage, OutgoingDatagram, RoomPostWire,
+    MAX_CHAT_TEXT, PUNCH_MAGIC,
 };
 use super::onion_transport::{self, OnionAssembly, OnionKind, OnionRequest, RelayEvent};
 
@@ -272,6 +274,8 @@ pub(super) struct InboundState {
     pub routing: Arc<Mutex<RoutingTable>>,
     pub local_key: PublicKey,
     pub local_keypair: crate::crypto::Keypair,
+    /// Anti-replay state for inbound [`NetworkMessage::Sealed`] payloads.
+    pub e2ee: Arc<E2eeState>,
     pub local_dh: DhKeypair,
     pub metrics: Arc<Metrics>,
     pub relay_routes: Arc<Mutex<HashMap<PublicKey, PublicKey>>>,
@@ -624,7 +628,7 @@ pub(super) async fn receiver_loop(
                     continue; // replayed message
                 }
 
-                let Ok(decoded) =
+                let Ok(mut decoded) =
                     serde_json::from_slice::<NetworkMessage>(&message.bytes)
                 else {
                     state.metrics.record_invalid();
@@ -641,6 +645,27 @@ pub(super) async fn receiver_loop(
                 // index postings) must carry a valid one too, so a relay
                 // cannot rewrite content attributed to the publisher.
                 if !payload_signature_valid(&decoded) {
+                    state.metrics.record_invalid();
+                    continue;
+                }
+
+                // E2EE: open a sealed payload here, where the local identity
+                // and the anti-replay cache live. Everything downstream —
+                // subscribers, the handler, relay bookkeeping — sees only the
+                // inner message; a payload that will not open is dropped.
+                if matches!(decoded, NetworkMessage::Sealed { .. }) {
+                    match open_sealed(decoded, &message.sender, &state) {
+                        Some(inner) => {
+                            decoded = inner;
+                            state.metrics.record_e2ee_opened();
+                        }
+                        None => {
+                            state.metrics.record_e2ee_dropped();
+                            continue;
+                        }
+                    }
+                }
+                if !payload_well_formed(&decoded) {
                     state.metrics.record_invalid();
                     continue;
                 }
@@ -693,14 +718,25 @@ pub(super) async fn receiver_loop(
                             {
                                 continue;
                             }
-                            let Ok(inner) =
+                            let Ok(mut inner) =
                                 serde_json::from_slice::<NetworkMessage>(&inner_message.bytes)
                             else {
                                 continue;
                             };
+                            // The originator may seal payloads end-to-end:
+                            // open them here before the shared checks below.
+                            if matches!(inner, NetworkMessage::Sealed { .. }) {
+                                let Some(opened) =
+                                    open_sealed(inner, &inner_message.sender, &state)
+                                else {
+                                    continue;
+                                };
+                                inner = opened;
+                            }
                             if matches!(inner, NetworkMessage::RelayDeliver { .. })
                                 || !claimed_identity_matches(&inner, &inner_message.sender)
                                 || !payload_signature_valid(&inner)
+                                || !payload_well_formed(&inner)
                             {
                                 continue;
                             }
@@ -847,12 +883,25 @@ fn handle_onion_datagram(datagram: &[u8], from: SocketAddr, state: &InboundState
             let Some(decoded) = onion_transport::decode_message(&inner) else {
                 return;
             };
-            let Ok(message) = serde_json::from_slice::<NetworkMessage>(&decoded.message) else {
+            let Ok(mut message) = serde_json::from_slice::<NetworkMessage>(&decoded.message) else {
                 return;
             };
             if !claimed_identity_matches(&message, &decoded.sender)
                 || !payload_signature_valid(&message)
             {
+                return;
+            }
+            // The originator may seal the payload end-to-end: the exit only
+            // routes it, so open it here before anything downstream sees it.
+            if matches!(message, NetworkMessage::Sealed { .. }) {
+                let Some(opened) = open_sealed(message, &decoded.sender, state) else {
+                    state.metrics.record_e2ee_dropped();
+                    return;
+                };
+                message = opened;
+                state.metrics.record_e2ee_opened();
+            }
+            if !payload_well_formed(&message) {
                 return;
             }
 
@@ -942,7 +991,12 @@ fn claimed_identity_matches(message: &NetworkMessage, signer: &PublicKey) -> boo
         | NetworkMessage::WithdrawCommit { sender, .. }
         | NetworkMessage::WithdrawSign { sender, .. }
         | NetworkMessage::FindNode { sender, .. }
-        | NetworkMessage::Nodes { sender, .. } => sender == signer,
+        | NetworkMessage::Nodes { sender, .. }
+        | NetworkMessage::Chat { sender, .. }
+        | NetworkMessage::ChatAck { sender, .. }
+        | NetworkMessage::RoomSubscribe { sender, .. }
+        | NetworkMessage::RoomSync { sender, .. }
+        | NetworkMessage::RoomHistory { sender, .. } => sender == signer,
         NetworkMessage::CheckIndexProof { proof, .. } => proof.miner == *signer,
         NetworkMessage::ProofVerdict { verifier, .. } => verifier == signer,
         NetworkMessage::ClaimDomainAttested { owner, .. }
@@ -1032,8 +1086,68 @@ fn payload_signature_valid(message: &NetworkMessage) -> bool {
                 *registered_at_epoch,
             ),
         ),
+        // A room post is re-signed by every forwarder, so authorship lives
+        // in the post's own signature; a history reply inherits that rule
+        // entry by entry.
+        NetworkMessage::RoomPost(post) => post.verify(),
+        NetworkMessage::RoomHistory { posts, .. } => posts.iter().all(RoomPostWire::verify),
         _ => true,
     }
+}
+
+/// Shape checks that are not signatures: a chat payload must respect the
+/// length cap, and a room message the room-name and history caps, so one peer
+/// cannot push megabytes of text into an application handler through an
+/// otherwise valid envelope.
+fn payload_well_formed(message: &NetworkMessage) -> bool {
+    match message {
+        NetworkMessage::Chat { text, .. } => text.len() <= MAX_CHAT_TEXT,
+        NetworkMessage::RoomPost(post) => {
+            post.text.len() <= MAX_CHAT_TEXT
+                && crate::net::is_valid_room_name(&post.room)
+                && post.hops > 0
+        }
+        NetworkMessage::RoomSubscribe { room, .. } | NetworkMessage::RoomSync { room, .. } => {
+            crate::net::is_valid_room_name(room)
+        }
+        NetworkMessage::RoomHistory { room, posts, .. } => {
+            crate::net::is_valid_room_name(room)
+                && posts.len() <= crate::net::ROOM_HISTORY_MAX
+                && posts.iter().all(|post| {
+                    post.text.len() <= MAX_CHAT_TEXT && crate::net::is_valid_room_name(&post.room)
+                })
+        }
+        _ => true,
+    }
+}
+
+/// Open an E2EE-sealed message with the local identity and validate the inner
+/// payload against the envelope signer. Non-sealed messages pass through
+/// unchanged. Returns `None` when the sealed payload fails to open (wrong
+/// recipient, tamper, replay, nested seal) or when the inner message does not
+/// satisfy the same identity/signature/shape checks as an unsealed one.
+fn open_sealed(
+    message: NetworkMessage,
+    signer: &PublicKey,
+    state: &InboundState,
+) -> Option<NetworkMessage> {
+    if !matches!(message, NetworkMessage::Sealed { .. }) {
+        return Some(message);
+    }
+    let inner = e2ee::open(
+        &state.local_key,
+        &state.local_dh,
+        signer,
+        &message,
+        &state.e2ee,
+    )?;
+    if !claimed_identity_matches(&inner, signer)
+        || !payload_signature_valid(&inner)
+        || !payload_well_formed(&inner)
+    {
+        return None;
+    }
+    Some(inner)
 }
 
 /// Process an incoming network message.

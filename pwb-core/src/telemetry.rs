@@ -49,6 +49,8 @@ pub struct Metrics {
     pub relay_messages_delivered: AtomicU64,
     pub hole_punches: AtomicU64,
     pub hole_punch_failures: AtomicU64,
+    pub e2ee_messages_opened: AtomicU64,
+    pub e2ee_messages_dropped: AtomicU64,
 }
 
 impl Metrics {
@@ -77,6 +79,8 @@ impl Metrics {
             relay_messages_delivered: AtomicU64::new(0),
             hole_punches: AtomicU64::new(0),
             hole_punch_failures: AtomicU64::new(0),
+            e2ee_messages_opened: AtomicU64::new(0),
+            e2ee_messages_dropped: AtomicU64::new(0),
         }
     }
 
@@ -168,6 +172,17 @@ impl Metrics {
         }
     }
 
+    /// An inbound sealed `NetworkMessage::Sealed` payload opened and delivered.
+    pub fn record_e2ee_opened(&self) {
+        Self::bump(&self.e2ee_messages_opened, 1);
+    }
+
+    /// An inbound sealed payload dropped: wrong recipient, tamper, replay,
+    /// nesting, or an inner payload that failed its checks.
+    pub fn record_e2ee_dropped(&self) {
+        Self::bump(&self.e2ee_messages_dropped, 1);
+    }
+
     /// A stable, serializable view of every counter plus process uptime.
     pub fn snapshot(&self) -> MetricsSnapshot {
         MetricsSnapshot {
@@ -194,6 +209,8 @@ impl Metrics {
             relay_messages_delivered: self.relay_messages_delivered.load(Ordering::Relaxed),
             hole_punches: self.hole_punches.load(Ordering::Relaxed),
             hole_punch_failures: self.hole_punch_failures.load(Ordering::Relaxed),
+            e2ee_messages_opened: self.e2ee_messages_opened.load(Ordering::Relaxed),
+            e2ee_messages_dropped: self.e2ee_messages_dropped.load(Ordering::Relaxed),
         }
     }
 
@@ -255,6 +272,14 @@ impl Metrics {
                 "pwb_hole_punch_failures_total",
                 snapshot.hole_punch_failures,
             ),
+            (
+                "pwb_e2ee_messages_opened_total",
+                snapshot.e2ee_messages_opened,
+            ),
+            (
+                "pwb_e2ee_messages_dropped_total",
+                snapshot.e2ee_messages_dropped,
+            ),
         ];
         let mut out = String::new();
         for (name, value) in gauges {
@@ -299,6 +324,8 @@ pub struct MetricsSnapshot {
     pub relay_messages_delivered: u64,
     pub hole_punches: u64,
     pub hole_punch_failures: u64,
+    pub e2ee_messages_opened: u64,
+    pub e2ee_messages_dropped: u64,
 }
 
 /// Whether structured JSON logging was requested for this process.

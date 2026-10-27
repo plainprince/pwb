@@ -1566,3 +1566,153 @@ async fn cover_traffic_is_opt_in_and_emits_decoy_cells() {
         node.stop().await;
     }
 }
+
+/// `SendFlags::E2EE` seals the payload for its recipient: the receiving
+/// engine opens it before dispatch, so the peer's subscribers get the inner
+/// message (never the `Sealed` wrapper), and the opened counter ticks. Any
+/// message type can opt in — the flag is transport-level, not chat-specific.
+#[tokio::test]
+async fn test_e2ee_flag_delivers_the_inner_message_to_subscribers() {
+    fn engine(kp: Keypair) -> NodeEngine {
+        NodeEngine::new(NodeConfig {
+            listen_addr: "127.0.0.1:0".parse().unwrap(),
+            keypair: kp,
+            bootstrap_peers: Vec::new(),
+            stun_server: None,
+            max_peers: 100,
+            heartbeat_interval: Duration::from_secs(30),
+        })
+    }
+
+    let kp_a = Keypair::generate();
+    let kp_b = Keypair::generate();
+    let a = engine(kp_a.clone());
+    let b = engine(kp_b.clone());
+    a.start().await.unwrap();
+    b.start().await.unwrap();
+    let addr_b = b.local_addr().unwrap().unwrap();
+
+    let mut rx_b = b.subscribe();
+    a.dial(addr_b, kp_b.public, Duration::from_secs(2))
+        .await
+        .expect("A joins B's table");
+
+    let chat = NetworkMessage::Chat {
+        sender: kp_a.public,
+        id: [1u8; 16],
+        sent_at: 1_700_000_000,
+        text: "sealed hello".to_string(),
+    };
+    let query = NetworkMessage::SearchQuery {
+        query: "sealed query".to_string(),
+        sender: kp_a.public,
+    };
+    a.send_to_with(&kp_b.public, chat.clone(), SendFlags::E2EE)
+        .expect("sealed chat sends");
+    a.send_to_with(&kp_b.public, query.clone(), SendFlags::E2EE)
+        .expect("sealed query sends");
+
+    let seen = tokio::time::timeout(Duration::from_secs(3), async {
+        let mut seen = Vec::new();
+        while !(seen.contains(&chat) && seen.contains(&query)) {
+            match rx_b.recv().await {
+                Some((_, message)) => seen.push(message),
+                None => break,
+            }
+        }
+        seen
+    })
+    .await
+    .expect("both sealed messages arrive");
+
+    assert!(
+        seen.contains(&chat),
+        "the inner chat message arrives unsealed: {seen:?}"
+    );
+    assert!(
+        seen.contains(&query),
+        "a non-chat message round-trips through the same flag: {seen:?}"
+    );
+    assert!(
+        !seen
+            .iter()
+            .any(|m| matches!(m, NetworkMessage::Sealed { .. })),
+        "subscribers never handle the Sealed wrapper"
+    );
+    assert!(
+        b.metrics().snapshot().e2ee_messages_opened >= 2,
+        "the opened counter tracks sealed deliveries"
+    );
+
+    a.stop().await;
+    b.stop().await;
+}
+
+/// A sealed payload whose inner identity disagrees with the envelope signer
+/// is dropped: sealing cannot launder a forged sender, and the drop is
+/// counted.
+#[tokio::test]
+async fn test_e2ee_rejects_a_forged_inner_sender() {
+    fn engine(kp: Keypair) -> NodeEngine {
+        NodeEngine::new(NodeConfig {
+            listen_addr: "127.0.0.1:0".parse().unwrap(),
+            keypair: kp,
+            bootstrap_peers: Vec::new(),
+            stun_server: None,
+            max_peers: 100,
+            heartbeat_interval: Duration::from_secs(30),
+        })
+    }
+
+    let kp_a = Keypair::generate();
+    let kp_b = Keypair::generate();
+    let stranger = Keypair::generate();
+    let a = engine(kp_a.clone());
+    let b = engine(kp_b.clone());
+    a.start().await.unwrap();
+    b.start().await.unwrap();
+    let addr_b = b.local_addr().unwrap().unwrap();
+
+    let mut rx_b = b.subscribe();
+    a.dial(addr_b, kp_b.public, Duration::from_secs(2))
+        .await
+        .expect("A joins B's table");
+
+    // A seals a chat that claims to come from someone else: the crypto opens
+    // fine, but the inner sender must equal the envelope signer.
+    let forged = NetworkMessage::Chat {
+        sender: stranger.public,
+        id: [2u8; 16],
+        sent_at: 0,
+        text: "not from A".to_string(),
+    };
+    let sealed = a
+        .seal_message(&kp_b.public, forged)
+        .expect("A seals its own message");
+    a.send_to(&kp_b.public, sealed)
+        .expect("the pre-sealed wrapper sends");
+
+    let delivered = tokio::time::timeout(Duration::from_millis(400), async {
+        loop {
+            match rx_b.recv().await {
+                Some((_, message @ NetworkMessage::Chat { .. })) => {
+                    return Some(message);
+                }
+                Some(_) => continue,
+                None => return None,
+            }
+        }
+    })
+    .await;
+    assert!(
+        delivered.is_err(),
+        "a sealed message with a forged inner sender must never be delivered"
+    );
+    assert!(
+        b.metrics().snapshot().e2ee_messages_dropped >= 1,
+        "the drop is counted"
+    );
+
+    a.stop().await;
+    b.stop().await;
+}

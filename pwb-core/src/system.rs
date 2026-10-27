@@ -17,6 +17,7 @@
 //! - `nodes.plain`   — peer node routing, health registry, and connection links.
 //! - `network.plain` — this node's addresses, peer table, and local services.
 //! - `help.plain`    — system-domain index plus namespace and credit rules.
+//! - `chat.plain`    — direct end-to-end-encrypted chat with another node.
 //!
 //! Page *rendering* for these domains lives in `pwb-node::system` (it needs
 //! `pwb-web`'s PML/PSS compiler, which `pwb-core` cannot depend on). Everything
@@ -35,6 +36,7 @@ pub const RESERVED_SYSTEM_DOMAINS: &[&str] = &[
     "nodes.plain",
     "network.plain",
     "help.plain",
+    "chat.plain",
     // Internal browser tools: no TLD, blocked so user sites cannot claim them.
     "devtools",
 ];
@@ -56,6 +58,8 @@ pub enum SystemDomain {
     Network,
     /// `help.plain` — usage help and the system-domain index.
     Help,
+    /// `chat.plain` — direct end-to-end-encrypted peer chat.
+    Chat,
 }
 
 impl SystemDomain {
@@ -69,6 +73,7 @@ impl SystemDomain {
             SystemDomain::Nodes => "nodes.plain",
             SystemDomain::Network => "network.plain",
             SystemDomain::Help => "help.plain",
+            SystemDomain::Chat => "chat.plain",
         }
     }
 
@@ -85,6 +90,7 @@ impl SystemDomain {
             "nodes.plain" => Some(SystemDomain::Nodes),
             "network.plain" => Some(SystemDomain::Network),
             "help.plain" => Some(SystemDomain::Help),
+            "chat.plain" => Some(SystemDomain::Chat),
             _ => None,
         }
     }
@@ -155,6 +161,34 @@ impl SystemUrl {
         let mut bytes = [0u8; 32];
         bytes.copy_from_slice(&pubkey_bytes);
         Some((addr, PublicKey(bytes)))
+    }
+
+    /// The `peer=` target of a `chat.plain` link: the hex public key of the
+    /// peer to talk to. `None` for other domains or malformed targets.
+    pub fn chat_peer(&self) -> Option<PublicKey> {
+        if self.domain != SystemDomain::Chat {
+            return None;
+        }
+        let peer = self.param("peer")?;
+        let peer_bytes = hex::decode(peer.trim()).ok()?;
+        if peer_bytes.len() != 32 {
+            return None;
+        }
+        let mut bytes = [0u8; 32];
+        bytes.copy_from_slice(&peer_bytes);
+        Some(PublicKey(bytes))
+    }
+
+    /// The `room=` target of a `chat.plain` link: the normalized name of the
+    /// public room to open (`chat.plain?room=lobby`). `None` for other
+    /// domains, an absent parameter, or a name that is not a valid room name
+    /// (see [`crate::net::is_valid_room_name`]).
+    pub fn room(&self) -> Option<String> {
+        if self.domain != SystemDomain::Chat {
+            return None;
+        }
+        let room = self.param("room")?.trim().to_lowercase();
+        crate::net::is_valid_room_name(&room).then_some(room)
     }
 }
 
@@ -367,6 +401,7 @@ mod tests {
             ("nodes.plain", SystemDomain::Nodes),
             ("network.plain", SystemDomain::Network),
             ("help.plain", SystemDomain::Help),
+            ("chat.plain", SystemDomain::Chat),
         ] {
             let url = SystemUrl::parse(host).unwrap_or_else(|| panic!("{host} should parse"));
             assert_eq!(url.domain(), domain);
@@ -435,5 +470,38 @@ mod tests {
         ))
         .expect("gossip url");
         assert_eq!(url.connection_target(), None);
+    }
+
+    #[test]
+    fn test_chat_peer_parses_only_on_chat_domain() {
+        let hex64 = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+        let mut expected = [0u8; 32];
+        expected.copy_from_slice(&hex::decode(hex64).unwrap());
+
+        let url =
+            SystemUrl::parse(&format!("plain://chat.plain?peer={hex64}")).expect("chat url parses");
+        assert_eq!(url.chat_peer(), Some(PublicKey(expected)));
+
+        // Bare form (no scheme) works too.
+        let url =
+            SystemUrl::parse(&format!("chat.plain?peer={hex64}")).expect("bare chat url parses");
+        assert_eq!(url.chat_peer(), Some(PublicKey(expected)));
+
+        // Wrong domain, short key, non-hex, or missing param → None.
+        let other = SystemUrl::parse(&format!("plain://nodes.plain?peer={hex64}"))
+            .expect("nodes url parses");
+        assert_eq!(other.chat_peer(), None);
+        let short = SystemUrl::parse("plain://chat.plain?peer=abcd").expect("short peer");
+        assert_eq!(short.chat_peer(), None);
+        let junk = SystemUrl::parse("plain://chat.plain?peer=zz").expect("junk peer");
+        assert_eq!(junk.chat_peer(), None);
+        let bare = SystemUrl::parse("plain://chat.plain").expect("no peer");
+        assert_eq!(bare.chat_peer(), None);
+    }
+
+    #[test]
+    fn test_chat_plain_is_reserved_and_chatless_claims_fail() {
+        assert!(is_reserved_system_domain("chat.plain"));
+        assert!(RESERVED_SYSTEM_DOMAINS.contains(&"chat.plain"));
     }
 }

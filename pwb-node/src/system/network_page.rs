@@ -195,6 +195,7 @@ pub fn render_help_page_bundle() -> Bundle {
                 <link class="help-link" href="nodes.plain">nodes.plain — live peers and connection links</link>
                 <link class="help-link" href="gossip.plain">gossip.plain — hosted artifacts and registry size</link>
                 <link class="help-link" href="network.plain">network.plain — this node's addresses and services</link>
+                <link class="help-link" href="chat.plain">chat.plain — private peer chat and public rooms</link>
                 <link class="help-link" href="devtools">devtools — inspect the current page's DOM and layout</link>
             </view>
 
@@ -226,7 +227,12 @@ pub fn render_help_page_bundle() -> Bundle {
     compile(title, &pml_markup, HELP_STYLES, None)
 }
 
-fn compile(title: String, pml_markup: &str, styles: &str, script: Option<&str>) -> Bundle {
+pub(super) fn compile(
+    title: String,
+    pml_markup: &str,
+    styles: &str,
+    script: Option<&str>,
+) -> Bundle {
     let mut root_node = pwb_web::parse::parse_pml_markup(pml_markup)
         .unwrap_or_else(|error| panic!("native page markup must parse: {error:?}"));
     let rules = pwb_web::parse::parse_pss_stylesheet(styles);

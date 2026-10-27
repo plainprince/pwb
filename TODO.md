@@ -70,6 +70,50 @@ queries. `pwb-node --help` documents the operator flags instead of ignoring
 them. `deploy/join.json` ships with an empty seed list until a real seed is
 published.
 
+A 2026-10-26 pass added `chat.plain` and a low-level E2EE send flag. Any
+message type can now be sealed end-to-end for its peer with
+`NodeEngine::send_to_with(.., SendFlags::E2EE)` / `broadcast_with` (or
+`seal_message` to pair it with another send path such as an onion circuit):
+a fresh ephemeral-X25519 sealed box per message
+(`NetworkMessage::Sealed`, BLAKE3-derived key, AAD bound to the
+sender/recipient pair, bounded TTL replay cache). The receiver opens it
+before dispatch and re-validates the inner message with the usual
+identity/signature/shape checks, so subscribers keep their existing API and
+relays/onion exits never see the inner payload. The wire change is additive
+(no version bump). Counters: `pwb_e2ee_messages_opened_total` /
+`pwb_e2ee_messages_dropped_total`.`chat.plain` is the first app of
+the flag: a peer picker plus transcript composer page in the browser, backed by
+`pwb-node::chat::ChatService` (capped transcripts, 500 entries per peer,
+persisted to `<data>/chat.json` by both binaries — the write merges by
+message id, so one `PWB_DATA` shared by the browser and the node cannot
+clobber the other's entries). Delivery picks a `ChatRoute`: direct with
+`SendFlags::E2EE` by default, across a three-hop circuit (sealed via
+`seal_message`) in the browser's onion privacy mode with a loud direct
+fallback when no circuit can be built. A headless `pwb-node` receives,
+stores, and prints chats addressed to its identity; `--chat <peer_hex>`
+gives the operator a stdin REPL to reply, and `--chat-via direct|onion|auto`
+picks the route its lines take. Delivery is confirmed, not assumed: every
+recorded chat is answered with a `ChatAck` receipt on the path it arrived on
+(the circuit's return path for onion sends), and an outbound entry shows
+confirmed (✓) once the peer acknowledges it and unconfirmed (⚠) when the
+8-second window expires.
+
+Alongside the private conversations, `chat.plain?room=<name>` is the public
+room (default `lobby`, joined by both binaries at startup). Posts are
+author-signed (`RoomPostWire`, verified on every copy) and **flooded**: each
+holder re-broadcasts to its peers minus the sender, spending a hop from
+`ROOM_POST_HOPS` (8), with termination from a bounded `(author, id)` digest
+set and the hop budget — so a post reaches the network through bystanders,
+who relay without storing. `RoomSubscribe` is one hop and
+envelope-authenticated, which gives each member an honest roster of the peers
+known to be present (a member answers a newcomer's first announcement with
+its own, terminating on first sight); `RoomSync`/`RoomHistory` give a late
+joiner up to 50 signed posts so it catches up instead of waiting for traffic.
+Membership and history persist to `<data>/rooms.json`, merged by message id
+like `chat.json`. The page lists rooms on the `chat.plain` picker, joins one
+when opened, and posts through `__pwb_room_send`; `pwb-node --room <name>`
+is the headless REPL.
+
 The
 sections tracked here are:
 

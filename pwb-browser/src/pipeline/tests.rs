@@ -460,11 +460,13 @@ fn build_app(bytes: &[u8]) -> Result<(BrowserApp, tokio::runtime::Runtime), Pipe
         None,
     ));
     let federation = Arc::new(DistributedSearch::new(
-        engine,
+        engine.clone(),
         Arc::new(SearchEngine::new()),
         Arc::new(ArtifactHost::new()),
-        kp,
+        kp.clone(),
     ));
+    let chat = pwb_node::chat::ChatService::new(engine.clone());
+    let room = pwb_node::room::RoomService::new(engine, kp);
     let app = build_browser_app(
         bytes,
         Arc::new(SearchEngine::new()),
@@ -473,6 +475,8 @@ fn build_app(bytes: &[u8]) -> Result<(BrowserApp, tokio::runtime::Runtime), Pipe
         Arc::new(IdentityManager::new()),
         federation,
         domain,
+        chat,
+        room,
         PrivacyMode::Direct,
         runtime.handle().clone(),
     )?;

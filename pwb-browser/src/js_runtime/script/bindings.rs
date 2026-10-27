@@ -283,6 +283,36 @@ pub(super) fn install<'js>(dom_handle: &DomHandle, ctx: &Ctx<'js>, global: &Obje
         )
         .unwrap();
 
+    // `__pwb_chat_send(peer_hex, text)`: ask the pipeline to send a chat
+    // message from the chat.plain composer. The pipeline passes it to the
+    // chat service, which seals it with `SendFlags::E2EE` and records the
+    // outbound echo; failures are stored for the page to render.
+    let chat = dom_handle.clone();
+    global
+        .set(
+            "__pwb_chat_send",
+            Function::new(ctx.clone(), move |peer: String, text: String| {
+                *chat.pending_chat.borrow_mut() = Some((peer, text));
+            })
+            .unwrap(),
+        )
+        .unwrap();
+
+    // `__pwb_room_send(room, text)`: ask the pipeline to post a line to a
+    // public room. The pipeline hands it to the room service, which signs it
+    // with this identity and floods it to the network; failures are stored
+    // for the page to render.
+    let room = dom_handle.clone();
+    global
+        .set(
+            "__pwb_room_send",
+            Function::new(ctx.clone(), move |room_name: String, text: String| {
+                *room.pending_room.borrow_mut() = Some((room_name, text));
+            })
+            .unwrap(),
+        )
+        .unwrap();
+
     // DevTools management APIs
     let dom_c8 = dom_handle.clone();
     global

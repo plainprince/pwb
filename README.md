@@ -29,7 +29,7 @@ no flags. The full procedure (rotation, withdrawal, emergency shutdown) is in
 
 ## What it is
 
-PlainWeb replaces legacy URLs and central search engines with peer-to-peer system protocols: `search.plain`, `register.plain`, `gossip.plain`, `nodes.plain`, `network.plain`, `help.plain`, and `devtools.plain`. The `.plain` TLD is the **official** namespace — the browser-shipped system pages plus the built-in content pages `welcome.plain` and `demo.plain`. The **unofficial** namespace (`.pwb`, `.non`, `.yep`, `.lam`, `.arch`, `.vio`, `.org`, `.net`, `.com` — [full list](docs/tlds.md)) holds user/network sites claimed by participants using sparse credits.
+PlainWeb replaces legacy URLs and central search engines with peer-to-peer system protocols: `search.plain`, `register.plain`, `gossip.plain`, `nodes.plain`, `network.plain`, `chat.plain`, `help.plain`, and `devtools.plain`. The `.plain` TLD is the **official** namespace — the browser-shipped system pages plus the built-in content pages `welcome.plain` and `demo.plain`. The **unofficial** namespace (`.pwb`, `.non`, `.yep`, `.lam`, `.arch`, `.vio`, `.org`, `.net`, `.com` — [full list](docs/tlds.md)) holds user/network sites claimed by participants using sparse credits.
 
 ## Security
 
@@ -75,6 +75,30 @@ with the one your peer printed):
 
 ```sh
 cargo run -p pwb-node -- --connect "plain://nodes.plain?connect=127.0.0.1:9000/0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+```
+
+Once paired, talk to that peer: open `chat.plain` in the browser (sends are
+sealed, and ride onion circuits when the browser runs in onion mode), or
+reply from the daemon itself with an E2EE chat REPL over stdin (transcripts
+persist under `<data>/chat.json`, and `--chat-via direct|onion|auto` picks
+how lines travel):
+
+```sh
+cargo run -p pwb-node -- --connect "<link>" --chat 0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef --chat-via direct
+```
+
+Every sent line is acknowledged: the page marks it ✓ when the peer
+confirms it within 8 seconds and ⚠ when nothing does, and the REPL prints
+the same outcome.
+
+Rooms are the public side of the same page: `chat.plain` lists them, and
+every node joins `lobby` by default. A post is signed by its author and
+flooded to the whole network through whatever peers are around — members
+keep the history, bystanders relay it — so anyone can read along at
+`chat.plain?room=lobby`, or from the daemon:
+
+```sh
+cargo run -p pwb-node -- --connect "<link>" --room lobby
 ```
 
 See the layer READMEs above for usage; each links into the protocol and design docs.

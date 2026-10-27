@@ -152,6 +152,171 @@ attributed to a peer are therefore signed separately and verified on receipt:
   are unix seconds; receivers reject epochs more than 300 s in the future and
   merges keep the highest epoch (ties on the smaller owner key).
 
+### End-to-end encryption flag (`SendFlags::E2EE`)
+
+The envelope encrypts each datagram hop-wise, but the inner `NetworkMessage`
+is plaintext JSON wherever it is forwarded or dispatched: relay handlers,
+onion exits, and every application subscriber all read it. Apps opt into
+payload-level E2EE with a low-level send flag instead of touching crypto:
+
+- `NodeEngine::send_to_with(peer, msg, SendFlags::E2EE)` and
+  `broadcast_with(msg, flags)` seal the message; plain `send_to`/`broadcast`
+  are the `SendFlags::EMPTY` wrappers.
+- `NodeEngine::seal_message(recipient, msg)` returns the sealed wrapper
+  directly, so an app can pair E2EE with another send path (e.g.
+  `send_onion_to`).
+
+Construction (`pwb-core::net::e2ee`) — one fresh sealed box per message:
+
+```
+shared  = X25519(ephemeral_secret, recipient_static_public)
+msg_key = BLAKE3-derive_key("pwb-core e2ee v1", shared || salt)
+aad     = "PWB-E2EE1" || sender || recipient || salt || id
+```
+
+- **Confidentiality**: only the recipient identity holder can open it — not
+  relays, onion exits, or observers.
+- **Sender binding**: the AAD commits to the envelope signer and the
+  recipient, so a captured ciphertext cannot be re-attributed to another
+  sender or spliced into another pair's conversation.
+- **Forward secrecy per message**: the ephemeral key is discarded after
+  sealing; compromising a long-term key later does not decrypt recorded
+  traffic.
+- **Replay rejection**: the random 128-bit message `id` is tracked in a
+  bounded TTL cache (10 min, 8192 entries); a duplicate is dropped. The nonce
+  is fixed because the key itself is unique per message (fresh random
+  16-byte `salt`).
+
+The wire variant is `NetworkMessage::Sealed { eph, salt, id, ciphertext }` —
+an additive JSON variant with **no wire-version bump**: older nodes drop what
+they cannot parse instead of failing the connection. The receiver opens a
+`Sealed` payload before dispatch (direct, relayed, and onion-delivered paths
+alike), re-validates the inner message with the same
+identity/signature/shape checks as an unsealed one, rejects nested `Sealed`,
+and delivers the inner message to subscribers transparently — apps just set
+the flag on send. Counters: `pwb_e2ee_messages_opened_total` /
+`pwb_e2ee_messages_dropped_total`.
+
+### Direct chat (`chat.plain`)
+
+`NetworkMessage::Chat { sender, id, sent_at, text }` is the `chat.plain`
+payload, capped at `MAX_CHAT_TEXT` (2048 bytes) on receipt (`sender` must
+equal the envelope signer). Delivery picks one of three routes
+(`pwb-node::chat::ChatRoute`):
+
+- **Direct** — sealed with `SendFlags::E2EE` and sent to the peer's
+  registered address (through its relay for relay-routed peers). The
+  default, and what `ChatService::send` does.
+- **Onion** — sealed first with `seal_message()`, then carried across a
+  three-hop circuit (`send_onion`). Relays and the exit only ever see the
+  sealed payload; the exit's E2EE receiver path opens it and hands the inner
+  `Chat` to the onion subscription, so no relay learns who is talking.
+- **Auto** — prefer the circuit; when one cannot be built (fewer than three
+  direct peers), fall back to the direct route and record a visible note on
+  the page instead of silently revealing both addresses.
+
+`pwb-node::chat::ChatService` keeps a capped transcript per counterparty
+(500 entries) and subscribes to both the direct and the onion delivery
+paths; an onion-delivered `Chat` whose `sender` disagrees with the circuit's
+signed origin is dropped. Both binaries persist their transcripts under
+their data directory (`chat.json`, rewritten atomically after every change)
+so conversations survive a restart; the save merges with what is already on
+the file by message id, so pointing `PWB_DATA` at one directory for both
+processes shares a conversation instead of clobbering it. `pwb-node` prints
+inbound chats; `--chat <peer_hex>` adds a stdin REPL so a headless operator
+can reply, and `--chat-via direct|onion|auto` picks the route its lines take.
+`pwb-browser` renders the interactive page at `chat.plain` (peer picker) and
+`chat.plain?peer=<hex>` (conversation), composing sends through the same
+service; in onion privacy mode the page routes sends over a circuit (the
+`Auto` route), with `--direct` back on the direct transport. Lines that
+travelled over a circuit carry an 🧅 marker in the transcript.
+
+#### Delivery receipts
+
+Delivery is confirmed rather than assumed. Every `Chat` a node records is
+answered with a `NetworkMessage::ChatAck { sender, id }` for that message id,
+travelling exactly the way the chat arrived: sealed down the direct
+transport, or as the `Chat` was — the reply to the onion request, on the
+circuit's return path (so the receipt never reveals an address the chat did
+not already reveal). A receipt is emitted only after the message is stored,
+so it means "recorded by the peer", not merely received. Senders match an
+ack against their own outbound entry by `(peer, message id)` — an ack for an
+unknown id, an inbound entry, or another counterparty confirms nothing.
+
+An outbound transcript entry carries the outcome: `None` while the receipt
+is outstanding, `Some(true)` once it arrives, `Some(false)` when
+`ACK_TIMEOUT` (8s) expires — which the page shows as ⚠ next to `me 🔒`, and
+which the REPL prints as a "no delivery confirmation" note. A late receipt
+can still upgrade a timed-out entry. The onion route sends its request and
+waits inside the same timeout window, so a circuit chat settles by
+confirmation or timeout rather than sitting unlabelled.
+
+### Public rooms (`chat.plain?room=<name>`)
+
+A room is the public counterpart to `chat.plain`'s private conversation:
+readable by anyone, kept by every member, and reached through the network
+rather than a single peer. `RoomService` (`pwb-node::room`) implements it.
+Four wire messages, all additive:
+
+| Message | Scope | Purpose |
+|---------|-------|---------|
+| `RoomPost(RoomPostWire)` | flooded | one post: author-signed `(sender, room, id, sent_at, text)` plus an unsigned `hops` budget. |
+| `RoomSubscribe { sender, room, subscribed }` | one hop | membership announcement; the envelope signer must be `sender`. |
+| `RoomSync { sender, room }` | one hop | a joiner asking for the history it missed. |
+| `RoomHistory { sender, room, posts }` | direct reply | up to `ROOM_HISTORY_MAX` (50) signed posts. |
+
+**Flooding.** Every holder re-broadcasts a post to every peer except the one
+it heard it from, spending one hop from the author's `ROOM_POST_HOPS` (8).
+Termination comes from a bounded per-node digest set keyed on `(author, id)`
+(`MAX_SEEN_POSTS`, 4096) *and* the hop budget, so neither a loop nor a
+wrapped dedup set can keep a message alive. Non-members relay too — a public
+room is supposed to arrive through bystanders — but only members store what
+passes through.
+
+**Authorship.** A forwarder re-signs the transport envelope, so the engine
+does *not* require `RoomPost.sender == envelope signer` (unlike `Chat`).
+Instead `payload_signature_valid` verifies `RoomPostWire::verify()`: the
+author's Ed25519 signature over
+`room_post_sign_message(sender, room, id, sent_at, text)` (prefix
+`PWBROOMPOST1`). Any copy therefore proves who wrote it, including one
+handed over by a peer the author never met. `hops` is deliberately left
+unsigned so forwarders can spend it without invalidating the signature.
+
+**Subscriptions.** `RoomSubscribe` is one hop and envelope-authenticated, so
+it builds an honest roster of the direct peers known to be in a room (it
+cannot be replayed onto a roster by a forwarder). A member answers a
+newcomer's *first* announcement with its own, which is what teaches both
+sides about each other; because the roster only replies on first sight, the
+exchange terminates. Rosters are best effort by design: a peer that connects
+later is learned when it next announces or asks for history.
+
+**Joining.** `RoomService::join` marks the room as one this node keeps
+(persisted), announces the membership, and broadcasts `RoomSync`. Members
+answer with their newest `ROOM_HISTORY_MAX` posts; the joiner verifies every
+signature, dedups by `(author, id)`, and never re-floods them — history is
+catch-up, not traffic, so the live copy of the same post still relays
+normally. The announcement itself goes out at most once per session, so a
+page that re-renders (or a restart that reloads a persisted subscription)
+cannot spam the swarm.
+
+**Shape caps**, enforced in `payload_well_formed` before any application
+sees a message: `MAX_CHAT_TEXT` per post, `MAX_ROOM_NAME` (32 characters of
+`[A-Za-z0-9._-]`, normalized to lowercase by the application),
+`ROOM_HISTORY_MAX` per reply, `hops > 0`.
+
+**Persistence.** `<data>/rooms.json`, written atomically after every change
+and merged with what is already on the file by `(author, id)`, so a
+`PWB_DATA` shared by the browser and the daemon keeps both sides of a
+conversation (subscriptions OR together). Transcripts are capped at
+`ROOM_HISTORY_LIMIT` (200) posts per room. Both binaries join `lobby`
+(`DEFAULT_ROOM`) at startup; `pwb-node --room <name>` adds a stdin REPL for
+posting, and the browser joins any room its page opens.
+
+**Privacy.** A room post is public: the transport envelope is encrypted
+hop to hop, but any relaying node can read the post — that is what lets it
+relay it. Anything that must not be readable stays on `chat.plain`, which is
+sealed end to end and never flooded.
+
 ### Kademlia lookups
 
 The engine keeps a 256-bucket Kademlia routing table populated from
@@ -237,7 +402,7 @@ new_price    = clamp(price + (target - price) / ADJUSTMENT_DIVISOR,
 
 | Domain | Role |
 |--------|------|
-| `*.plain` | Official built-in pages only: system endpoints (`search.plain`, `devtools.plain`, `register.plain`, `gossip.plain`, `nodes.plain`, `network.plain`, `help.plain`) and shipped content pages (`welcome.plain`, `demo.plain`). Registration attempts by network participants are rejected. |
+| `*.plain` | Official built-in pages only: system endpoints (`search.plain`, `devtools.plain`, `register.plain`, `gossip.plain`, `nodes.plain`, `network.plain`, `help.plain`, `chat.plain`) and shipped content pages (`welcome.plain`, `demo.plain`). Registration attempts by network participants are rejected. |
 | `*.pwb`, `*.non`, `*.yep`, `*.lam`, `*.arch`, `*.vio`, `*.org`, `*.net`, `*.com` | **Unofficial** user/network sites, claimed by participants using sparse credits (e.g. `mysite.pwb`, `club.non`). The list lives in `UNOFFICIAL_TLDS` (`pwb-core::system`); names outside it are refused by every claim path. Full list and rules: [docs/tlds.md](tlds.md). |
 
 ### 5.1 Networked domain service (`pwb-node::domain::DomainService`)

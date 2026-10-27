@@ -3,7 +3,7 @@
 /// Naming rule: `.plain` is the **official** namespace. The `.plain` TLD is
 /// strictly reserved — it holds the built-in system protocols (`search.plain`,
 /// `register.plain`, `gossip.plain`, `nodes.plain`, `network.plain`,
-/// `help.plain`, `devtools.plain`) and the
+/// `help.plain`, `chat.plain`, `devtools.plain`) and the
 /// browser-shipped content pages (`welcome.plain`, `demo.plain`). The
 /// **unofficial** namespace is the [`pwb_core::system::UNOFFICIAL_TLDS`] list
 /// (one entry per claimable TLD — see `docs/tlds.md`): user/network sites
@@ -19,7 +19,7 @@ use pwb_node::domain::DomainRegistry;
 use pwb_node::host::ArtifactHost;
 use pwb_node::identity::IdentityManager;
 use pwb_node::search::SearchEngine;
-use pwb_node::system::{NetworkSnapshot, SystemDomainHandler};
+use pwb_node::system::{ChatSnapshot, NetworkSnapshot, RoomSnapshot, SystemDomainHandler};
 use std::fs;
 
 #[derive(Debug)]
@@ -55,6 +55,20 @@ pub fn is_register_target(target: &str) -> bool {
     SystemUrl::parse(target)
         .map(|url| url.domain() == SystemDomain::Register)
         .unwrap_or(false)
+}
+
+/// Whether `target` addresses `chat.plain` (the direct peer chat page).
+pub fn is_chat_target(target: &str) -> bool {
+    SystemUrl::parse(target)
+        .map(|url| url.domain() == SystemDomain::Chat)
+        .unwrap_or(false)
+}
+
+/// The public room a `chat.plain?room=<name>` URL addresses, normalized the
+/// way the wire expects it. `None` for other URLs — including private
+/// `chat.plain?peer=<hex>` conversations.
+pub fn room_of(target: &str) -> Option<String> {
+    SystemUrl::parse(target)?.room()
 }
 
 /// The `(domain, cid)` pair when `target` is a `register.plain?claim=…&cid=…`
@@ -110,6 +124,8 @@ pub fn resolve_url_or_file(
         balance,
         &[],
         NetworkSnapshot::default(),
+        ChatSnapshot::default(),
+        RoomSnapshot::default(),
     )
 }
 
@@ -136,13 +152,17 @@ pub fn resolve_url_or_file_with_peers(
             peers: peers.to_vec(),
             ..NetworkSnapshot::default()
         },
+        ChatSnapshot::default(),
+        RoomSnapshot::default(),
     )
 }
 
 /// Resolve a URL or domain string with the caller's live network view.
 ///
 /// `network` feeds `network.plain`; its `peers` field is replaced with
-/// `peers` so the two views cannot disagree.
+/// `peers` so the two views cannot disagree. `chat` feeds `chat.plain`
+/// (transcripts plus the last send error); `room` feeds
+/// `chat.plain?room=<name>` (the public room transcript and roster).
 #[allow(clippy::too_many_arguments)]
 pub fn resolve_url_or_file_with_context(
     target: &str,
@@ -153,6 +173,8 @@ pub fn resolve_url_or_file_with_context(
     balance: u64,
     peers: &[(pwb_core::crypto::PublicKey, std::net::SocketAddr)],
     network: NetworkSnapshot,
+    chat: ChatSnapshot,
+    room: RoomSnapshot,
 ) -> Result<Vec<u8>, ResolverError> {
     let clean = target.trim().trim_start_matches("plain://");
 
@@ -164,7 +186,9 @@ pub fn resolve_url_or_file_with_context(
 
     // 2. Reserved System Domains (.plain TLD) — matching centralized in pwb-core::system.
     if let Some(system_url) = SystemUrl::parse(clean) {
-        let handler = SystemDomainHandler::new(search, host, registry, identity, balance);
+        let handler = SystemDomainHandler::new(search, host, registry, identity, balance)
+            .with_chat(chat)
+            .with_room(room);
         let bundle = match system_url.domain() {
             SystemDomain::Search => {
                 let query = system_url.search_query().unwrap_or_default();
@@ -190,6 +214,13 @@ pub fn resolve_url_or_file_with_context(
                 })
                 .render_system_network_page(),
             SystemDomain::Help => handler.render_system_help_page(),
+            // `chat.plain` renders the peer picker; `chat.plain?peer=<hex>`
+            // renders that peer's transcript plus the composer, and
+            // `chat.plain?room=<name>` the public room.
+            SystemDomain::Chat => match system_url.room() {
+                Some(room) => handler.render_system_room_page(&room, peers),
+                None => handler.render_system_chat_page(system_url.chat_peer(), peers),
+            },
         };
         // Native system pages ship in the same compressed container as
         // authored sites; `Bundle::deserialize` accepts both forms.

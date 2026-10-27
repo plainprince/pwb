@@ -8,7 +8,8 @@ not part of PlainWeb's namespace and cannot be claimed.
 `.plain` is **strictly reserved**. It holds only:
 
 - the system protocols: `search.plain`, `register.plain`, `gossip.plain`,
-  `nodes.plain`, `network.plain`, `help.plain`, `devtools.plain`
+  `nodes.plain`, `network.plain`, `help.plain`, `chat.plain`,
+  `devtools.plain`
 - the browser-shipped content pages: `welcome.plain`, `demo.plain`
 
 No user, miner, or node can claim, register, or overwrite a `.plain` name —

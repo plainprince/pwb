@@ -27,6 +27,7 @@
 //! meter and mint relay credits.
 
 mod cell_channel;
+mod e2ee;
 mod engine;
 mod envelope;
 mod loops;
@@ -37,19 +38,22 @@ mod onion_transport;
 mod tests;
 
 pub use cell_channel::CellChannel;
+pub use e2ee::E2eeState;
 pub use engine::{
     peer_exchange_loop, resolve_bootstrap_peer, BootstrapPeer, NodeConfig, NodeEngine, PeerInfo,
 };
 pub use messages::{
     decode_artifact_chunk, decode_punch_probe, domain_claim_funding_sign_message,
     domain_claim_sign_message, encode_artifact_chunk, encode_punch_probe,
-    gossip_announce_sign_message, index_proof_sign_message, posting_sign_message,
-    postings_sign_message, punch_probe_sign_message, shard_query_sign_message,
-    shard_response_sign_message, verify_claim_signature, BalanceAttestationWire, BlindClaimWire,
-    DomainRecordWire, IndexProofWire, IssuerBindingWire, NetworkError, NetworkMessage,
-    OwnershipProofWire, PostingWire, QueryReceiptWire, QuorumCertificateWire, SearchResultWire,
-    SyncRecordWire, Transport, VoucherBlindRequestWire, VoucherWire, DOMAIN_CLAIM_FUNDING_PREFIX,
-    DOMAIN_CLAIM_PREFIX, GOSSIP_ANNOUNCE_PREFIX, MAX_ARTIFACT_CHUNK, POSTINGS_BATCH_MAX,
-    POSTINGS_PREFIX, POSTING_PREFIX, PUNCH_MAGIC, SHARD_RESPONSE_PREFIX,
+    gossip_announce_sign_message, index_proof_sign_message, is_valid_room_name,
+    posting_sign_message, postings_sign_message, punch_probe_sign_message, room_post_sign_message,
+    shard_query_sign_message, shard_response_sign_message, verify_claim_signature,
+    BalanceAttestationWire, BlindClaimWire, DomainRecordWire, IndexProofWire, IssuerBindingWire,
+    NetworkError, NetworkMessage, OwnershipProofWire, PostingWire, QueryReceiptWire,
+    QuorumCertificateWire, RoomPostWire, SearchResultWire, SendFlags, SyncRecordWire, Transport,
+    VoucherBlindRequestWire, VoucherWire, DOMAIN_CLAIM_FUNDING_PREFIX, DOMAIN_CLAIM_PREFIX,
+    GOSSIP_ANNOUNCE_PREFIX, MAX_ARTIFACT_CHUNK, MAX_CHAT_TEXT, MAX_ROOM_NAME, POSTINGS_BATCH_MAX,
+    POSTINGS_PREFIX, POSTING_PREFIX, PUNCH_MAGIC, ROOM_HISTORY_MAX, ROOM_POST_HOPS,
+    ROOM_POST_PREFIX, SHARD_RESPONSE_PREFIX,
 };
-pub use onion_transport::{OnionKind, OnionMessage, OnionReturnPath, RelayEvent};
+pub use onion_transport::{OnionKind, OnionMessage, OnionRequest, OnionReturnPath, RelayEvent};

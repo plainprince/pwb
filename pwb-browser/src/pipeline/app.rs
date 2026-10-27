@@ -22,17 +22,19 @@ use crate::render::{
     render_dom_into_pixmap, SelectionPoint, TextSelection,
 };
 use crate::resolver::{
-    content_id_of, is_register_target, is_system_target, pwb_name_of, register_claim_of,
-    resolve_url_or_file_with_context, search_query_of,
+    content_id_of, is_chat_target, is_register_target, is_system_target, pwb_name_of,
+    register_claim_of, resolve_url_or_file_with_context, room_of, search_query_of,
 };
 use crate::shell::{self, ChromeAction, Shell};
 use arboard::Clipboard;
 use pwb_core::spec::Tag;
+use pwb_node::chat::{ChatRoute, ChatService};
 use pwb_node::domain::{DomainRegistry, DomainService};
 use pwb_node::federation::DistributedSearch;
 use pwb_node::host::ArtifactHost;
 use pwb_node::identity::IdentityManager;
 use pwb_node::privacy::PrivacyMode;
+use pwb_node::room::RoomService;
 use pwb_node::search::SearchEngine;
 use pwb_node::system::{
     render_message_bundle, render_search_pending_bundle, render_search_results_bundle,
@@ -102,6 +104,21 @@ pub struct BrowserApp {
     pub(super) federation: Arc<DistributedSearch>,
     /// Domain-claim service backing `register.plain` and remote `.pwb` lookups.
     pub(super) domain: Arc<DomainService>,
+    /// Direct E2EE chat service backing `chat.plain`: outbound sends are
+    /// sealed for the peer (directly, or across an onion circuit when the
+    /// browser runs in onion privacy mode), inbound messages land in
+    /// per-peer transcripts.
+    pub(super) chat: Arc<ChatService>,
+    /// The chat version seen at the last render; a bump means a send echo, a
+    /// recorded failure, or an inbound message — re-render `chat.plain`.
+    pub(super) last_chat_version: u64,
+    /// Public-room service backing `chat.plain?room=`: posts are signed as
+    /// this identity and flooded to the network, membership is announced to
+    /// peers, and history is fetched when a room is opened.
+    pub(super) room: Arc<RoomService>,
+    /// The room version seen at the last render; a bump means a post echo, a
+    /// membership change, or an inbound post — re-render the room page.
+    pub(super) last_room_version: u64,
     /// Tokio runtime handle used to spawn background shard-query tasks.
     pub(super) runtime: tokio::runtime::Handle,
     /// In-flight async page load (federated search results or remote `.pwb`
@@ -310,6 +327,16 @@ impl BrowserApp {
             return true;
         }
 
+        // An open room is a membership: join before resolving so the page
+        // renders with its roster and transcript in one go. The join is
+        // idempotent and announces at most once per session, so re-rendering
+        // this page does not spam the network.
+        if let Some(room) = room_of(url) {
+            if let Err(error) = self.room.join(&room) {
+                eprintln!("[Room] Cannot join {room}: {error}");
+            }
+        }
+
         let bytes: Vec<u8> = {
             let registry = self.registry.lock().unwrap();
             let peers = self.domain.peers();
@@ -328,6 +355,8 @@ impl BrowserApp {
                 self.domain.available_credits(),
                 &peers,
                 network,
+                self.chat.snapshot(),
+                self.room.snapshot(),
             ) {
                 Ok(b) => b,
                 Err(e) => {
@@ -878,6 +907,70 @@ impl ApplicationHandler for BrowserApp {
                 };
                 let _ = tx.send(("nodes.plain".to_string(), bytes));
             });
+        }
+
+        // `chat.plain` composer action: hand the message to the chat
+        // service, which seals it with the networking layer's E2EE flag and
+        // records the outbound echo (or the failure). Then re-render the page
+        // when the chat state changed — a send, a failure, or an inbound
+        // message delivered while the page is on screen.
+        let pending_chat = self.dom_handle_render.pending_chat.borrow_mut().take();
+        let mut chat_refresh = pending_chat.is_some();
+        if let Some((peer_hex, text)) = pending_chat {
+            let parsed = hex::decode(peer_hex.trim()).ok().and_then(|bytes| {
+                (bytes.len() == 32).then(|| {
+                    let mut key = [0u8; 32];
+                    key.copy_from_slice(&bytes);
+                    pwb_core::crypto::PublicKey(key)
+                })
+            });
+            match parsed {
+                Some(peer) => {
+                    // Chat follows the browser's privacy mode: onion mode
+                    // routes through a circuit when one can be built (and
+                    // records a visible note when it falls back), --direct
+                    // stays on the direct transport.
+                    let route = if self.privacy == PrivacyMode::Onion {
+                        ChatRoute::Auto
+                    } else {
+                        ChatRoute::Direct
+                    };
+                    if let Err(error) = self.chat.send_via(&peer, &text, route) {
+                        println!("[Chat] send failed: {error}");
+                    }
+                }
+                None => {
+                    println!("[Chat] ignoring send with a malformed peer key");
+                }
+            }
+        }
+        let chat_version = self.chat.version();
+        if chat_version != self.last_chat_version {
+            self.last_chat_version = chat_version;
+            chat_refresh = true;
+        }
+
+        // `chat.plain?room=` composer action: sign the line as this identity
+        // and flood it to every peer, which relays it on.
+        let pending_room = self.dom_handle_render.pending_room.borrow_mut().take();
+        let mut room_refresh = pending_room.is_some();
+        if let Some((room, text)) = pending_room {
+            if let Err(error) = self.room.post(&room, &text) {
+                println!("[Room] post failed: {error}");
+            }
+        }
+        let room_version = self.room.version();
+        if room_version != self.last_room_version {
+            self.last_room_version = room_version;
+            room_refresh = true;
+        }
+
+        if (chat_refresh || room_refresh) && is_chat_target(self.shell.current_url()) {
+            let url = self.shell.current_url().to_string();
+            self.navigate_to(&url);
+            if let Some(w) = self.window.as_ref() {
+                w.request_redraw();
+            }
         }
 
         // Poll an in-flight async page load (federated search results or a

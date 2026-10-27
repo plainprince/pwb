@@ -13,11 +13,13 @@ use crate::dom::Dom;
 use crate::js_runtime::{execute_script, DomHandle};
 use crate::render::{SelectionPoint, TextSelection};
 use pwb_core::wire::Bundle;
+use pwb_node::chat::ChatService;
 use pwb_node::domain::{DomainRegistry, DomainService};
 use pwb_node::federation::DistributedSearch;
 use pwb_node::host::ArtifactHost;
 use pwb_node::identity::IdentityManager;
 use pwb_node::privacy::PrivacyMode;
+use pwb_node::room::RoomService;
 use pwb_node::search::SearchEngine;
 
 use std::sync::{Arc, Mutex};
@@ -45,6 +47,8 @@ pub fn build_browser_app(
     identity: Arc<IdentityManager>,
     federation: Arc<DistributedSearch>,
     domain: Arc<DomainService>,
+    chat: Arc<ChatService>,
+    room: Arc<RoomService>,
     privacy: PrivacyMode,
     runtime: tokio::runtime::Handle,
 ) -> Result<BrowserApp, PipelineError> {
@@ -193,6 +197,12 @@ pub fn build_browser_app(
         identity,
         federation,
         domain,
+        chat,
+        // No sends yet: any version bump (including one that raced the
+        // initial page render) triggers the first `chat.plain` refresh.
+        last_chat_version: 0,
+        room,
+        last_room_version: 0,
         privacy,
         runtime,
         pending_page: None,

@@ -41,6 +41,20 @@ pwb-node --host ./mysite --claim mysite.pwb
 # through the return circuit and never learns this node's address
 pwb-node --bootstrap '<host:port>/<hex_pubkey>' --private-search 'term'
 
+# Chat with a peer from the daemon itself: an E2EE REPL over stdin that
+# replies with SendFlags::E2EE (transcripts persist under <data>/chat.json).
+# --chat-via picks the route: direct (default), onion (a three-hop circuit,
+# needing three direct peers), or auto (circuit when possible, loud fallback).
+# The peer's delivery receipt settles each line: confirmed, or unconfirmed
+# after 8 seconds.
+pwb-node --connect '<link>' --chat <peer_hex_pubkey> --chat-via direct
+
+# Post to a public room from the daemon: every node joins `lobby` by
+# default, and a post is signed by this identity and flooded through every
+# peer (members keep the history, bystanders relay it). --room opens a REPL
+# for one room; --chat and --room each own stdin, so run one at a time.
+pwb-node --connect '<link>' --room lobby
+
 # Show credits earned by service, the peer-attested balance, and the wallet
 pwb-node --status
 
@@ -77,7 +91,9 @@ fetch, artifact gossip) and `SystemDomainHandler` (`search.plain` queries,
 network. `--host` publishes after the bootstrap/join attempt and announces the
 artifact with `GossipAnnounce`, so peers fetch and index it. `--demo` runs the
 old synthetic workload instead of real work. Hosted artifacts, the search
-index, the domain registry, credits, and the peer table persist under `--data
+index, the domain registry, credits, `chat.plain` transcripts (`chat.json`),
+public-room history and memberships (`rooms.json`),
+and the peer table persist under `--data
 <dir>` (default `~/.pwb/data`) and reload at startup. On restart the node
 re-dials the 32 most recently seen remembered peers in parallel, so it can
 rejoin the swarm even when no bootstrap is reachable.
@@ -170,6 +186,11 @@ signing key inside the repository. The surrounding procedure is the
 - **`nodes.plain`**: Peer routing table and network health.
 - **`network.plain`**: Live listen/discovery/STUN addresses, the peer table, and this node's index/store/registry counts, claim price, and balance.
 - **`help.plain`**: System-domain index plus the namespace, hosting, and credit rules.
+- **`chat.plain`**: Direct E2EE peer conversations, plus the public rooms at
+  `chat.plain?room=<name>` — backed by `room::RoomService`: author-signed
+  posts flood the network hop by hop, memberships are announced one hop at a
+  time, late joiners sync history from peers, and transcripts persist under
+  `--data`.
 
 ## Module Structure
 

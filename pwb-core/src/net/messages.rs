@@ -772,6 +772,226 @@ pub enum NetworkMessage {
         target: PublicKey,
         datagrams: Vec<Vec<u8>>,
     },
+
+    /// A direct, end-to-end-encrypted chat message for `chat.plain`.
+    ///
+    /// Chat is always sent with [`SendFlags::E2EE`], so what travels on the
+    /// wire is a [`Self::Sealed`] wrapper; `sender` is present for transcript
+    /// attribution and must equal the envelope signer. Receivers reject
+    /// messages whose `text` exceeds [`MAX_CHAT_TEXT`].
+    Chat {
+        sender: PublicKey,
+        /// Random message id, unique per chat message (dedupe/ordering).
+        id: [u8; 16],
+        /// Sender wall-clock unix timestamp (display only).
+        sent_at: u64,
+        text: String,
+    },
+
+    /// Delivery receipt for [`Self::Chat`]: the recipient confirms it stored
+    /// the message with this id.
+    ///
+    /// Chat is fire-and-forget on the wire, so a send that reaches nobody
+    /// looks exactly like one that arrived. The receiver answers every chat
+    /// it records with this variant, travelling the same way the chat did —
+    /// sealed with [`SendFlags::E2EE`] on the direct path, or as the reply to
+    /// the onion request — so a receipt never reveals a route the chat
+    /// itself did not. Senders treat a missing receipt as "may not have
+    /// arrived", never as proof of delivery, and only the peer that was
+    /// actually sent a message can confirm it (`sender` must equal the
+    /// envelope signer, and senders match the receipt against their own
+    /// outbound entry).
+    ChatAck {
+        /// Who is confirming — must equal the envelope signer.
+        sender: PublicKey,
+        /// The [`Self::Chat`] message id being confirmed.
+        id: [u8; 16],
+    },
+
+    /// A message posted to a public room (`chat.plain?room=<name>`).
+    ///
+    /// Unlike [`Self::Chat`], a room post is public and **flooded**: every
+    /// holder re-broadcasts it to its own peers (bounded by a hop budget and
+    /// a per-node dedup set), so a message reaches the whole network through
+    /// intermediaries. That makes the envelope signer a *forwarder* rather
+    /// than the author, so authorship comes from `post.signature` — verified
+    /// by the engine for every copy — and never from the transport.
+    RoomPost(RoomPostWire),
+
+    /// Announce that `sender` has joined (`subscribed: true`) or left a
+    /// room. One hop, like [`Self::PeerDiscovery`]: the envelope signer must
+    /// be `sender`, so no forwarder can put a peer on a roster it never
+    /// joined. Members use it to build the room roster and answer a new
+    /// member's announcement with their own.
+    RoomSubscribe {
+        sender: PublicKey,
+        room: String,
+        subscribed: bool,
+    },
+
+    /// Ask the peers holding `room` for their recent history. Sent when
+    /// joining so a late member converges without waiting for new posts;
+    /// answered directly (never flooded).
+    RoomSync { sender: PublicKey, room: String },
+
+    /// Direct answer to [`Self::RoomSync`]: up to [`ROOM_HISTORY_MAX`] posts
+    /// the responder holds for `room`, newest last. Every entry keeps its
+    /// author signature, so the receiver verifies each one before storing
+    /// it — a peer cannot attribute a post to someone who never wrote it.
+    RoomHistory {
+        sender: PublicKey,
+        room: String,
+        posts: Vec<RoomPostWire>,
+    },
+
+    /// An application payload sealed with [`SendFlags::E2EE`]
+    /// (see `pwb-core::net::e2ee` for the construction).
+    ///
+    /// The receiver opens it with its identity key and dispatches the inner
+    /// message, so subscribers never handle this variant. A sealed message
+    /// that fails to open is dropped, and sealing-inside-sealing is rejected:
+    /// one unwrap always reaches the app payload.
+    Sealed {
+        /// Ephemeral X25519 public key (32 bytes).
+        eph: [u8; 32],
+        /// Random per-message salt mixed into the payload key derivation.
+        salt: [u8; 16],
+        /// Random per-message id, deduplicated by the anti-replay cache.
+        id: [u8; 16],
+        /// ChaCha20-Poly1305 ciphertext of the serialized inner message.
+        ciphertext: Vec<u8>,
+    },
+}
+
+/// Largest UTF-8 chat message a peer will accept on `chat.plain`.
+///
+/// Envelopes can carry megabytes; chat does not need to, so receivers drop
+/// longer texts before they reach an application.
+pub const MAX_CHAT_TEXT: usize = 2048;
+
+/// Domain-separation prefix for a signed public-room post.
+pub const ROOM_POST_PREFIX: &[u8] = b"PWBROOMPOST1";
+
+/// Largest room name accepted anywhere on the wire.
+pub const MAX_ROOM_NAME: usize = 32;
+
+/// Hop budget a post starts with when its author broadcasts it; each
+/// forwarder spends one. Bounds how far one message can travel (and therefore
+/// how much amplification a single post can cause) even after the dedup set
+/// has wrapped.
+pub const ROOM_POST_HOPS: u8 = 8;
+
+/// Posts carried by one [`NetworkMessage::RoomHistory`] reply, and therefore
+/// the catch-up cost a joiner can ask a peer for.
+pub const ROOM_HISTORY_MAX: usize = 50;
+
+/// Whether `name` is usable as a room name: non-empty, at most
+/// [`MAX_ROOM_NAME`] ASCII letters, digits, `-`, `_`, or `.`.
+///
+/// Applications normalize to lowercase before sending; the wire carries
+/// exactly what every node validates, so one name means one room everywhere.
+pub fn is_valid_room_name(name: &str) -> bool {
+    !name.is_empty()
+        && name.len() <= MAX_ROOM_NAME
+        && name.bytes().all(|byte| {
+            byte.is_ascii_alphanumeric() || byte == b'-' || byte == b'_' || byte == b'.'
+        })
+}
+
+/// Canonical bytes a room post's author signs.
+///
+/// Binds the author, room, message id, timestamp, and text, so any copy of
+/// the post proves who wrote it — including one relayed by a peer that never
+/// talked to the receiver. `hops` is deliberately unsigned: forwarders spend
+/// it without invalidating the author's signature.
+pub fn room_post_sign_message(
+    sender: &PublicKey,
+    room: &str,
+    id: &[u8; 16],
+    sent_at: u64,
+    text: &str,
+) -> Vec<u8> {
+    let mut msg = Vec::new();
+    msg.extend_from_slice(ROOM_POST_PREFIX);
+    msg.extend_from_slice(&sender.0);
+    push_str(&mut msg, room);
+    msg.extend_from_slice(id);
+    msg.extend_from_slice(&sent_at.to_le_bytes());
+    push_str(&mut msg, text);
+    msg
+}
+
+/// One message in a public room, signed by the identity that wrote it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RoomPostWire {
+    /// The author — proven by [`Self::verify`], not by the transport.
+    pub sender: PublicKey,
+    /// Room this belongs to (see [`is_valid_room_name`]).
+    pub room: String,
+    /// Random per-post id: dedup for flooding, ordering for the transcript.
+    pub id: [u8; 16],
+    /// Author wall-clock unix timestamp (display only).
+    pub sent_at: u64,
+    /// Message body, at most [`MAX_CHAT_TEXT`] bytes.
+    pub text: String,
+    /// Remaining flood budget; decremented by each forwarder. Unsigned.
+    pub hops: u8,
+    /// Author signature over [`room_post_sign_message`].
+    pub signature: Signature,
+}
+
+impl RoomPostWire {
+    /// The author's signature over exactly the fields they committed to, plus
+    /// the shape every node enforces (name and length caps).
+    pub fn verify(&self) -> bool {
+        is_valid_room_name(&self.room)
+            && self.text.len() <= MAX_CHAT_TEXT
+            && self.signature.verify(
+                &self.sender,
+                &room_post_sign_message(
+                    &self.sender,
+                    &self.room,
+                    &self.id,
+                    self.sent_at,
+                    &self.text,
+                ),
+            )
+    }
+}
+
+/// Send options for [`crate::net::NodeEngine::send_to_with`] and
+/// [`crate::net::NodeEngine::broadcast_with`].
+///
+/// This is the low-level flag apps flip to get network features without
+/// touching crypto: [`SendFlags::E2EE`] seals any message type for its peer,
+/// and the receiver transparently delivers the inner message to the usual
+/// subscribers.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct SendFlags(u8);
+
+impl SendFlags {
+    /// No flags: the message travels exactly as serialized (the transport
+    /// envelope still authenticates and encrypts the datagram hop-wise).
+    pub const EMPTY: Self = Self(0);
+    /// Seal the payload end-to-end for the recipient (see `pwb-core::net::e2ee`).
+    pub const E2EE: Self = Self(1 << 0);
+
+    /// Whether every bit in `other` is set in `self`.
+    pub fn contains(self, other: Self) -> bool {
+        self.0 & other.0 == other.0
+    }
+
+    /// Set the bits from `other`.
+    pub fn insert(&mut self, other: Self) {
+        self.0 |= other.0;
+    }
+}
+
+impl std::ops::BitOr for SendFlags {
+    type Output = Self;
+    fn bitor(self, rhs: Self) -> Self {
+        Self(self.0 | rhs.0)
+    }
 }
 
 /// Magic prefix for an unauthenticated NAT hole-punch probe datagram.

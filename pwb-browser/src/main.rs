@@ -504,6 +504,30 @@ async fn main() {
         trust_anchors,
     ));
     let domain_handle = tokio::spawn(Arc::clone(&domain).run());
+
+    // `chat.plain`: E2EE chat over the embedded node. The receive loop
+    // records inbound messages for the page and prints them, and
+    // transcripts persist under the profile's `chat.json` like the daemon's,
+    // so conversations survive a restart. Saving merges with what is on disk
+    // already, so pointing `PWB_DATA` at the node's directory shares the
+    // conversation instead of one process overwriting the other's entries.
+    let chat = pwb_node::chat::ChatService::with_data_dir(engine.clone(), &data_dir);
+    let chat_handle = tokio::spawn(Arc::clone(&chat).run());
+
+    // Public rooms (`chat.plain?room=`): the browser joins the default room
+    // like the daemon does, so the square is live the moment the window
+    // opens. Posts are signed with this identity and flooded to peers, which
+    // relay them on; membership and transcripts persist under the profile
+    // beside the chat file.
+    let room = pwb_node::room::RoomService::with_data_dir(
+        engine.clone(),
+        identity.keypair.clone(),
+        &data_dir,
+    );
+    let room_handle = tokio::spawn(Arc::clone(&room).run());
+    if let Err(error) = room.join(pwb_node::room::DEFAULT_ROOM) {
+        eprintln!("[Room] {error}");
+    }
     match domain.trust_quorum() {
         Some((required, total)) => {
             println!("  Funding Trust            : {required}-of-{total} pinned attestor(s)")
@@ -659,6 +683,8 @@ async fn main() {
                 domain.available_credits(),
                 &peers,
                 network,
+                chat.snapshot(),
+                room.snapshot(),
             )
         };
         match local {
@@ -745,6 +771,8 @@ async fn main() {
         Arc::clone(&identity),
         Arc::clone(&federation),
         Arc::clone(&domain),
+        Arc::clone(&chat),
+        Arc::clone(&room),
         privacy,
         tokio::runtime::Handle::current(),
     )
@@ -762,6 +790,8 @@ async fn main() {
     federation_handle.abort();
     onion_handle.abort();
     domain_handle.abort();
+    chat_handle.abort();
+    room_handle.abort();
     px_handle.abort();
     engine.stop().await;
     println!("[Network] Node stopped.");
@@ -823,6 +853,7 @@ fn print_help() {
     println!("  pwb-browser -c \"plain://nodes.plain?connect=<ip:port>/<pubkey>\"");
     println!("  pwb-browser devtools");
     println!("  pwb-browser network.plain           (this node's addresses, peers, and services)");
+    println!("  pwb-browser chat.plain              (E2EE peer chat; onion-routed in onion mode)");
     println!(
         "  pwb-browser help.plain              (system-domain index, namespace and credit rules)"
     );

@@ -2,9 +2,11 @@
 
 use std::net::SocketAddr;
 
+use crate::chat::ChatSnapshot;
 use crate::domain::DomainRegistry;
 use crate::host::ArtifactHost;
 use crate::identity::IdentityManager;
+use crate::room::RoomSnapshot;
 use crate::search::SearchEngine;
 use pwb_core::crypto::PublicKey;
 use pwb_core::net::{NetworkMessage, SearchResultWire};
@@ -36,6 +38,11 @@ pub struct SystemDomainHandler<'a> {
     /// Live network view for `network.plain`; defaults to identity/registry
     /// figures only.
     pub network: NetworkSnapshot,
+    /// Chat state for `chat.plain`; defaults to this identity with no
+    /// transcripts.
+    pub chat: ChatSnapshot,
+    /// Public-room state for `chat.plain?room=`; defaults to no rooms.
+    pub room: RoomSnapshot,
 }
 
 impl<'a> SystemDomainHandler<'a> {
@@ -53,6 +60,14 @@ impl<'a> SystemDomainHandler<'a> {
             identity,
             balance,
             network: NetworkSnapshot::default(),
+            chat: ChatSnapshot {
+                local: identity.public_key(),
+                ..ChatSnapshot::default()
+            },
+            room: RoomSnapshot {
+                local: identity.public_key(),
+                ..RoomSnapshot::default()
+            },
         }
     }
 
@@ -60,6 +75,19 @@ impl<'a> SystemDomainHandler<'a> {
     /// compiling and `network.plain` degrades gracefully).
     pub fn with_network(mut self, network: NetworkSnapshot) -> Self {
         self.network = network;
+        self
+    }
+
+    /// Attach chat state (builder form, mirroring [`Self::with_network`]).
+    pub fn with_chat(mut self, chat: ChatSnapshot) -> Self {
+        self.chat = chat;
+        self
+    }
+
+    /// Attach public-room state (builder form, same shape as
+    /// [`Self::with_chat`]).
+    pub fn with_room(mut self, room: RoomSnapshot) -> Self {
+        self.room = room;
         self
     }
 

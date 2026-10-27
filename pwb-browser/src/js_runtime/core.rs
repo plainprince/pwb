@@ -51,6 +51,16 @@ pub struct DomHandle {
     /// from the `nodes.plain` connect card). The pipeline performs the dial on
     /// its Tokio runtime and renders the outcome.
     pub pending_connect: Rc<RefCell<Option<String>>>,
+    /// A chat message the page wants to send (set by
+    /// `__pwb_chat_send(peer_hex, text)` from the `chat.plain` composer).
+    /// The pipeline hands it to the chat service, which seals it with the
+    /// networking layer's E2EE flag, then re-renders the page.
+    pub pending_chat: Rc<RefCell<Option<(String, String)>>>,
+    /// A public-room post the page wants to make (set by
+    /// `__pwb_room_send(room, text)` from the `chat.plain?room=` composer).
+    /// The pipeline hands it to the room service, which signs it as this
+    /// identity and floods it, then re-renders the page.
+    pub pending_room: Rc<RefCell<Option<(String, String)>>>,
     /// Web API state: `localStorage`/`sessionStorage` maps and detached DOM
     /// nodes (`document.createElement` before they are appended).
     pub web: WebApiState,
@@ -70,6 +80,8 @@ impl DomHandle {
             focused_input: Rc::new(RefCell::new(None)),
             pending_navigate: Rc::new(RefCell::new(None)),
             pending_connect: Rc::new(RefCell::new(None)),
+            pending_chat: Rc::new(RefCell::new(None)),
+            pending_room: Rc::new(RefCell::new(None)),
             web: WebApiState::new(),
             scroll_to_bottom: Rc::new(RefCell::new(Vec::new())),
         }

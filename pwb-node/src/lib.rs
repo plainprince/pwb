@@ -2,10 +2,11 @@
 //!
 //! A node is a participant in a fully serverless network. It hosts sites,
 //! indexes and ranks search queries, verifies peers' work, manages identity,
-//! and handles system domain protocols (`search.plain`, `gossip.plain`, `nodes.plain`, `register.plain`).
+//! and handles system domain protocols (`search.plain`, `gossip.plain`, `nodes.plain`, `register.plain`, `chat.plain`).
 
 pub mod attestation;
 pub mod blind;
+pub mod chat;
 pub mod credit;
 pub mod domain;
 pub mod federation;
@@ -18,6 +19,7 @@ pub mod peers;
 pub mod persist;
 pub mod privacy;
 pub mod relay;
+pub mod room;
 pub mod search;
 pub mod system;
 pub mod verifier;
