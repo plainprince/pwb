@@ -28,6 +28,7 @@ through the registry, and is recognized by the browser as an address.
 | `.lam` | Short, punchy one-liner sites | `toot.lam` |
 | `.arch` | Archives and long-lived snapshots | `1994.arch` |
 | `.vio` | Vivid, visual and expressive pages | `canvas.vio` |
+| `.meh` | Deadpan, low-effort and shrug pages | `shrug.meh` |
 | `.org` | Communities, collectives, projects | `commons.org` |
 | `.net` | Networks and services | `relay.net` |
 | `.com` | Commercial and project homepages | `shop.com` |

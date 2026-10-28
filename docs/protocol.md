@@ -405,7 +405,7 @@ new_price    = clamp(price + (target - price) / ADJUSTMENT_DIVISOR,
 | Domain | Role |
 |--------|------|
 | `*.plain` | Official built-in pages only: system endpoints (`search.plain`, `devtools.plain`, `register.plain`, `gossip.plain`, `nodes.plain`, `network.plain`, `help.plain`, `chat.plain`) and shipped content pages (`welcome.plain`, `demo.plain`). Registration attempts by network participants are rejected. |
-| `*.pwb`, `*.non`, `*.yep`, `*.lam`, `*.arch`, `*.vio`, `*.org`, `*.net`, `*.com` | **Unofficial** user/network sites, claimed by participants using sparse credits (e.g. `mysite.pwb`, `club.non`). The list lives in `UNOFFICIAL_TLDS` (`pwb-core::system`); names outside it are refused by every claim path. Full list and rules: [docs/tlds.md](tlds.md). |
+| `*.pwb`, `*.non`, `*.yep`, `*.lam`, `*.arch`, `*.vio`, `*.meh`, `*.org`, `*.net`, `*.com` | **Unofficial** user/network sites, claimed by participants using sparse credits (e.g. `mysite.pwb`, `club.non`). The list lives in `UNOFFICIAL_TLDS` (`pwb-core::system`); names outside it are refused by every claim path. Full list and rules: [docs/tlds.md](tlds.md). |
 
 ### 5.1 Networked domain service (`pwb-node::domain::DomainService`)
 

@@ -209,7 +209,7 @@ pub fn is_reserved_system_domain(domain: &str) -> bool {
 pub const UNOFFICIAL_TLDS: &[&str] = &[
     // PlainWeb's own unofficial namespace (the original).
     "pwb", // Playful / purpose-flavoured namespaces.
-    "non", "yep", "lam", "arch", "vio",
+    "non", "yep", "lam", "arch", "vio", "meh",
     // The legacy trio, resolvable inside PlainWeb like any other name here.
     "org", "net", "com",
 ];
