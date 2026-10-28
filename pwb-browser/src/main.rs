@@ -10,8 +10,8 @@ use pwb_browser::resolver::{
 };
 use pwb_core::crypto::PublicKey;
 use pwb_core::net::{
-    peer_exchange_loop, resolve_bootstrap_peer, BootstrapPeer, NetworkMessage, NodeConfig,
-    NodeEngine,
+    peer_exchange_loop, prefer_family, resolve_bootstrap_peer, BootstrapPeer, NetworkMessage,
+    NodeConfig, NodeEngine,
 };
 use pwb_core::onion::CoverConfig;
 use pwb_node::domain::{DomainRegistry, DomainService};
@@ -58,6 +58,9 @@ async fn main() {
     let mut stun_server: Option<String> = None;
     let mut no_stun = false;
     let mut bootstrap_peers: Vec<BootstrapPeer> = Vec::new();
+    // Raw `--bootstrap` specs, resolved once the listen address (and thus
+    // the preferred address family) is known.
+    let mut bootstrap_specs: Vec<String> = Vec::new();
     let mut trust_anchors: Vec<PublicKey> = Vec::new();
     let mut join_sources: Vec<String> = Vec::new();
     let mut join_signer: Option<PublicKey> = None;
@@ -110,16 +113,7 @@ async fn main() {
             }
             "--bootstrap" => {
                 if i + 1 < args.len() {
-                    match resolve_bootstrap_peer(&args[i + 1]).await {
-                        Some(peer) => bootstrap_peers.push(peer),
-                        None => {
-                            eprintln!(
-                                "Error: --bootstrap requires <host:port>/<hex_pubkey>, got {}",
-                                args[i + 1]
-                            );
-                            std::process::exit(1);
-                        }
-                    }
+                    bootstrap_specs.push(args[i + 1].clone());
                     i += 2;
                 } else {
                     eprintln!("Error: --bootstrap requires a peer argument");
@@ -240,6 +234,25 @@ async fn main() {
         })
         .unwrap_or_else(|| PathBuf::from("pwb-data"));
 
+    // The listen address decides which address family this node can dial, so
+    // it is parsed before anything resolves a remote host: bootstrap seeds
+    // and the STUN server are both picked to match it, so an IPv6-only node
+    // is never handed an IPv4 address it can never reach (and vice versa).
+    let listen_addr: SocketAddr = listen_arg
+        .as_deref()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or("0.0.0.0:0".parse().unwrap());
+    let preferred_family = Some(listen_addr.ip());
+    for spec in &bootstrap_specs {
+        match resolve_bootstrap_peer(spec, preferred_family).await {
+            Some(peer) => bootstrap_peers.push(peer),
+            None => {
+                eprintln!("Error: --bootstrap requires <host:port>/<hex_pubkey>, got {spec}");
+                std::process::exit(1);
+            }
+        }
+    }
+
     // --- Network stack: join the swarm automatically ------------------------
     //
     // STUN (Google by default) discovers our public IP:port through NAT so
@@ -255,7 +268,10 @@ async fn main() {
         None
     } else {
         match tokio::net::lookup_host(stun_host).await {
-            Ok(mut addrs) => addrs.next(),
+            // Query a STUN server of the family this node's socket actually
+            // dials: a v4-only socket cannot reach an AAAA-only server. Falls
+            // back to any family when none match the preference.
+            Ok(addrs) => prefer_family(addrs, preferred_family),
             Err(e) => {
                 eprintln!("[Network] Could not resolve STUN server '{stun_host}': {e}");
                 None
@@ -272,7 +288,7 @@ async fn main() {
             .map(str::trim)
             .filter(|entry| !entry.is_empty())
         {
-            match resolve_bootstrap_peer(entry).await {
+            match resolve_bootstrap_peer(entry, preferred_family).await {
                 Some(peer) => env_bootstrap.push(peer),
                 None => eprintln!("[Network] Ignoring unresolvable bootstrap entry '{entry}'"),
             }
@@ -330,7 +346,7 @@ async fn main() {
         .await
         {
             Ok(descriptor) => {
-                let seeds = join::resolve_seeds(&descriptor).await;
+                let seeds = join::resolve_seeds(&descriptor, preferred_family).await;
                 for peer in seeds {
                     if !effective_bootstrap
                         .iter()
@@ -371,10 +387,6 @@ async fn main() {
             }
         }
     }
-    let listen_addr: SocketAddr = listen_arg
-        .as_deref()
-        .and_then(|s| s.parse().ok())
-        .unwrap_or("0.0.0.0:0".parse().unwrap());
     println!("  Listening on             : {}", listen_addr);
     let config = NodeConfig {
         listen_addr,
@@ -837,7 +849,7 @@ fn print_help() {
         "      --identity <path>  Persisted identity file (default: $PWB_IDENTITY or $HOME/.pwb/identity.json)"
     );
     println!(
-        "      --listen <addr>    UDP listen address (default: 0.0.0.0:0; use 127.0.0.1:0 for localhost-only)"
+        "      --listen <addr>    UDP listen address (default: 0.0.0.0:0; [::]:0 for dual-stack IPv4+IPv6, 127.0.0.1:0 for localhost-only)"
     );
     println!("  -h, --help           Show this help message");
     println!();

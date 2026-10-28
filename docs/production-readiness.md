@@ -391,10 +391,13 @@ so even after wiring this cannot carry current `NetworkMessage`s unchanged.
 ### `pwb-core::discovery`
 
 Beacon encoding, freshness, and Ed25519 verification are real. The service's
-production wiring is broken (see P0 #2). Additional gaps: discovery is IPv4
-broadcast/multicast only; beacons are not authenticated as *current* members of
-the swarm beyond the timestamp window; the merge path is the only place
-`last_seen` is refreshed.
+production wiring is broken (see P0 #2). Additional gaps: beacons are not
+authenticated as *current* members of the swarm beyond the timestamp window;
+the merge path is the only place `last_seen` is refreshed. Address families are
+covered: the service binds an IPv4 and an IPv6 socket side by side, fans out to
+`255.255.255.255`/`239.255.0.1` and to `[ff02::1]`/`[ff05::255:1]` respectively,
+and merges beacons from either into the same peer table (a family whose socket
+cannot bind is skipped, and one datagram leaving anywhere counts as success).
 
 ### `pwb-core::dht`
 
@@ -408,8 +411,11 @@ of nodes.
 
 ### `pwb-core::stun`
 
-Works for IPv4. IPv6 is explicitly unsupported. There is no NAT hole punching,
-no keepalive, no relay fallback. STUN alone does not make a node behind a
+Works for IPv4 and IPv6: `XOR-MAPPED-ADDRESS` decodes both families (IPv6
+bodies XOR the transaction ID per RFC 5389 §15.2), the query targets a STUN
+server matching the listen socket's family, and a dual-stack node queries an
+IPv4 server v4-mapped and canonicalizes the answer. There is no NAT hole
+punching, no keepalive, no relay fallback. STUN alone does not make a node behind a
 symmetric NAT or CGNAT dialable, which the README's "joins the swarm" phrasing
 implies.
 

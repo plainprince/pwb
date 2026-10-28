@@ -17,6 +17,12 @@ pwb-node --bootstrap '<host:port>/<hex_pubkey>'
 # Do not contact a STUN server (LAN-only reachability, no public-IP disclosure)
 pwb-node --no-stun
 
+# Bind a specific UDP address. The default 0.0.0.0:0 serves IPv4 peers only;
+# [::]:0 binds a dual-stack socket that serves IPv4 and IPv6 peers at once.
+# The listen family also picks the family for resolved bootstrap seeds and
+# the STUN server, so an IPv6-only node is never handed an IPv4 address.
+pwb-node --listen '[::]:7921'
+
 # Pin the attestors whose k-of-N certificates may fund domain claims. Repeat
 # the flag, or set PWB_TRUST_ANCHORS to a comma-separated list. Without pins a
 # node verifies funding against the live peer neighborhood instead.

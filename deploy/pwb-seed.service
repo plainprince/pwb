@@ -10,6 +10,8 @@ User=pwb
 Group=pwb
 # A public VPS with a directly routable address does not need STUN. Remove
 # --no-stun when the host is behind NAT and should advertise its mapped address.
+# 0.0.0.0 serves IPv4 only; use --listen [::]:7921 on a dual-stack or
+# IPv6-only host (one socket serves both families).
 ExecStart=/usr/local/bin/pwb-node \
     --listen 0.0.0.0:7921 \
     --no-stun \

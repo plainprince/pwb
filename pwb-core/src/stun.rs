@@ -1,10 +1,19 @@
-//! Minimal STUN client (RFC 5389) for NAT traversal.
+//! Minimal STUN client (RFC 5389) for NAT traversal, over IPv4 and IPv6.
 //!
 //! Sends a STUN `Binding Request` to a STUN server and parses the
 //! `XOR-MAPPED-ADDRESS` attribute from the `Binding Response` to learn this
 //! node's public IP:port as seen by the internet. A node behind a router can
 //! then advertise its public address in connection links instead of a private
-//! (RFC 1918) LAN address, so peers on the internet can dial it directly.
+//! (RFC 1918 / RFC 4193) LAN address, so peers on the internet can dial it
+//! directly.
+//!
+//! Both address families are handled: family `0x01` bodies carry a 4-byte
+//! IPv4 address XORed with the magic cookie, family `0x02` bodies carry a
+//! 16-byte IPv6 address XORed with the cookie (first 32 bits) plus the
+//! transaction ID (remaining 96 bits), per RFC 5389 §15.2. The query runs
+//! over whatever socket the caller passes, with the server address mapped to
+//! that socket's family, so a dual-stack node gets a mapped address for
+//! either family.
 //!
 //! No new dependencies: the STUN binary format is small enough to encode and
 //! decode by hand over the existing `tokio::net::UdpSocket`.
@@ -37,6 +46,16 @@ const ATTR_HEADER_LEN: usize = 4;
 /// XOR-MAPPED-ADDRESS value body: reserved(1) + family(1) + port(2) + ip(4).
 const XOR_MAPPED_ADDR_BODY_LEN: usize = 8;
 
+/// IPv6 XOR-MAPPED-ADDRESS value body: reserved(1) + family(1) + port(2) +
+/// ip(16).
+const XOR_MAPPED_ADDR_V6_BODY_LEN: usize = 20;
+
+/// Address family byte for IPv4 (RFC 5389 §15.2).
+const FAMILY_IPV4: u8 = 0x01;
+
+/// Address family byte for IPv6 (RFC 5389 §15.2).
+const FAMILY_IPV6: u8 = 0x02;
+
 /// Build a STUN Binding Request payload.
 pub fn build_binding_request(txn_id: &[u8; TRANSACTION_ID_LEN]) -> Vec<u8> {
     let mut buf = Vec::with_capacity(STUN_HEADER_LEN);
@@ -51,28 +70,48 @@ pub fn build_binding_request(txn_id: &[u8; TRANSACTION_ID_LEN]) -> Vec<u8> {
     buf
 }
 
-/// Encode an XOR-MAPPED-ADDRESS attribute body for an IPv4 address.
+/// Encode an XOR-MAPPED-ADDRESS attribute body for an IPv4 or IPv6 address.
 ///
-/// The port and IP are XORed with the STUN magic cookie (port with the high
-/// 16 bits, IP with the full 32 bits) per RFC 5389 §15.2. Values are stored
-/// in network byte order (big-endian).
+/// The port is always XORed with the magic cookie's low 16 bits. An IPv4
+/// address is XORed with the full 32-bit cookie; an IPv6 address is XORed
+/// with the cookie (first 32 bits) and the transaction ID (remaining 96
+/// bits), per RFC 5389 §15.2. Values are stored in network byte order
+/// (big-endian).
 #[allow(dead_code)]
-fn encode_xor_mapped_address(addr: SocketAddr) -> Vec<u8> {
-    let ip = match addr.ip() {
-        std::net::IpAddr::V4(ip) => u32::from_be_bytes(ip.octets()),
-        std::net::IpAddr::V6(_) => return Vec::new(), // IPv6 not supported here
-    };
-    let port = addr.port();
+fn encode_xor_mapped_address(addr: SocketAddr, txn_id: &[u8; TRANSACTION_ID_LEN]) -> Vec<u8> {
     let cookie = STUN_MAGIC_COOKIE;
-    let xor_port = port ^ (cookie >> 16) as u16;
-    let xor_ip = ip ^ cookie;
-    let mut out = Vec::with_capacity(XOR_MAPPED_ADDR_BODY_LEN);
-    out.push(0x00); // reserved
-    out.push(0x01); // address family: IPv4
-    out.push((xor_port >> 8) as u8); // high byte
-    out.push(xor_port as u8); // low byte
-    out.extend_from_slice(&xor_ip.to_be_bytes());
-    out
+    let xor_port = addr.port() ^ (cookie >> 16) as u16;
+    match addr.ip() {
+        std::net::IpAddr::V4(ip) => {
+            let xor_ip = u32::from_be_bytes(ip.octets()) ^ cookie;
+            let mut out = Vec::with_capacity(XOR_MAPPED_ADDR_BODY_LEN);
+            out.push(0x00); // reserved
+            out.push(FAMILY_IPV4);
+            out.push((xor_port >> 8) as u8); // high byte
+            out.push(xor_port as u8); // low byte
+            out.extend_from_slice(&xor_ip.to_be_bytes());
+            out
+        }
+        std::net::IpAddr::V6(ip) => {
+            let octets = ip.octets();
+            let mut xaddr = [0u8; 16];
+            xaddr.copy_from_slice(&octets);
+            // First 32 bits XOR the cookie, the remaining 96 bits XOR the
+            // transaction ID.
+            let head = u32::from_be_bytes([xaddr[0], xaddr[1], xaddr[2], xaddr[3]]) ^ cookie;
+            xaddr[0..4].copy_from_slice(&head.to_be_bytes());
+            for (byte, key) in xaddr[4..16].iter_mut().zip(&txn_id[..12]) {
+                *byte ^= key;
+            }
+            let mut out = Vec::with_capacity(XOR_MAPPED_ADDR_V6_BODY_LEN);
+            out.push(0x00); // reserved
+            out.push(FAMILY_IPV6);
+            out.push((xor_port >> 8) as u8); // high byte
+            out.push(xor_port as u8); // low byte
+            out.extend_from_slice(&xaddr);
+            out
+        }
+    }
 }
 
 /// Parse a STUN message header. Returns `Some((msg_type, txn_id))` when the
@@ -125,7 +164,7 @@ pub fn parse_binding_response(
         }
         let value = &attrs[offset..offset + attr_len];
         if attr_type == ATTR_XOR_MAPPED_ADDRESS {
-            return decode_xor_mapped_address(value);
+            return decode_xor_mapped_address(value, expected_txn);
         }
         // STUN attributes are padded to 4-byte boundaries.
         offset += attr_len;
@@ -136,24 +175,49 @@ pub fn parse_binding_response(
 }
 
 /// Decode an XOR-MAPPED-ADDRESS attribute value body into a `SocketAddr`.
-fn decode_xor_mapped_address(value: &[u8]) -> Option<SocketAddr> {
-    if value.len() < XOR_MAPPED_ADDR_BODY_LEN {
-        return None;
-    }
-    let _reserved = value[0];
-    let family = value[1];
-    if family != 0x01 {
-        return None; // only IPv4 supported
-    }
+///
+/// Handles both families: `0x01` (4-byte IPv4 XORed with the cookie) and
+/// `0x02` (16-byte IPv6 XORed with the cookie plus `txn_id`), per RFC 5389
+/// §15.2. `txn_id` is the request's transaction ID; IPv6 bodies cannot be
+/// decoded without it.
+fn decode_xor_mapped_address(
+    value: &[u8],
+    txn_id: &[u8; TRANSACTION_ID_LEN],
+) -> Option<SocketAddr> {
+    let family = *value.get(1)?;
     let cookie = STUN_MAGIC_COOKIE;
-    let xor_port = u16::from_be_bytes([value[2], value[3]]);
+    let xor_port = u16::from_be_bytes([*value.get(2)?, *value.get(3)?]);
     let port = xor_port ^ (cookie >> 16) as u16;
-    let xor_ip = u32::from_be_bytes([value[4], value[5], value[6], value[7]]);
-    let ip = xor_ip ^ cookie;
-    Some(SocketAddr::new(
-        std::net::IpAddr::V4(std::net::Ipv4Addr::from(ip)),
-        port,
-    ))
+    match family {
+        FAMILY_IPV4 => {
+            if value.len() < XOR_MAPPED_ADDR_BODY_LEN {
+                return None;
+            }
+            let xor_ip = u32::from_be_bytes([value[4], value[5], value[6], value[7]]);
+            let ip = xor_ip ^ cookie;
+            Some(SocketAddr::new(
+                std::net::IpAddr::V4(std::net::Ipv4Addr::from(ip)),
+                port,
+            ))
+        }
+        FAMILY_IPV6 => {
+            if value.len() < XOR_MAPPED_ADDR_V6_BODY_LEN {
+                return None;
+            }
+            let mut xaddr = [0u8; 16];
+            xaddr.copy_from_slice(&value[4..20]);
+            let head = u32::from_be_bytes([xaddr[0], xaddr[1], xaddr[2], xaddr[3]]) ^ cookie;
+            xaddr[0..4].copy_from_slice(&head.to_be_bytes());
+            for (byte, key) in xaddr[4..16].iter_mut().zip(&txn_id[..12]) {
+                *byte ^= key;
+            }
+            Some(SocketAddr::new(
+                std::net::IpAddr::V6(std::net::Ipv6Addr::from(xaddr)),
+                port,
+            ))
+        }
+        _ => None,
+    }
 }
 
 /// Send a STUN Binding Request to `server` and return the XOR-MAPPED-ADDRESS
@@ -172,7 +236,13 @@ pub async fn discover_mapped_address(
     }
 
     let request = build_binding_request(&txn_id);
-    socket.send_to(&request, server).await.ok()?;
+    // A dual-stack IPv6 socket must address an IPv4 STUN server v4-mapped;
+    // same-family servers pass through untouched.
+    let target = socket
+        .local_addr()
+        .ok()
+        .map_or(server, |local| crate::net::map_dest_for(server, local));
+    socket.send_to(&request, target).await.ok()?;
 
     let deadline = tokio::time::Instant::now() + timeout;
     let mut buf = [0u8; 1500];
@@ -184,7 +254,9 @@ pub async fn discover_mapped_address(
         match tokio::time::timeout(remaining, socket.recv_from(&mut buf)).await {
             Ok(Ok((len, _from))) => {
                 if let Some(addr) = parse_binding_response(&buf[..len], &txn_id) {
-                    return Some(addr);
+                    // A dual-stack socket observes its own IPv4 mapping as a
+                    // v4-mapped IPv6 address; hand back the canonical form.
+                    return Some(crate::net::unmap_source(addr));
                 }
             }
             Ok(Err(_)) => return None,
@@ -218,9 +290,10 @@ mod tests {
 
     #[test]
     fn test_xor_mapped_address_roundtrip() {
+        let txn = make_txn_id();
         let addr: SocketAddr = "203.0.113.45:19302".parse().unwrap();
-        let body = encode_xor_mapped_address(addr);
-        let decoded = decode_xor_mapped_address(&body).expect("decode");
+        let body = encode_xor_mapped_address(addr, &txn);
+        let decoded = decode_xor_mapped_address(&body, &txn).expect("decode");
         assert_eq!(decoded, addr);
     }
 
@@ -228,7 +301,7 @@ mod tests {
     fn test_parse_binding_response_accepts_valid() {
         let txn = make_txn_id();
         let mapped: SocketAddr = "198.51.100.7:54321".parse().unwrap();
-        let body = encode_xor_mapped_address(mapped);
+        let body = encode_xor_mapped_address(mapped, &txn);
         let attr_len = (ATTR_HEADER_LEN + body.len()) as u16;
         let mut resp = Vec::with_capacity(STUN_HEADER_LEN + attr_len as usize);
         resp.extend_from_slice(&STUN_BINDING_RESPONSE.to_be_bytes());
@@ -250,7 +323,7 @@ mod tests {
         let mapped: SocketAddr = "198.51.100.7:54321".parse().unwrap();
         let mut resp = Vec::new();
         resp.extend_from_slice(&STUN_BINDING_RESPONSE.to_be_bytes());
-        let body = encode_xor_mapped_address(mapped);
+        let body = encode_xor_mapped_address(mapped, &txn);
         resp.extend_from_slice(&(body.len() as u16).to_be_bytes());
         resp.extend_from_slice(&STUN_MAGIC_COOKIE.to_be_bytes());
         resp.extend_from_slice(&txn);
@@ -266,7 +339,7 @@ mod tests {
         let mapped: SocketAddr = "198.51.100.7:54321".parse().unwrap();
         let mut resp = Vec::new();
         resp.extend_from_slice(&STUN_BINDING_REQUEST.to_be_bytes()); // wrong type
-        let body = encode_xor_mapped_address(mapped);
+        let body = encode_xor_mapped_address(mapped, &txn);
         resp.extend_from_slice(&(body.len() as u16).to_be_bytes());
         resp.extend_from_slice(&STUN_MAGIC_COOKIE.to_be_bytes());
         resp.extend_from_slice(&txn);
@@ -296,12 +369,124 @@ mod tests {
     }
 
     #[test]
-    fn test_ipv6_mapped_address_not_supported() {
-        let _addr: SocketAddr = "[::1]:19302".parse().unwrap();
-        // encode_xor_mapped_address returns empty for v6; decode of empty fails.
-        let body = encode_xor_mapped_address("[::1]:19302".parse().unwrap());
-        assert!(body.is_empty());
-        assert!(decode_xor_mapped_address(&body).is_none());
+    fn test_ipv6_xor_mapped_address_roundtrip() {
+        let txn = make_txn_id();
+        let addr: SocketAddr = "[2001:db8::1]:12345".parse().unwrap();
+        let body = encode_xor_mapped_address(addr, &txn);
+        assert_eq!(body.len(), XOR_MAPPED_ADDR_V6_BODY_LEN);
+        assert_eq!(body[1], FAMILY_IPV6);
+        let decoded = decode_xor_mapped_address(&body, &txn).expect("v6 decode");
+        assert_eq!(decoded, addr);
+        // The transaction ID is part of the XOR key: a response attributed to
+        // a different transaction does not decode to the same address.
+        let mut wrong = txn;
+        wrong[0] ^= 0xff;
+        assert_ne!(decode_xor_mapped_address(&body, &wrong), Some(addr));
+    }
+
+    #[test]
+    fn test_ipv6_xor_mapped_address_matches_rfc_5389_rule() {
+        // Independent check of RFC 5389 §15.2 against hand-computed bytes:
+        // port 12345 (0x3039) XOR cookie-low (0x2112) = 0x112B; the address
+        // 2001:db8::1 XORs its first 32 bits with the cookie and the rest
+        // with the transaction ID.
+        let txn = make_txn_id();
+        let addr: SocketAddr = "[2001:db8::1]:12345".parse().unwrap();
+        let body = encode_xor_mapped_address(addr, &txn);
+        let expected: [u8; 20] = [
+            0x00, 0x02, // reserved, family IPv6
+            0x11, 0x2B, // 0x3039 ^ 0x2112
+            0x01, 0x13, 0xA9, 0xFA, // 0x20010db8 ^ 0x2112a442
+            0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77, 0x88, 0x99, 0xAA, 0xBB,
+            0xCD, // zero bytes ^ txn, 0x01 ^ 0xcc
+        ];
+        assert_eq!(body.as_slice(), &expected);
+        assert_eq!(decode_xor_mapped_address(&expected, &txn), Some(addr));
+    }
+
+    #[test]
+    fn test_parse_binding_response_accepts_ipv6() {
+        let txn = make_txn_id();
+        let mapped: SocketAddr = "[2001:db8::42]:7921".parse().unwrap();
+        let body = encode_xor_mapped_address(mapped, &txn);
+        let attr_len = (ATTR_HEADER_LEN + body.len()) as u16;
+        let mut resp = Vec::new();
+        resp.extend_from_slice(&STUN_BINDING_RESPONSE.to_be_bytes());
+        resp.extend_from_slice(&attr_len.to_be_bytes());
+        resp.extend_from_slice(&STUN_MAGIC_COOKIE.to_be_bytes());
+        resp.extend_from_slice(&txn);
+        resp.extend_from_slice(&ATTR_XOR_MAPPED_ADDRESS.to_be_bytes());
+        resp.extend_from_slice(&(body.len() as u16).to_be_bytes());
+        resp.extend_from_slice(&body);
+        assert_eq!(parse_binding_response(&resp, &txn), Some(mapped));
+        // A truncated IPv6 body is rejected rather than read out of bounds.
+        assert_eq!(
+            decode_xor_mapped_address(&body[..XOR_MAPPED_ADDR_V6_BODY_LEN - 1], &txn),
+            None
+        );
+        // Unknown families decode to nothing.
+        let mut alien = body.clone();
+        alien[1] = 0x03;
+        assert_eq!(decode_xor_mapped_address(&alien, &txn), None);
+    }
+
+    #[tokio::test]
+    async fn test_discover_over_dual_stack_socket() {
+        // A fake STUN server on IPv4 loopback, answered by a client socket
+        // bound dual-stack `[::]` — the exact shape of a node that accepts
+        // both families but queries an IPv4 STUN server.
+        let server = UdpSocket::bind((std::net::Ipv4Addr::LOCALHOST, 0))
+            .await
+            .expect("bind v4 server");
+        let server_addr = server.local_addr().unwrap();
+
+        let responder = tokio::spawn(async move {
+            let mut buf = [0u8; 1500];
+            let (len, from) = server.recv_from(&mut buf).await.expect("request");
+            assert_eq!(len, STUN_HEADER_LEN, "binding request size");
+            let mut txn = [0u8; TRANSACTION_ID_LEN];
+            txn.copy_from_slice(&buf[8..20]);
+            // Answer with the source address as the server observed it.
+            let body = encode_xor_mapped_address(from, &txn);
+            let mut resp = Vec::new();
+            resp.extend_from_slice(&STUN_BINDING_RESPONSE.to_be_bytes());
+            resp.extend_from_slice(&((ATTR_HEADER_LEN + body.len()) as u16).to_be_bytes());
+            resp.extend_from_slice(&STUN_MAGIC_COOKIE.to_be_bytes());
+            resp.extend_from_slice(&txn);
+            resp.extend_from_slice(&ATTR_XOR_MAPPED_ADDRESS.to_be_bytes());
+            resp.extend_from_slice(&(body.len() as u16).to_be_bytes());
+            resp.extend_from_slice(&body);
+            server.send_to(&resp, from).await.expect("response");
+        });
+
+        // Mirror the engine's dual-stack bind: explicitly opt in to
+        // IPv4-mapped traffic instead of trusting the platform default.
+        let socket = {
+            use socket2::{Domain, Protocol, Socket, Type};
+            let raw = Socket::new(Domain::IPV6, Type::DGRAM, Some(Protocol::UDP)).unwrap();
+            raw.set_only_v6(false).unwrap();
+            raw.bind(&std::net::SocketAddr::from((std::net::Ipv6Addr::UNSPECIFIED, 0)).into())
+                .unwrap();
+            raw.set_nonblocking(true).unwrap();
+            UdpSocket::from_std(raw.into()).unwrap()
+        };
+
+        let mapped = discover_mapped_address(&socket, server_addr, Duration::from_secs(3))
+            .await
+            .expect("mapped address");
+        responder.await.unwrap();
+        assert!(
+            mapped.is_ipv4(),
+            "the IPv4 server's view comes back unmapped"
+        );
+        assert_eq!(
+            mapped,
+            std::net::SocketAddr::from((
+                std::net::Ipv4Addr::LOCALHOST,
+                socket.local_addr().unwrap().port()
+            )),
+            "the client's own address as the server saw it"
+        );
     }
 
     #[test]
@@ -309,18 +494,21 @@ mod tests {
         // RFC 5389 §15.2 example: client at 192.168.1.10:50000 via NAT,
         // server sees 203.0.113.45:19302? Actually the RFC example uses a
         // specific cookie/xor. We just verify symmetry against a known value.
+        let txn = make_txn_id();
         let mapped: SocketAddr = "203.0.113.45:19302".parse().unwrap();
-        let body = encode_xor_mapped_address(mapped);
+        let body = encode_xor_mapped_address(mapped, &txn);
         assert_eq!(body.len(), 8);
-        let decoded = decode_xor_mapped_address(&body).expect("roundtrip");
+        assert_eq!(body[1], FAMILY_IPV4);
+        let decoded = decode_xor_mapped_address(&body, &txn).expect("roundtrip");
         assert_eq!(decoded, mapped);
     }
 
     #[test]
     fn test_localhost_roundtrip() {
+        let txn = make_txn_id();
         let mapped: SocketAddr = "127.0.0.1:7922".parse().unwrap();
-        let body = encode_xor_mapped_address(mapped);
-        let decoded = decode_xor_mapped_address(&body).expect("roundtrip");
+        let body = encode_xor_mapped_address(mapped, &txn);
+        let decoded = decode_xor_mapped_address(&body, &txn).expect("roundtrip");
         assert_eq!(decoded, mapped);
     }
 }

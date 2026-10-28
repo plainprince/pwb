@@ -78,6 +78,8 @@ pwb-node --bootstrap 'seed.example.com:7921/3f2a…'  # DNS is fine
 Hosts behind NAT should add `--listen 0.0.0.0:7921` and forward that UDP port
 so their link stays dialable; without a forward, two NATed nodes can still meet
 through a third node (`--connect` tries direct, then hole punching, then relay).
+On an IPv6-capable host, `--listen [::]:7921` binds a dual-stack socket that
+serves IPv4 and IPv6 peers at once.
 
 ## 3. Serve a site
 

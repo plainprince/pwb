@@ -8,6 +8,7 @@ use tokio::net::UdpSocket;
 use crate::crypto::DhPublicKey;
 use crate::onion::{OnionCell, CELL_SIZE};
 
+use super::addr::{map_dest_for, unmap_source};
 use super::messages::NetworkError;
 
 /// A bound UDP socket that carries onion cells hop-by-hop (TODO §2.3).
@@ -27,14 +28,20 @@ use super::messages::NetworkError;
 /// randomized intervals (no fixed period).
 pub struct CellChannel {
     socket: UdpSocket,
+    /// Local address, cached so sends can map destinations to this socket's
+    /// family without an extra syscall per cell (see [`super::addr`]).
+    local: SocketAddr,
     relays: HashMap<DhPublicKey, SocketAddr>,
 }
 
 impl CellChannel {
     /// Bind a channel on `local` (use port `0` for an ephemeral port).
     pub async fn bind(local: SocketAddr) -> std::io::Result<Self> {
+        let socket = UdpSocket::bind(local).await?;
+        let bound = socket.local_addr()?;
         Ok(Self {
-            socket: UdpSocket::bind(local).await?,
+            socket,
+            local: bound,
             relays: HashMap::new(),
         })
     }
@@ -80,7 +87,9 @@ impl CellChannel {
         addr: SocketAddr,
         cell: &OnionCell,
     ) -> Result<(), NetworkError> {
-        let sent = self.socket.send_to(&cell.to_bytes(), addr).await?;
+        // A dual-stack IPv6 channel addresses IPv4 relays v4-mapped.
+        let dest = map_dest_for(addr, self.local);
+        let sent = self.socket.send_to(&cell.to_bytes(), dest).await?;
         debug_assert_eq!(sent, CELL_SIZE, "UDP send must emit one full cell");
         Ok(())
     }
@@ -96,6 +105,8 @@ impl CellChannel {
             return Err(NetworkError::InvalidMessage);
         }
         let cell = OnionCell::from_bytes(&buf[..len])?;
-        Ok((cell, from))
+        // A v4-mapped source on a dual-stack channel is the peer's real IPv4
+        // address; report it canonicalized.
+        Ok((cell, unmap_source(from)))
     }
 }

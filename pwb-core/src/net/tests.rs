@@ -1,7 +1,7 @@
 use super::*;
 use crate::crypto::{ContentId, DhPublicKey, Keypair};
 use crate::onion::{CoverConfig, OnionCell, OnionError, CELL_SIZE};
-use std::net::SocketAddr;
+use std::net::{IpAddr, Ipv6Addr, SocketAddr};
 use std::str::FromStr;
 use std::time::{Duration, Instant};
 use tokio::net::UdpSocket;
@@ -1488,27 +1488,43 @@ async fn test_find_node_walks_past_the_first_hop() {
 async fn bootstrap_spec_accepts_literal_addresses_and_dns_names() {
     let keypair = Keypair::generate();
     let spec = format!("127.0.0.1:7921/{}", keypair.public.to_hex());
-    let peer = resolve_bootstrap_peer(&spec)
+    let peer = resolve_bootstrap_peer(&spec, None)
         .await
         .expect("literal bootstrap address resolves");
     assert_eq!(peer.public_key, keypair.public);
     assert_eq!(peer.address, "127.0.0.1:7921".parse().unwrap());
 
     let spec = format!("localhost:7921/{}", keypair.public.to_hex());
-    let peer = resolve_bootstrap_peer(&spec)
+    let peer = resolve_bootstrap_peer(&spec, None)
         .await
         .expect("DNS bootstrap name resolves");
     assert_eq!(peer.public_key, keypair.public);
     assert_eq!(peer.address.port(), 7921);
+
+    // An IPv6-preferring node resolves the same name to whatever family it
+    // publishes; a name with only one family still resolves either way.
+    let peer = resolve_bootstrap_peer(&spec, Some(IpAddr::V6(Ipv6Addr::LOCALHOST)))
+        .await
+        .expect("DNS bootstrap name resolves for an IPv6 listener");
+    assert_eq!(peer.address.port(), 7921);
+    let only_v4 = format!("127.0.0.1:7921/{}", keypair.public.to_hex());
+    let peer = resolve_bootstrap_peer(&only_v4, Some(IpAddr::V6(Ipv6Addr::LOCALHOST)))
+        .await
+        .expect("literal address is returned as written");
+    assert_eq!(peer.address, "127.0.0.1:7921".parse().unwrap());
 }
 
 #[tokio::test]
 async fn bootstrap_spec_rejects_malformed_entries() {
-    assert!(resolve_bootstrap_peer("seed.example:7921/not-hex")
+    assert!(resolve_bootstrap_peer("seed.example:7921/not-hex", None)
         .await
         .is_none());
-    assert!(resolve_bootstrap_peer("seed.example:7921").await.is_none());
-    assert!(resolve_bootstrap_peer("127.0.0.1:7921").await.is_none());
+    assert!(resolve_bootstrap_peer("seed.example:7921", None)
+        .await
+        .is_none());
+    assert!(resolve_bootstrap_peer("127.0.0.1:7921", None)
+        .await
+        .is_none());
 }
 
 /// Cover traffic is off by default and, when enabled with a fast schedule,

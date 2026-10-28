@@ -1,7 +1,7 @@
 //! The NodeEngine: peer table, lifecycle, messaging, and connection links.
 
 use std::collections::{HashMap, HashSet};
-use std::net::{IpAddr, SocketAddr};
+use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -19,6 +19,7 @@ use crate::telemetry::Metrics;
 
 use crate::onion::{CoverConfig, OnionCell};
 
+use super::addr::prefer_family;
 use super::e2ee::{self, E2eeState};
 use super::envelope::{self, Reassembler, ReplayGuard, MAX_MESSAGE_SIZE};
 use super::loops;
@@ -84,9 +85,20 @@ pub struct BootstrapPeer {
 /// while its address records change; the public key is still pinned, so
 /// resolution cannot substitute a different identity.
 ///
+/// `preferred_family` is this node's own listen address: when the name
+/// publishes both `A` and `AAAA`, the candidate matching the family the
+/// local socket can actually dial is chosen (an IPv6-only node must not be
+/// handed an IPv4 seed address it can never reach), falling back to the
+/// other family when nothing matches. `None` keeps the historical
+/// IPv4-first choice. A literal address in the spec is returned as written:
+/// an operator's explicit target is not second-guessed by family.
+///
 /// Returns `None` for malformed input or when the host does not resolve. The
 /// lookup is bounded so a broken resolver cannot stall startup indefinitely.
-pub async fn resolve_bootstrap_peer(spec: &str) -> Option<BootstrapPeer> {
+pub async fn resolve_bootstrap_peer(
+    spec: &str,
+    preferred_family: Option<IpAddr>,
+) -> Option<BootstrapPeer> {
     let spec = spec.trim();
     if let Some((address, public_key)) = NodeEngine::parse_connection_link(spec) {
         return Some(BootstrapPeer {
@@ -107,13 +119,8 @@ pub async fn resolve_bootstrap_peer(spec: &str) -> Option<BootstrapPeer> {
         address
     } else {
         let lookup = tokio::time::timeout(Duration::from_secs(5), tokio::net::lookup_host(host));
-        let mut resolved = lookup.await.ok()?.ok()?;
-        // Prefer IPv4 when both families are published: an operator seed is
-        // usually reachable over either, and this avoids an IPv6-only path on
-        // a host whose own socket is IPv4-only.
-        resolved
-            .find(|address| address.is_ipv4())
-            .or_else(|| resolved.next())?
+        let resolved = lookup.await.ok()?.ok()?;
+        prefer_family(resolved, preferred_family)?
     };
 
     Some(BootstrapPeer {
@@ -1172,9 +1179,19 @@ impl NodeEngine {
         if !bound_addr.ip().is_unspecified() {
             return bound_addr;
         }
-        best_effort_local_ip(bound_addr)
-            .map(|ip| SocketAddr::new(ip, bound_addr.port()))
-            .unwrap_or(bound_addr)
+        if let Some(ip) = best_effort_local_ip(bound_addr) {
+            return SocketAddr::new(ip, bound_addr.port());
+        }
+        // A dual-stack `[::]` socket on a host without IPv6 routing has no
+        // v6 source address, but it is still reachable over IPv4: probe that
+        // family too instead of advertising the unspecified address.
+        if bound_addr.is_ipv6() {
+            let v4_probe = SocketAddr::new(IpAddr::V4(Ipv4Addr::UNSPECIFIED), bound_addr.port());
+            if let Some(ip) = best_effort_local_ip(v4_probe) {
+                return SocketAddr::new(ip, bound_addr.port());
+            }
+        }
+        bound_addr
     }
 
     /// Static method to build a connection link from address and public key.
@@ -1575,6 +1592,13 @@ fn bind_udp_socket(addr: SocketAddr) -> std::io::Result<UdpSocket> {
     socket.set_nonblocking(true)?;
     let _ = socket.set_recv_buffer_size(8 * 1024 * 1024);
     let _ = socket.set_send_buffer_size(8 * 1024 * 1024);
+    if addr.is_ipv6() && addr.ip().is_unspecified() {
+        // `[::]` should be dual-stack: accept IPv4 peers as v4-mapped on the
+        // same socket (the sender loop maps destinations, the receiver loop
+        // unmaps sources). Platforms whose default is v6-only are opted in
+        // explicitly rather than silently losing IPv4 reachability.
+        let _ = socket.set_only_v6(false);
+    }
     socket.bind(&addr.into())?;
     UdpSocket::from_std(socket.into())
 }

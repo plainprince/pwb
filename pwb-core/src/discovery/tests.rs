@@ -121,13 +121,43 @@ fn test_beacon_verify_rejects_tampering_and_bad_timing() {
 #[tokio::test]
 async fn test_announce_fanout_sends() {
     let service = service_on(8123).await;
-    // At least one of broadcast / multicast must accept the datagram on
-    // any usable network stack; both failing means discovery is dead.
+    // At least one of broadcast / multicast must accept the datagram on any
+    // usable network stack; both failing means discovery is dead. Each bound
+    // family (IPv4, IPv6) fans out to two targets, so the ceiling is four.
     let sent = service
         .announce(unix_time())
         .await
         .expect("fanout sends at least one datagram");
-    assert!((1..=2).contains(&sent));
+    assert!((1..=4).contains(&sent));
+}
+
+#[tokio::test]
+async fn test_ipv6_unicast_beacon_discovery_merges_peer() {
+    let a = service_on(8123).await;
+    let b = service_on(8124).await;
+    let addr_b = b
+        .local_addr_v6()
+        .expect("IPv6 discovery socket bound on this host");
+    assert_eq!(
+        addr_b.ip(),
+        std::net::IpAddr::V6(std::net::Ipv6Addr::UNSPECIFIED)
+    );
+    let t = unix_time();
+
+    // A beacon sent to the IPv6 socket is validated and merged like any
+    // other, and the peer is recorded at its real IPv6 source address.
+    a.send_beacon_to(addr_b, t)
+        .await
+        .expect("unicast v6 beacon");
+    let seen = b.recv_beacon(t, Instant::now()).await.expect("valid");
+    assert_eq!(seen, a.public_key());
+    let peer = b.peer(&seen).expect("merged into peer table");
+    assert_eq!(peer.address.port(), 8123, "advertised service port");
+    assert_eq!(
+        peer.address.ip(),
+        std::net::IpAddr::V6(std::net::Ipv6Addr::LOCALHOST),
+        "source IP of the IPv6 beacon"
+    );
 }
 
 #[tokio::test]

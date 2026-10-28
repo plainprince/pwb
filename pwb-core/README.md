@@ -12,7 +12,7 @@ It is pure protocol and pure data structures: no rendering, no sockets-driven po
 - `net` — serverless transport framing and system-domain message types; the shared `NodeEngine` peer table, routing logic, and socket event loops.
 - `onion` — fixed-size (512-byte) Sphinx-style onion cells: layered ChaCha20-Poly1305 over per-hop X25519 ECDH keys.
 - `dht` — Kademlia XOR-metric routing table with ping/pong health checks and latency-weighted contact selection.
-- `discovery` — LAN peer discovery via Ed25519-signed UDP broadcast and IP multicast beacons.
+- `discovery` — LAN peer discovery via Ed25519-signed UDP beacons, fanned out over IPv4 broadcast/multicast and the IPv6 all-nodes/site-scoped multicast groups.
 - `qr` — byte-mode QR encoding (v1–10, level M) and `nodes.plain` pairing-payload parsing for out-of-band node exchange.
 - `system` — unified system-protocol resolver: the reserved `.plain` domain list, `plain://` URL parsing, and the `nodes.plain` connection-link codec.
 - `components` — reusable UI component primitives (sidebars, navbars, tabs) shared by `pwb-web` and `pwb-browser`.

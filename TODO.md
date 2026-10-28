@@ -227,8 +227,9 @@ a loopback test cluster.
   now resolve `<host:port>/<hex_pubkey>` through DNS instead of requiring a
   literal IP. The public key stays pinned, so a changed address record cannot
   substitute a different seed identity. Resolution is bounded to five seconds
-  and prefers an IPv4 answer when a host publishes both families. Covered by
-  `bootstrap_spec_accepts_literal_addresses_and_dns_names`.
+  and, since 2026-10-28, matches the address family of the `--listen` socket
+  when a host publishes both families (IPv4 preferred when none is
+  configured). Covered by `bootstrap_spec_accepts_literal_addresses_and_dns_names`.
 - **Onion cells have a replay cache.** Relays hash each accepted 512-byte cell
   and reject exact duplicates for five minutes, so captured cells cannot be
   re-injected to repeat a peel or delivery. The cache is capacity-bounded
@@ -329,6 +330,24 @@ Residual (accepted, not blocking local/public use): a node that does not pin
 `--trust-anchor` still trusts its live peer view during bootstrap; see the
 first item above. Validating on real multi-node internet topologies and
 against a global passive adversary remains future work.
+
+### Closed 2026-10-28
+
+- **Full IPv6 support.** The UDP transport, STUN, LAN discovery, and
+  bootstrap/seed resolution now handle both address families. `[::]` binds are
+  explicitly dual-stack (outbound destinations are v4-mapped for the kernel,
+  received sources canonicalized), `XOR-MAPPED-ADDRESS` encodes and decodes
+  family `0x02` per RFC 5389 §15.2, discovery binds an IPv4 and a v6-only
+  socket side by side on port 7922 and fans out to `ff02::1` / `ff05::255:1`
+  alongside broadcast and `239.255.0.1`, and both binaries parse `--listen`
+  before resolving bootstrap specs, `PWB_BOOTSTRAP`, join-descriptor seeds,
+  and the STUN server so every dialled address matches the listen family.
+  The default listen stays `0.0.0.0:0` (switching it to `[::]` would lose
+  IPv4 on platforms that default to v6-only); `--listen [::]:7921` opts a
+  node or seed into dual-stack, as documented in `docs/seed-node.md` and the
+  runbook. Covered by the workspace test suite plus a live three-node run: an
+  IPv6 peer and an IPv4 peer completed the handshake against one dual-stack
+  socket at the same time.
 
 
 ---

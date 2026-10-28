@@ -350,11 +350,18 @@ pub fn parse_seed_spec(spec: &str) -> Option<JoinSeed> {
 
 /// Turn descriptor seeds into dialable bootstrap peers. Unresolvable entries
 /// are reported and skipped, matching `--bootstrap` behaviour.
-pub async fn resolve_seeds(descriptor: &JoinDescriptor) -> Vec<BootstrapPeer> {
+///
+/// `preferred_family` is the node's listen address: a seed publishing both
+/// `A` and `AAAA` is resolved to the family this node can actually dial
+/// (see [`resolve_bootstrap_peer`]).
+pub async fn resolve_seeds(
+    descriptor: &JoinDescriptor,
+    preferred_family: Option<std::net::IpAddr>,
+) -> Vec<BootstrapPeer> {
     let mut peers = Vec::new();
     for seed in &descriptor.seeds {
         let spec = format!("{}/{}", seed.address, seed.public_key.to_hex());
-        match resolve_bootstrap_peer(&spec).await {
+        match resolve_bootstrap_peer(&spec, preferred_family).await {
             Some(peer) => {
                 if !peers
                     .iter()

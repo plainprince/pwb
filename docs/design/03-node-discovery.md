@@ -18,6 +18,7 @@ single bound UDP socket at `DISCOVERY_PORT=7922`.
 
 - **Broadcast fanout** — beacons go to `255.255.255.255:7922` (UDP broadcast), reaching every host on the LAN subnet
 - **Multicast group** — beacons are also sent to (and received from) `239.255.0.1:7922` (`join_multicast_v4` best-effort with loopback enabled); only sockets that joined the group exchange this traffic
+- **IPv6 fanout** — a second, v6-only socket shares the same port and sends to `ff02::1:7922` (link-local all-nodes) and the site-scoped group `ff05::255:1:7922` (`join_multicast_v6` best-effort); either family may be missing on a given host and is then skipped
 - **Optional direct unicast** to known peers
 - Success criterion: "≥1 datagram sent" — a host without multicast routing still works via broadcast
 
@@ -57,9 +58,10 @@ Support parsing and launching node connections via
 - Help text in both binaries updated with `plain://nodes.plain?connect=...` example
 - `pwb_core::net::resolve_bootstrap_peer` accepts `<host:port>/<hex_pubkey>`
   as well as a full connection link. A DNS hostname is resolved at startup
-  (five-second bound, IPv4 preferred when both families exist) while the
-  public key remains pinned, so a seed's address records can change without
-  changing its identity. `--bootstrap` and `PWB_BOOTSTRAP` both use it.
+  (five-second bound, address family matched to the local `--listen` socket
+  when both `A` and `AAAA` exist, IPv4 preferred when none is configured)
+  while the public key remains pinned, so a seed's address records can change
+  without changing its identity. `--bootstrap` and `PWB_BOOTSTRAP` both use it.
 
 ### Well-known join descriptors (`pwb-core::join`, `pwb-node::join`)
 

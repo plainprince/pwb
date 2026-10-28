@@ -345,6 +345,8 @@ LAN auto-discovery via UDP broadcast beacons and IP multicast.
 | `DISCOVERY_PORT` | `7922` | UDP port for broadcast and multicast beacons. |
 | Multicast group | `239.255.0.1` | Only sockets that joined the group exchange this traffic. |
 | Broadcast address | `255.255.255.255` | Reaches every host on the LAN subnet. |
+| IPv6 multicast group | `ff05::255:1` | Site-scoped counterpart of the IPv4 group; sent on the v6-only discovery socket. |
+| IPv6 broadcast address | `ff02::1` | Link-local all-nodes: the IPv6 equivalent of limited broadcast. |
 | `BEACON_INTERVAL` | `30s` | Period between a node's own beacon announcements. |
 | `BEACON_MAX_AGE` | `120s` | Beacon timestamps outside this window are rejected (stale replays and future-dated floods). |
 | `ADDR_REBIND_GRACE` | `300s` | A replayed old beacon cannot redirect an existing peer's advertised port until this grace window elapses (anti-replay redirect). |
@@ -438,7 +440,7 @@ A connection link advertises a dialable address plus the node's Ed25519 public k
 
 The bind address is what STUN learns from. Nodes previously bound their UDP socket to `127.0.0.1`, which cannot reach a public STUN server, so `public_addr` stayed `None` and the link fell back to the loopback bound address — not dialable from the internet.
 
-Nodes now bind to `0.0.0.0` by default (`--listen` overrides, e.g. `127.0.0.1:0` for localhost-only). On startup they query the STUN server for the public IP:port; the link uses that when available. When STUN is unavailable, the engine probes the OS routing table for a routable LAN IP for the bound port, so the link is at least dialable on the local network.
+Nodes now bind to `0.0.0.0` by default (`--listen` overrides, e.g. `127.0.0.1:0` for localhost-only, `[::]:7921` for a dual-stack IPv4+IPv6 socket). On startup they query the STUN server for the public IP:port; the link uses that when available. When STUN is unavailable, the engine probes the OS routing table for a routable LAN IP for the bound port, so the link is at least dialable on the local network. Bootstrap seeds and STUN servers that publish both `A` and `AAAA` are resolved to the family the listen socket can actually dial; a dual-stack socket addresses IPv4 peers v4-mapped and canonicalizes their sources on receipt.
 
 ### 7.2 Persistent identity (`--identity`)
 

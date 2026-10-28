@@ -26,6 +26,7 @@
 //! are reported through [`NodeEngine::subscribe_relay`] so the node layer can
 //! meter and mint relay credits.
 
+mod addr;
 mod cell_channel;
 mod e2ee;
 mod engine;
@@ -37,6 +38,7 @@ mod onion_transport;
 #[cfg(test)]
 mod tests;
 
+pub use addr::{map_dest_for, prefer_family, unmap_source};
 pub use cell_channel::CellChannel;
 pub use e2ee::E2eeState;
 pub use engine::{

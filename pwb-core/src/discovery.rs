@@ -8,6 +8,13 @@
 //! - **Multicast group** — beacons are also sent to (and received from)
 //!   `239.255.0.1:7922`; only sockets that joined the group exchange this
 //!   traffic, so the group works independently of subnet broadcast rules.
+//! - **IPv6** — the service binds a second, v6-only socket beside the IPv4
+//!   one and fans out to `[ff02::1]:7922` (link-local all-nodes, the IPv6
+//!   broadcast equivalent) and the site-scoped group `[ff05::255:1]:7922`.
+//!   An IPv4-only or IPv6-only host keeps working: a family whose socket
+//!   could not bind is simply skipped, and a beacon is only required to
+//!   leave on *some* socket. Beacons received on either socket merge into
+//!   the same peer table.
 //! - **Authenticated** — each beacon carries the announcer's Ed25519 public
 //!   key and a signature over magic/version/port/timestamp/key, so a peer
 //!   identity cannot be forged or altered in flight.
@@ -36,7 +43,7 @@ mod tests;
 pub use beacon::{unix_time, Beacon};
 pub use constants::{
     ADDR_REBIND_GRACE, BEACON_INTERVAL, BEACON_MAX_AGE, BEACON_SIZE, BROADCAST_ADDR,
-    DISCOVERY_PORT, MULTICAST_GROUP,
+    BROADCAST_ADDR_V6, DISCOVERY_PORT, MULTICAST_GROUP, MULTICAST_GROUP_V6,
 };
 pub use error::{BeaconError, DiscoveryError};
 pub use service::{DiscoveryConfig, DiscoveryService};

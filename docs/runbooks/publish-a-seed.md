@@ -15,7 +15,7 @@ Use it with:
 
 | Item | Notes |
 |------|-------|
-| A host with a public IPv4 address | A VPS with a directly routable address is simplest; a home host needs UDP port-forwarding |
+| A host with a public IPv4 **or IPv6** address | A VPS with a directly routable address is simplest; a home host needs UDP port-forwarding. An IPv6-only host needs no other change: pass `--listen [::]:7921` |
 | UDP 7921 reachable inbound | This is the only port the public needs. UDP 7922 is LAN discovery only |
 | A built `pwb-node` | `cargo build --release -p pwb-node` |
 | A separate release machine | Where the signing key lives; it never needs to be the seed |
@@ -50,6 +50,11 @@ sudo ufw allow 7921/udp
 # nftables
 sudo nft add rule inet filter input udp dport 7921 accept
 ```
+
+The shipped unit binds `0.0.0.0:7921` (IPv4). On a dual-stack or IPv6-only
+host, change `--listen` in `ExecStart` to `[::]:7921`: one socket then serves
+IPv4 and IPv6 peers at once, and the node resolves bootstrap seeds and its
+STUN server to a family that socket can actually dial.
 
 Confirm the process, socket, and health endpoint:
 
@@ -277,12 +282,14 @@ variable cannot turn a withdrawal into a seed list.
 | `--join-required` exits 1 with `no usable join source` | Fetch failed; check DNS, HTTPS, and the descriptor URL |
 | `--join-required` exits 1 with `the published descriptor withdraws all seeds` | Intended: the descriptor is a signed withdrawal. Republish a seed list to restore service |
 | Descriptor verifies but the seed never joins | UDP 7921 blocked or the seed is down. Check `ufw status`, `ss -lunp`, and `journalctl -u pwb-seed`; retest from another network |
+| Join works from IPv4 but not IPv6 (or vice versa) | Address-family mismatch: a client bound to `0.0.0.0` cannot dial an IPv6-only seed, and the reverse. Give the client a matching `--listen` (e.g. `[::]:0`) or run the seed dual-stack with `--listen [::]:7921` |
 | `pwb-node … predates --verify-join` | Rebuild the binary (`cargo build --release -p pwb-node`) or pass `--node` |
 | Script refuses a key inside the repository | Intended. Move `--identity` outside the checkout; do not use `--force-key-in-repo` for a real key |
 
 ## Pre-publish checklist
 
 - [ ] `pwb-node --bootstrap <link>` joins from a different network
+- [ ] The join check was repeated from the other address family when the seed is single-family (an IPv6-only seed never answers an IPv4-only client)
 - [ ] `pwb-node --verify-join <published url> --join-signer <hex> --require-join-signature` passes
 - [ ] Descriptor lists only healthy seeds and the intended anchors
 - [ ] Signer key published somewhere independent of the descriptor host

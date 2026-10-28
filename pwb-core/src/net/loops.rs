@@ -18,6 +18,7 @@ use crate::discovery::unix_time;
 use crate::onion::{CoverConfig, CoverDispatch, OnionAction, OnionCell, CELL_SIZE, MIN_HOPS};
 use crate::telemetry::Metrics;
 
+use super::addr::{map_dest_for, unmap_source};
 use super::e2ee::{self, E2eeState};
 use super::engine::{NodeConfig, PeerInfo, PEER_TIMEOUT};
 use super::envelope::{self, Reassembler, ReplayGuard};
@@ -475,11 +476,19 @@ pub(super) async fn sender_loop(
     // round-trip time and keeps bulk replies intact on loopback and LAN links.
     const SEND_BURST: usize = 32;
     const SEND_PAUSE: Duration = Duration::from_millis(1);
+    // The bound socket's family decides how destinations are written: an
+    // IPv6 (including dual-stack `[::]`) socket must address IPv4 peers
+    // v4-mapped. Resolve it once instead of per datagram.
+    let local = socket.local_addr().ok();
     let mut sent_since_pause = 0usize;
     while *running.lock().unwrap() {
         tokio::select! {
             Some((addr, bytes)) = receiver.recv() => {
-                if socket.send_to(&bytes, addr).await.is_ok() {
+                let dest = match local {
+                    Some(local) => map_dest_for(addr, local),
+                    None => addr,
+                };
+                if socket.send_to(&bytes, dest).await.is_ok() {
                     metrics.record_datagram_sent(bytes.len());
                 }
                 sent_since_pause += 1;
@@ -542,7 +551,7 @@ pub(super) async fn receiver_loop(
         tokio::select! {
             result = socket.recv_from(&mut buf) => {
                 let (len, from) = match result {
-                    Ok(received) => received,
+                    Ok((len, from)) => (len, unmap_source(from)),
                     // Transient socket error; keep listening.
                     Err(_) => continue,
                 };

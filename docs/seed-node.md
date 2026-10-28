@@ -12,8 +12,10 @@ assets for running your own.
 
 ## 1. Host and identity
 
-Use a host with a public IPv4 address (or a stable port-forward) and open UDP
-7921. Reserve UDP 7922 only if you also want LAN discovery on that host.
+Use a host with a public IPv4 **or IPv6** address (or a stable port-forward)
+and open UDP 7921. An IPv6-only host works unchanged: pass
+`--listen [::]:7921` and the node resolves seeds and STUN to IPv6 too. Reserve
+UDP 7922 only if you also want LAN discovery on that host.
 
 ```sh
 sudo groupadd --system pwb 2>/dev/null || true
@@ -56,6 +58,12 @@ curl -s http://127.0.0.1:7711/metrics | grep pwb_peers_connected
 
 Keep `--health-addr` on loopback. The endpoint is read-only, but it still
 reveals operational state and should not be exposed publicly.
+
+The unit binds `--listen 0.0.0.0:7921`, which serves IPv4 peers only. On a
+dual-stack or IPv6-only host change it to `[::]:7921`: one socket then serves
+both families, and whatever seeds or STUN server the node resolves follow the
+family it can dial. `ss -lunp | grep 7921` should show the address you
+expect: `0.0.0.0:7921` for the default, `[::]:7921` for a dual-stack bind.
 
 ## 3. Publish the join information
 
