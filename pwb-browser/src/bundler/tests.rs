@@ -5,7 +5,7 @@ use std::path::PathBuf;
 
 #[test]
 fn test_bundle_from_dir() {
-    let test_dir = PathBuf::from(format!("/tmp/pwb_bundle_{}", std::process::id()));
+    let test_dir = std::env::temp_dir().join(format!("pwb_bundle_{}", std::process::id()));
     let _ = fs::remove_dir_all(&test_dir);
     fs::create_dir_all(&test_dir).unwrap();
     fs::write(
@@ -25,7 +25,7 @@ fn test_bundle_from_dir() {
 fn test_text_inherits_parent_font_size() {
     // Inline text inside a font-sized container inherits the container's
     // `font-size` (the devtools tab labels) instead of the 3vh default.
-    let test_dir = PathBuf::from(format!("/tmp/pwb_inherit_{}", std::process::id()));
+    let test_dir = std::env::temp_dir().join(format!("pwb_inherit_{}", std::process::id()));
     let _ = fs::remove_dir_all(&test_dir);
     fs::create_dir_all(&test_dir).unwrap();
     fs::write(

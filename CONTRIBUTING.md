@@ -23,6 +23,14 @@ The workspace resolver is `2`; all crates use edition 2021. No network is
 required for `cargo check`/`cargo test` — dependencies are vendored/locked
 via `Cargo.lock`.
 
+Linux, macOS, and Windows are supported hosts, and CI runs the zero-warning
+gate on Linux and Windows. Default state paths go through
+`pwb_core::paths::home_dir()` (`$HOME`, else `$USERPROFILE`, else
+`%HOMEDRIVE%%HOMEPATH%`), so a shell that never sets `$HOME` — stock
+`cmd.exe` and PowerShell — still resolves `~/.pwb` instead of scattering data
+directories into the working directory. New default paths must use that
+helper rather than reading `$HOME` directly.
+
 ## 2. Format
 
 Run before every commit:

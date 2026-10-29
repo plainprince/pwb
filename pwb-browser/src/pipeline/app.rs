@@ -695,11 +695,12 @@ impl BrowserApp {
             use std::hash::Hasher;
             hasher.write(bytes);
             let hash = hasher.finish();
-            let dir = std::env::var("PWB_STORAGE_DIR").unwrap_or_else(|_| {
-                std::env::var("HOME").unwrap_or_else(|_| ".".to_string()) + "/.pwb"
-            });
+            let dir = std::env::var_os("PWB_STORAGE_DIR")
+                .map(std::path::PathBuf::from)
+                .or_else(|| pwb_core::paths::home_dir().map(|home| home.join(".pwb")))
+                .unwrap_or_else(|| std::path::PathBuf::from("."));
             *self.dom_handle_render.web.storage_path.borrow_mut() =
-                Some(std::path::PathBuf::from(dir).join(format!("{:016x}.json", hash)));
+                Some(dir.join(format!("{:016x}.json", hash)));
         }
 
         // Re-run the page script so handlers are registered for the new DOM.

@@ -132,6 +132,21 @@ async fn test_announce_fanout_sends() {
 }
 
 #[tokio::test]
+async fn test_ipv4_socket_is_allowed_to_broadcast() {
+    // The fanout's 255.255.255.255 datagram needs `SO_BROADCAST`; without it
+    // the kernel refuses it (`EACCES` on Unix, `WSAEACCES` on Windows) and
+    // `announce` quietly degrades to multicast only — a failure the fanout
+    // deliberately tolerates, so this flag is the one thing that would go
+    // missing without a test noticing.
+    let service = service_on(8123).await;
+    assert_eq!(
+        service.broadcast_enabled().map(Result::unwrap),
+        Some(true),
+        "the IPv4 discovery socket must be permitted to send broadcast beacons"
+    );
+}
+
+#[tokio::test]
 async fn test_ipv6_unicast_beacon_discovery_merges_peer() {
     let a = service_on(8123).await;
     let b = service_on(8124).await;

@@ -93,6 +93,11 @@ mod native {
         true
     }
 
+    /// Only the Unix probe below looks programs up on `PATH`; Windows uses
+    /// the native TaskDialog API and never probes, so the helper is Unix-only
+    /// rather than dead code in a Windows build (the CI gate is
+    /// `-D warnings`).
+    #[cfg(unix)]
     pub(super) fn in_path(name: &str) -> bool {
         std::env::var_os("PATH")
             .map(|paths| {

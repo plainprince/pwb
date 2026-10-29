@@ -100,7 +100,8 @@ old synthetic workload instead of real work. Hosted artifacts, the search
 index, the domain registry, credits, `chat.plain` transcripts (`chat.json`),
 public-room history and memberships (`rooms.json`),
 and the peer table persist under `--data
-<dir>` (default `~/.pwb/data`) and reload at startup. On restart the node
+<dir>` (default `~/.pwb/data`, `%USERPROFILE%\.pwb\data` when `$HOME` is
+unset as it is on a stock Windows shell) and reload at startup. On restart the node
 re-dials the 32 most recently seen remembered peers in parallel, so it can
 rejoin the swarm even when no bootstrap is reachable.
 

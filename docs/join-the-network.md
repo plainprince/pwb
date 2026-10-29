@@ -25,7 +25,8 @@ You now have `pwb-node` (the network node), `pwb-web` (the site compiler), and
 pwb-node
 ```
 
-First start creates your identity in `~/.pwb/` and prints, among other things:
+First start creates your identity in `~/.pwb/` (on Windows: `%USERPROFILE%\.pwb`,
+resolved from `$USERPROFILE` when `$HOME` is unset) and prints, among other things:
 
 ```text
 [Join] no seed list is published at https://raw.githubusercontent.com/plainprince/pwb/main/deploy/join.json yet (HTTP 404)

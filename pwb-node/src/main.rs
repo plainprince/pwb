@@ -93,6 +93,7 @@ fn print_help() {
         "      --identity <path>      Persisted identity file (default: $HOME/.pwb/identity.json)"
     );
     println!("      --data <dir>           Data directory (default: $HOME/.pwb/data)");
+    println!("                              (home dir: $HOME, else %USERPROFILE% on Windows)");
     println!();
     println!("Serving and searching:");
     println!("      --host <dir|file>      Publish a site directory or .pwb bundle");
@@ -604,9 +605,7 @@ async fn main() {
 
     let data_dir = data_arg
         .or_else(|| std::env::var_os("PWB_DATA").map(PathBuf::from))
-        .or_else(|| {
-            std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".pwb").join("data"))
-        })
+        .or_else(|| pwb_core::paths::home_dir().map(|home| home.join(".pwb").join("data")))
         .unwrap_or_else(|| PathBuf::from("pwb-data"));
 
     // `--chat <hex>` pairs the stdin REPL below with one peer identity.
@@ -648,7 +647,7 @@ async fn main() {
 
     let identity_path = identity_path
         .or_else(IdentityManager::default_identity_path)
-        .expect("no identity path available (set PWB_IDENTITY or $HOME)");
+        .expect("no identity path available (set PWB_IDENTITY, or a home directory via $HOME / %USERPROFILE%)");
     let identity = IdentityManager::load_or_create(&identity_path);
     println!("  Node Identity Public Key : {}", identity.public_key());
 

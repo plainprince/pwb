@@ -26,6 +26,8 @@
 //!   dht         — Kademlia routing table: XOR-metric k-buckets with
 //!                 ping/pong health checks and latency-weighted contact
 //!                 selection (§3).
+//!   paths       — portable default locations for on-disk state (home
+//!                 directory across POSIX and Windows environments).
 //!   components  — reusable UI component primitives (sidebars, navbars, tabs)
 //!                 shared by both `pwb-web` and `pwb-browser`.
 
@@ -36,6 +38,7 @@ pub mod discovery;
 pub mod join;
 pub mod net;
 pub mod onion;
+pub mod paths;
 pub mod qr;
 pub mod spec;
 pub mod stun;

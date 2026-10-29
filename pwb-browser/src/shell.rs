@@ -347,12 +347,14 @@ impl Shell {
 }
 
 /// Default persistence path: `$PWB_DATA/session.json`, else
-/// `$HOME/.pwb/session.json`.
+/// `<home>/.pwb/session.json`, with the home directory resolved portably
+/// (`$HOME`, `$USERPROFILE`, or `%HOMEDRIVE%%HOMEPATH%`) so tabs and
+/// bookmarks survive on Windows too.
 pub fn default_session_path() -> Option<PathBuf> {
     if let Some(dir) = std::env::var_os("PWB_DATA") {
         return Some(PathBuf::from(dir).join("session.json"));
     }
-    std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".pwb").join("session.json"))
+    pwb_core::paths::home_dir().map(|home| home.join(".pwb").join("session.json"))
 }
 
 /// A specific chrome action derived from the clicked node.

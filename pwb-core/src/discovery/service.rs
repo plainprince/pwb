@@ -95,6 +95,11 @@ impl DiscoveryService {
         let mut v4_error = None;
         match UdpSocket::bind((Ipv4Addr::UNSPECIFIED, config.bind_port)).await {
             Ok(socket) => {
+                // Sending to 255.255.255.255 needs SO_BROADCAST, otherwise the
+                // kernel refuses the datagram: EACCES on Unix, WSAEACCES on
+                // Windows. Without it every broadcast fanout failed and only
+                // the multicast datagram ever left this socket.
+                let _ = socket.set_broadcast(true);
                 // Multicast membership is best-effort: a host without
                 // multicast routing still discovers peers via broadcast and
                 // unicast beacons.
@@ -156,6 +161,15 @@ impl DiscoveryService {
             .transpose()
             .ok()
             .flatten()
+    }
+
+    /// `SO_BROADCAST` on the IPv4 socket, when the host has one. Test-only:
+    /// the subnet-broadcast half of [`Self::announce`] is refused by the
+    /// kernel without it, and the fanout tolerates that refusal — so nothing
+    /// but a test would notice the flag going missing.
+    #[cfg(test)]
+    pub(crate) fn broadcast_enabled(&self) -> Option<std::io::Result<bool>> {
+        self.v4.as_ref().map(|socket| socket.broadcast())
     }
 
     /// The shared peer table (same handle as `NodeEngine::peer_table`).

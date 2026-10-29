@@ -211,7 +211,7 @@ async fn main() {
 
     let identity_path = identity_path
         .or_else(IdentityManager::default_identity_path)
-        .expect("no identity path available (set PWB_IDENTITY or $HOME)");
+        .expect("no identity path available (set PWB_IDENTITY, or a home directory via $HOME / %USERPROFILE%)");
     let identity = Arc::new(IdentityManager::load_or_create(&identity_path));
     println!("  Node Identity Public Key : {}", identity.public_key());
     println!(
@@ -229,9 +229,7 @@ async fn main() {
     // one directory deliberately.
     let data_dir = std::env::var_os("PWB_DATA")
         .map(PathBuf::from)
-        .or_else(|| {
-            std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".pwb").join("browser"))
-        })
+        .or_else(|| pwb_core::paths::home_dir().map(|home| home.join(".pwb").join("browser")))
         .unwrap_or_else(|| PathBuf::from("pwb-data"));
 
     // The listen address decides which address family this node can dial, so
@@ -848,6 +846,7 @@ fn print_help() {
     println!(
         "      --identity <path>  Persisted identity file (default: $PWB_IDENTITY or $HOME/.pwb/identity.json)"
     );
+    println!("                          (home dir: $HOME, else %USERPROFILE% on Windows)");
     println!(
         "      --listen <addr>    UDP listen address (default: 0.0.0.0:0; [::]:0 for dual-stack IPv4+IPv6, 127.0.0.1:0 for localhost-only)"
     );

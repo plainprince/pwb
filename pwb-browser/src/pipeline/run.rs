@@ -80,11 +80,11 @@ pub fn build_browser_app(
         use std::hash::Hasher;
         hasher.write(bundle_bytes);
         let hash = hasher.finish();
-        let dir = std::env::var("PWB_STORAGE_DIR").unwrap_or_else(|_| {
-            std::env::var("HOME").unwrap_or_else(|_| ".".to_string()) + "/.pwb"
-        });
-        *dom_handle.web.storage_path.borrow_mut() =
-            Some(std::path::PathBuf::from(dir).join(format!("{:016x}.json", hash)));
+        let dir = std::env::var_os("PWB_STORAGE_DIR")
+            .map(std::path::PathBuf::from)
+            .or_else(|| pwb_core::paths::home_dir().map(|home| home.join(".pwb")))
+            .unwrap_or_else(|| std::path::PathBuf::from("."));
+        *dom_handle.web.storage_path.borrow_mut() = Some(dir.join(format!("{:016x}.json", hash)));
     }
 
     // Load and mount devtools if enabled

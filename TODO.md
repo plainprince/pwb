@@ -352,6 +352,43 @@ against a global passive adversary remains future work.
 
 ---
 
+## Platform support
+
+### Closed 2026-10-29 — Windows
+
+- **Default state paths resolve portably.** `pwb_core::paths::home_dir()`
+  tries `$HOME`, then `$USERPROFILE`, then `%HOMEDRIVE%%HOMEPATH%`, and every
+  default path (node `--data`, browser `--data`, the identity file,
+  `session.json`, and the `localStorage` directory) now goes through it.
+  Previously they read `$HOME` alone, which a stock Windows shell never sets:
+  both binaries panicked at `no identity path available (set PWB_IDENTITY or
+  $HOME)`, the data directories fell back to `pwb-data`/`.pwb` inside whatever
+  directory the process was started from, and `default_session_path()`
+  returned `None`, silently disabling tab/bookmark persistence. Covered by
+  `paths::tests` (precedence, empty values, `HOMEDRIVE`+`HOMEPATH`
+  composition).
+- **Tests no longer assume `/tmp`.** The two `pwb-browser` bundler tests used
+  literal `/tmp/pwb_bundle_*` paths; every other test already used
+  `std::env::temp_dir()`, which is `%TEMP%` on Windows.
+- **`in_path` is Unix-only.** The `PATH` probe behind the native-dialog
+  availability check only runs on Unix (Windows uses the TaskDialog API and
+  never probes), so it is `#[cfg(unix)]` now instead of dead code that broke
+  the `-D warnings` gate on Windows.
+- **LAN discovery actually broadcasts.** The fanout sends to
+  `255.255.255.255`, which the kernel refuses without `SO_BROADCAST` — `EACCES`
+  on Unix, `WSAEACCES` on Windows — so only the multicast datagram ever
+  left the IPv4 socket. The discovery socket sets `set_broadcast(true)` after
+  binding, restoring the documented broadcast + multicast fanout on every
+  platform.
+- **CI builds and tests on Windows.** A `windows-latest` job runs
+  `cargo clippy --workspace --all-targets -- -D warnings` and
+  `cargo test --workspace` alongside the Linux job (format and coverage stay
+  on Linux). Verification performed here was cross-target: `cargo check
+  --workspace --all-targets --target x86_64-pc-windows-gnu` compiles clean;
+  running the Windows binaries needs the CI job or a Windows machine.
+
+---
+
 ## Next steps (open, not tracked here)
 
 The core modules are implemented; the following are suggested directions, not

@@ -53,3 +53,36 @@ jobs:
           name: llvm-cov-html
           path: target/llvm-cov-html/html
           retention-days: 7
+
+  # Windows is a supported host, not an afterthought: default state paths
+  # resolve through $USERPROFILE when $HOME is unset, tests use the OS temp
+  # directory, and the whole workspace (including the C dependencies ring,
+  # blake3, QuickJS, and tinyfiledialogs) has to build and pass the same
+  # zero-warning gate there. Format and coverage stay on the Linux job —
+  # neither depends on the platform.
+  windows:
+    runs-on: windows-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
+      - name: Cache Cargo registry and target
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+
+      - name: Lint (cargo clippy --workspace --all-targets -- -D warnings)
+        run: cargo clippy --workspace --all-targets -- -D warnings
+
+      - name: Test (cargo test --workspace)
+        run: cargo test --workspace

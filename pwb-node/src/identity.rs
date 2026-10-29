@@ -70,14 +70,16 @@ impl IdentityManager {
         std::fs::write(path, json)
     }
 
-    /// Default on-disk identity path: `$PWB_IDENTITY`, else `$HOME/.pwb/identity.json`.
+    /// Default on-disk identity path: `$PWB_IDENTITY`, else
+    /// `<home>/.pwb/identity.json`, with the home directory resolved
+    /// portably (`$HOME`, `$USERPROFILE`, or `%HOMEDRIVE%%HOMEPATH%`).
+    /// `$HOME` alone is unset in a stock Windows shell, which used to leave
+    /// a Windows node with no identity path at all.
     pub fn default_identity_path() -> Option<PathBuf> {
-        if let Ok(p) = std::env::var("PWB_IDENTITY") {
+        if let Some(p) = std::env::var_os("PWB_IDENTITY") {
             return Some(PathBuf::from(p));
         }
-        std::env::var("HOME")
-            .map(|home| PathBuf::from(home).join(".pwb").join("identity.json"))
-            .ok()
+        pwb_core::paths::home_dir().map(|home| home.join(".pwb").join("identity.json"))
     }
 
     pub fn public_key(&self) -> PublicKey {
