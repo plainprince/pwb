@@ -29,6 +29,8 @@ through the registry, and is recognized by the browser as an address.
 | `.arch` | Archives and long-lived snapshots | `1994.arch` |
 | `.vio` | Vivid, visual and expressive pages | `canvas.vio` |
 | `.meh` | Deadpan, low-effort and shrug pages | `shrug.meh` |
+| `.son` | Namesakes and inheritance jokes | `junior.son` |
+| `.isuearchbtw` | Experimental long-form names | `hello.isuearchbtw` |
 | `.org` | Communities, collectives, projects | `commons.org` |
 | `.net` | Networks and services | `relay.net` |
 | `.com` | Commercial and project homepages | `shop.com` |
