@@ -25,6 +25,66 @@ use crate::persist::atomic_write;
 /// carry a 5× boost from [`extract_terms`]).
 const RANK_WEIGHT: f32 = 1.5;
 
+/// Longest term kept in the index, in bytes. Terms come from bundle text and
+/// from remote shard writes, so an unbounded term is an unbounded key in a
+/// file that every peer can append to.
+pub const MAX_TERM_LEN: usize = 64;
+
+/// Longest document title kept in the index, in bytes. Titles travel with
+/// every posting, so they are attacker-controlled on the remote path.
+pub const MAX_TITLE_LEN: usize = 512;
+
+/// Distinct terms one document may contribute. Without a cap a hostile
+/// bundle is a cheap way to grow the index and the shard load forever.
+pub const MAX_TERMS_PER_BUNDLE: usize = 4096;
+
+/// Cap on the term frequency stored for one `(term, document)` pair, from any
+/// source. Term frequency and the title boost are ranking inputs: a remote
+/// posting claiming `u32::MAX` occurrences would otherwise outrank everything.
+pub const MAX_TERM_FREQUENCY: u32 = 1024;
+
+/// Truncate `title` to [`MAX_TITLE_LEN`] bytes on a character boundary.
+fn sanitize_title(title: &str) -> String {
+    let title = title.trim();
+    if title.len() <= MAX_TITLE_LEN {
+        return title.to_string();
+    }
+    let mut end = MAX_TITLE_LEN;
+    while end > 0 && !title.is_char_boundary(end) {
+        end -= 1;
+    }
+    title[..end].to_string()
+}
+
+/// Normalize a term for the index; `None` for anything that must not be
+/// stored (empty after normalization, or longer than [`MAX_TERM_LEN`]).
+fn sanitize_term(term: &str) -> Option<String> {
+    let term = term.trim().to_lowercase();
+    if term.is_empty() || term.len() > MAX_TERM_LEN {
+        return None;
+    }
+    Some(term)
+}
+
+/// Add one occurrence of `term`, honouring the per-bundle term cap, the term
+/// length bound, and the frequency cap. The first-seen terms win, and the
+/// walk order is deterministic, so two nodes indexing the same bundle derive
+/// the same counts (credit receipts hash these counts).
+fn count_term(counts: &mut HashMap<String, u32>, term: &str, weight: u32) {
+    let Some(term) = sanitize_term(term) else {
+        return;
+    };
+    match counts.get_mut(&term) {
+        Some(slot) => *slot = slot.saturating_add(weight).min(MAX_TERM_FREQUENCY),
+        None => {
+            if counts.len() >= MAX_TERMS_PER_BUNDLE {
+                return;
+            }
+            counts.insert(term, weight.min(MAX_TERM_FREQUENCY));
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct SearchResult {
     pub content_id: ContentId,
@@ -192,20 +252,21 @@ impl SearchEngine {
     pub fn index_bundle(&self, content_id: ContentId, bundle: &Bundle) -> Vec<PostingWire> {
         let mut term_counts: HashMap<String, u32> = HashMap::new();
         extract_terms(&bundle.root_node, &mut term_counts);
+        let title = sanitize_title(&bundle.title);
 
         let postings: Vec<PostingWire> = term_counts
             .iter()
             .map(|(term, tf)| PostingWire {
                 term: term.to_lowercase(),
                 content_id,
-                title: bundle.title.clone(),
+                title: title.clone(),
                 term_frequency: *tf,
             })
             .collect();
 
         {
             let mut index = self.inner.lock().unwrap();
-            index.titles.insert(content_id, bundle.title.clone());
+            index.titles.insert(content_id, title);
             for posting in &postings {
                 Self::upsert(
                     index
@@ -225,20 +286,23 @@ impl SearchEngine {
     /// for the term it names so later [`Self::postings_wire`] calls answer
     /// read queries. Re-recording the same `(term, content_id)` is idempotent
     /// (a posting always carries a document's full term frequency).
+    ///
+    /// Every field arrives from a remote peer, so it is sanitized here rather
+    /// than trusted: empty or oversized terms are dropped, the title is
+    /// truncated, and the claimed frequency is capped.
     pub fn record_posting(&self, posting: &PostingWire) {
+        let Some(term) = sanitize_term(&posting.term) else {
+            return;
+        };
+        let title = sanitize_title(&posting.title);
+        let term_frequency = posting.term_frequency.min(MAX_TERM_FREQUENCY);
         {
             let mut index = self.inner.lock().unwrap();
-            index
-                .titles
-                .entry(posting.content_id)
-                .or_insert_with(|| posting.title.clone());
+            index.titles.entry(posting.content_id).or_insert(title);
             Self::upsert(
-                index
-                    .inverted_index
-                    .entry(posting.term.to_lowercase())
-                    .or_default(),
+                index.inverted_index.entry(term).or_default(),
                 posting.content_id,
-                posting.term_frequency,
+                term_frequency,
             );
         }
         self.persist();
@@ -260,13 +324,15 @@ impl SearchEngine {
             .lock()
             .unwrap()
             .titles
-            .insert(content_id, title.into());
+            .insert(content_id, sanitize_title(&title.into()));
         self.persist();
     }
 
     /// The local postings list for a term, as wire postings.
     pub fn postings_wire(&self, term: &str) -> Vec<PostingWire> {
-        let term = term.to_lowercase();
+        let Some(term) = sanitize_term(term) else {
+            return Vec::new();
+        };
         let index = self.inner.lock().unwrap();
         index
             .inverted_index
@@ -368,23 +434,22 @@ pub fn aggregate(postings: impl IntoIterator<Item = PostingWire>) -> Vec<SearchR
 
 /// Extract the indexed term multiset from a node tree — shared with
 /// `credit`'s canonical term hashing (TODO §4.1).
+///
+/// Terms are bounded here rather than at the call sites: [`MAX_TERM_LEN`]
+/// caps one term, [`MAX_TERMS_PER_BUNDLE`] caps how many distinct terms a
+/// document may introduce, and counts saturate at [`MAX_TERM_FREQUENCY`] —
+/// including the 5× title boost, which is otherwise a cheap ranking squat.
 pub(crate) fn extract_terms(node: &pwb_core::spec::PlainNode, counts: &mut HashMap<String, u32>) {
     if let Some(txt) = &node.text_content {
         for word in txt.split_whitespace() {
-            let clean = word.trim_matches(|c: char| !c.is_alphanumeric());
-            if !clean.is_empty() {
-                *counts.entry(clean.to_string()).or_insert(0) += 1;
-            }
+            count_term(counts, word.trim_matches(|c: char| !c.is_alphanumeric()), 1);
         }
     }
 
     if node.tag == Tag::Title {
         if let Some(txt) = &node.text_content {
             for word in txt.split_whitespace() {
-                let clean = word.trim_matches(|c: char| !c.is_alphanumeric());
-                if !clean.is_empty() {
-                    *counts.entry(clean.to_string()).or_insert(0) += 5; // Title boost
-                }
+                count_term(counts, word.trim_matches(|c: char| !c.is_alphanumeric()), 5);
             }
         }
     }
@@ -601,5 +666,88 @@ mod tests {
         let engine = SearchEngine::open("/nonexistent/pwb-test/index.json");
         assert!(engine.search("anything").is_empty());
         assert!(engine.path().is_some());
+    }
+
+    #[test]
+    fn test_remote_postings_are_sanitized() {
+        let engine = SearchEngine::new();
+        let cid = ContentId([0x11; 32]);
+
+        // An empty and an oversized term are never indexed.
+        engine.record_posting(&PostingWire {
+            term: "".into(),
+            content_id: cid,
+            title: String::new(),
+            term_frequency: 1,
+        });
+        engine.record_posting(&PostingWire {
+            term: "x".repeat(MAX_TERM_LEN + 1),
+            content_id: cid,
+            title: String::new(),
+            term_frequency: 1,
+        });
+        assert_eq!(engine.term_count(), 0, "bad terms never reach the index");
+
+        // A claimed frequency is capped, so rank squatting cannot outrank
+        // everything with one forged posting.
+        engine.record_posting(&PostingWire {
+            term: "squat".into(),
+            content_id: cid,
+            title: "t".into(),
+            term_frequency: u32::MAX,
+        });
+        assert_eq!(
+            engine.postings_wire("squat")[0].term_frequency,
+            MAX_TERM_FREQUENCY
+        );
+
+        // A remote title is truncated to the bound (a fresh document, since a
+        // title already learned for a content id is kept as-is).
+        let titled = ContentId([0x12; 32]);
+        let long = "a".repeat(MAX_TITLE_LEN * 2);
+        engine.record_posting(&PostingWire {
+            term: "titled".into(),
+            content_id: titled,
+            title: long,
+            term_frequency: 1,
+        });
+        assert_eq!(
+            engine.title(&titled).map(|title| title.len()),
+            Some(MAX_TITLE_LEN)
+        );
+    }
+
+    #[test]
+    fn test_bundle_terms_and_title_are_bounded() {
+        let engine = SearchEngine::new();
+
+        // One enormous word is not a term.
+        let mut counts = HashMap::new();
+        extract_terms(&text_node(0, &"z".repeat(MAX_TERM_LEN * 4)), &mut counts);
+        assert!(counts.is_empty());
+
+        // A document cannot introduce more than the per-bundle distinct terms.
+        let mut counts = HashMap::new();
+        let words: Vec<String> = (0..MAX_TERMS_PER_BUNDLE + 100)
+            .map(|n| format!("w{n}"))
+            .collect();
+        extract_terms(&text_node(1, &words.join(" ")), &mut counts);
+        assert_eq!(counts.len(), MAX_TERMS_PER_BUNDLE);
+
+        // Frequency (including the title boost) saturates at the cap.
+        let mut counts = HashMap::new();
+        let repeated = "spam ".repeat(MAX_TERM_FREQUENCY as usize);
+        extract_terms(&text_node(2, &repeated), &mut counts);
+        assert_eq!(counts.get("spam"), Some(&MAX_TERM_FREQUENCY));
+
+        // Titles are truncated before they are stored.
+        let cid = ContentId([0x22; 32]);
+        let mut bundle = bundle_with(text_node(3, "body"));
+        bundle.title = "t".repeat(MAX_TITLE_LEN * 3);
+        engine.index_bundle(cid, &bundle);
+        assert_eq!(
+            engine.title(&cid).map(|title| title.len()),
+            Some(MAX_TITLE_LEN)
+        );
     }
 }

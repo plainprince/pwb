@@ -3,9 +3,12 @@
 //!
 //! Two real `pwb-node` processes are used. The first is a rendezvous seed; the
 //! second is started with only `--join <http://…>` and a fresh data directory.
-//! The descriptor is signed and the client pins the signer on first use, so the
-//! test exercises the fetch, verification, DNS/IP seed conversion, and the
-//! normal Ping/Pong join path.
+//! The descriptor is signed and the client pins the signer out of band with
+//! `--join-signer`, because a plain-http fetch has no transport security: an
+//! unauthenticated first fetch must not be able to establish the pin. The test
+//! exercises the fetch, verification, DNS/IP seed conversion, and the normal
+//! Ping/Pong join path, and checks that the same fetch without a pinned signer
+//! is refused.
 
 use std::io::{BufRead, BufReader, Read, Write};
 use std::net::TcpListener;
@@ -148,12 +151,16 @@ fn a_stranger_joins_from_a_signed_http_descriptor() {
         build_descriptor(vec![seed_info], Vec::new(), None, Some(&signer));
     let url = serve_descriptor(descriptor.to_json().expect("descriptor JSON"));
 
+    // A cleartext fetch carries no transport authentication, so the signer
+    // must be known before the fetch rather than pinned from it.
     let joiner_dir = temp_dir("joiner");
     let joiner = NodeProcess::spawn(
         &joiner_dir,
         &[
             "--join".to_string(),
-            url,
+            url.clone(),
+            "--join-signer".to_string(),
+            signer.public.to_hex(),
             "--require-join-signature".to_string(),
         ],
     );
@@ -162,15 +169,38 @@ fn a_stranger_joins_from_a_signed_http_descriptor() {
         .expect("joiner reaches the published seed through --join");
     assert!(joined.contains("Joined via 1"));
 
-    // The signed descriptor's signer was pinned on first use.
-    let pinned = pwb_node::join::load_pinned_signer(&joiner_dir.join("data"))
-        .expect("the join signer is pinned under the data directory");
-    assert_eq!(pinned, signer.public);
-
     drop(joiner);
+
+    // The same fetch with no signer pinned must not bootstrap trust: a man in
+    // the middle on a plain-http fetch would otherwise choose the key this
+    // node pins on first use.
+    let unpinned_dir = temp_dir("joiner-unpinned");
+    let mut unpinned = NodeProcess::spawn(
+        &unpinned_dir,
+        &[
+            "--join".to_string(),
+            url,
+            "--require-join-signature".to_string(),
+            "--join-required".to_string(),
+        ],
+    );
+    let status = unpinned
+        .wait_exit(Duration::from_secs(20))
+        .expect("the unauthenticated fetch is refused before joining");
+    assert!(
+        !status.success(),
+        "a cleartext descriptor with no pinned signer must not join"
+    );
+    assert!(
+        pwb_node::join::load_pinned_signer(&unpinned_dir.join("data")).is_none(),
+        "a cleartext first fetch is never pinned"
+    );
+
+    drop(unpinned);
     drop(seed);
     let _ = std::fs::remove_dir_all(&seed_dir);
     let _ = std::fs::remove_dir_all(&joiner_dir);
+    let _ = std::fs::remove_dir_all(&unpinned_dir);
 }
 
 #[test]

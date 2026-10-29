@@ -62,6 +62,73 @@ const ROOM_STORE_FILE: &str = "rooms.json";
 /// later; the hop budget is what actually bounds a post's lifetime.
 const MAX_SEEN_POSTS: usize = 4096;
 
+/// Posts one author may contribute within [`AUTHOR_WINDOW_SECS`] before they
+/// are throttled — applied to this node's own `try_post` and to every
+/// inbound `on_post` alike. The dedup set and the hop budget bound a *single*
+/// post's lifetime; this bounds how many posts one key can make a node store
+/// and re-flood at all.
+const AUTHOR_POST_LIMIT: u32 = 10;
+
+/// Length of the per-author posting window, in seconds.
+const AUTHOR_WINDOW_SECS: u64 = 30;
+
+/// Authors tracked at once. Expired windows are reclaimed first; if every
+/// slot is live the oldest window is dropped so the table stays bounded.
+const MAX_TRACKED_AUTHORS: usize = 512;
+
+/// Per-author sliding window counter for room posts.
+///
+/// The map is bounded because authors are attacker-chosen keys: a fixed-size
+/// table with oldest-window eviction keeps memory constant, while a single
+/// key — the case a per-author limit exists for — cannot reset its own
+/// counter without a new key. A key-cycling attacker is still bounded by the
+/// engine's per-peer token bucket and by the dedup set.
+#[derive(Debug, Default)]
+struct AuthorFloodControl {
+    windows: HashMap<PublicKey, AuthorWindow>,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct AuthorWindow {
+    started: u64,
+    count: u32,
+}
+
+impl AuthorFloodControl {
+    /// Record one post by `author` at `now`; `false` means over the limit
+    /// (and the post must be dropped rather than stored or relayed).
+    fn allow(&mut self, author: &PublicKey, now: u64) -> bool {
+        if !self.windows.contains_key(author) && self.windows.len() >= MAX_TRACKED_AUTHORS {
+            // Reclaim finished windows first, then the one running longest.
+            self.windows
+                .retain(|_, window| now.saturating_sub(window.started) < AUTHOR_WINDOW_SECS);
+            if self.windows.len() >= MAX_TRACKED_AUTHORS {
+                let oldest = self
+                    .windows
+                    .iter()
+                    .min_by_key(|(_, window)| window.started)
+                    .map(|(key, _)| *key);
+                if let Some(key) = oldest {
+                    self.windows.remove(&key);
+                }
+            }
+        }
+        let window = self.windows.entry(*author).or_insert(AuthorWindow {
+            started: now,
+            count: 0,
+        });
+        if now.saturating_sub(window.started) >= AUTHOR_WINDOW_SECS {
+            window.started = now;
+            window.count = 0;
+        }
+        if window.count >= AUTHOR_POST_LIMIT {
+            return false;
+        }
+        window.count += 1;
+        true
+    }
+}
+
 /// Live state of one room: its transcript, the peers known to be here, and
 /// whether this node is a member (and therefore keeps and serves it).
 #[derive(Debug, Clone, Default)]
@@ -338,6 +405,9 @@ pub struct RoomService {
     version: Arc<AtomicU64>,
     /// Post digests already relayed, so flooding terminates.
     seen: Mutex<PostDedup>,
+    /// Per-author post budget: shared by this node's own posts and every
+    /// peer's, so one key cannot make a node flood or store without bound.
+    flood: Mutex<AuthorFloodControl>,
     /// Rooms announced during this session. A restart re-announces (the set
     /// starts empty even when the subscription was persisted); a page that
     /// re-renders does not.
@@ -374,6 +444,7 @@ impl RoomService {
             error: Arc::new(Mutex::new(None)),
             version: Arc::new(AtomicU64::new(0)),
             seen: Mutex::new(PostDedup::new(MAX_SEEN_POSTS)),
+            flood: Mutex::new(AuthorFloodControl::default()),
             announced: Mutex::new(HashSet::new()),
             store,
         })
@@ -449,6 +520,16 @@ impl RoomService {
             if !rooms.get(&room).is_some_and(|state| state.subscribed) {
                 return Err(format!("not joined to {room} — open the room first"));
             }
+        }
+        if !self
+            .flood
+            .lock()
+            .unwrap()
+            .allow(&self.local, unix_time())
+        {
+            return Err(format!(
+                "you are posting too fast — at most {AUTHOR_POST_LIMIT} messages per {AUTHOR_WINDOW_SECS}s"
+            ));
         }
 
         let mut id = [0u8; 16];
@@ -550,6 +631,21 @@ impl RoomService {
             return;
         }
         if !self.seen.lock().unwrap().insert(post_digest(&post)) {
+            return;
+        }
+        // One key, one budget: an author past their limit is dropped before
+        // anything is stored or re-flooded, so a flood cannot buy fan-out.
+        if !self
+            .flood
+            .lock()
+            .unwrap()
+            .allow(&post.sender, unix_time())
+        {
+            eprintln!(
+                "[Room {}] dropped a post from {} (per-author rate limit)",
+                post.room,
+                short_key(&post.sender)
+            );
             return;
         }
 
@@ -1019,5 +1115,78 @@ mod tests {
         let room = RoomService::with_data_dir(engine(3), Keypair::from_seed(&[3u8; 32]), &dir);
         assert!(room.snapshot().rooms.is_empty());
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// One post by `seed`, with an id distinct per `nonce` so the dedup set
+    /// does not collapse them into one message.
+    fn signed_post_nonce(seed: u8, room: &str, nonce: u8) -> RoomPostWire {
+        let keypair = Keypair::from_seed(&[seed; 32]);
+        let mut id = [0u8; 16];
+        id[0] = seed;
+        id[1] = nonce;
+        let text = format!("spam {nonce}");
+        RoomPostWire {
+            sender: keypair.public,
+            room: room.to_string(),
+            id,
+            sent_at: 1_700_000_000,
+            text,
+            hops: ROOM_POST_HOPS,
+            signature: keypair.sign(&room_post_sign_message(
+                &keypair.public,
+                room,
+                &id,
+                1_700_000_000,
+                &format!("spam {nonce}"),
+            )),
+        }
+    }
+
+    #[test]
+    fn one_author_cannot_flood_a_room_beyond_the_per_author_limit() {
+        let room = service(10);
+        room.join(DEFAULT_ROOM).expect("join");
+        let from: SocketAddr = "127.0.0.1:9003".parse().unwrap();
+
+        for nonce in 0..(AUTHOR_POST_LIMIT + 5) {
+            room.handle(
+                from,
+                NetworkMessage::RoomPost(signed_post_nonce(9, DEFAULT_ROOM, nonce as u8)),
+            );
+        }
+
+        assert_eq!(
+            room.snapshot().rooms[DEFAULT_ROOM].posts.len(),
+            AUTHOR_POST_LIMIT as usize,
+            "posts past the per-author window are dropped, not stored or relayed"
+        );
+
+        // A different author is unaffected by the first one's budget.
+        room.handle(
+            from,
+            NetworkMessage::RoomPost(signed_post_nonce(6, DEFAULT_ROOM, 1)),
+        );
+        assert_eq!(
+            room.snapshot().rooms[DEFAULT_ROOM].posts.len(),
+            AUTHOR_POST_LIMIT as usize + 1
+        );
+    }
+
+    #[test]
+    fn my_own_posts_are_rate_limited_too() {
+        let room = service(11);
+        room.join(DEFAULT_ROOM).expect("join");
+
+        for _ in 0..AUTHOR_POST_LIMIT {
+            room.post(DEFAULT_ROOM, "one more").expect("within limit");
+        }
+        let error = room
+            .post(DEFAULT_ROOM, "too fast")
+            .expect_err("the local author is bounded like any other");
+        assert!(error.contains("too fast"), "got: {error}");
+        assert_eq!(
+            room.snapshot().rooms[DEFAULT_ROOM].posts.len(),
+            AUTHOR_POST_LIMIT as usize
+        );
     }
 }

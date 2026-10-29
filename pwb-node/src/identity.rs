@@ -39,6 +39,7 @@ impl IdentityManager {
     /// Load a persisted identity; returns `None` when the file is missing or
     /// malformed.
     pub fn load(path: &Path) -> Option<Self> {
+        Self::tighten_permissions(path);
         let bytes = std::fs::read(path).ok()?;
         let value: serde_json::Value = serde_json::from_slice(&bytes).ok()?;
         let secret_hex = value.get("secret_key_hex")?.as_str()?;
@@ -55,6 +56,11 @@ impl IdentityManager {
 
     /// Persist this identity's secret key to `path`.
     ///
+    /// The file holds the signing seed, so it is created and re-chmoded to
+    /// `0600`: `fs::write` would leave a pre-existing file at whatever mode it
+    /// already had and create a new one world-readable under a normal umask.
+    /// Anyone who can read this file can impersonate the node forever.
+    ///
     /// A legacy `credits` field in an older file is ignored on load; balances
     /// now come from the signed credit ledger.
     pub fn save(&self, path: &Path) -> std::io::Result<()> {
@@ -67,7 +73,32 @@ impl IdentityManager {
             "secret_key_hex": hex::encode(self.keypair.secret.0),
         });
         let json = serde_json::to_vec_pretty(&value).map_err(std::io::Error::other)?;
-        std::fs::write(path, json)
+        write_secret_file(path, &json)
+    }
+
+    /// Warn about (and refuse to widen) an identity file that is readable by
+    /// other users. Called after a load so an operator learns about a file
+    /// created by an older release instead of silently keeping the exposure.
+    pub fn tighten_permissions(path: &Path) {
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            if let Ok(meta) = std::fs::metadata(path) {
+                let mode = meta.permissions().mode();
+                if mode & 0o077 != 0 {
+                    let _ = std::fs::set_permissions(
+                        path,
+                        std::fs::Permissions::from_mode(mode & !0o077 | 0o600),
+                    );
+                    eprintln!(
+                        "[Identity] {} was readable by other users; tightened to 0600",
+                        path.display()
+                    );
+                }
+            }
+        }
+        #[cfg(not(unix))]
+        let _ = path;
     }
 
     /// Default on-disk identity path: `$PWB_IDENTITY`, else
@@ -95,6 +126,38 @@ impl Default for IdentityManager {
     fn default() -> Self {
         Self::new()
     }
+}
+
+/// Write secret-bearing bytes so the file is never world-readable, not even
+/// between creation and the write: on Unix the file is opened with mode
+/// `0600` (`O_CREAT` applies the mode at creation), then re-chmoded so an
+/// already-existing permissive file is tightened rather than left alone.
+fn write_secret_file(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
+    use std::io::Write;
+    #[cfg(unix)]
+    let mut file = {
+        use std::os::unix::fs::OpenOptionsExt;
+        std::fs::OpenOptions::new()
+            .write(true)
+            .create(true)
+            .truncate(true)
+            .mode(0o600)
+            .open(path)?
+    };
+    #[cfg(not(unix))]
+    let mut file = std::fs::OpenOptions::new()
+        .write(true)
+        .create(true)
+        .truncate(true)
+        .open(path)?;
+    file.write_all(bytes)?;
+    file.sync_all()?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))?;
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -138,6 +201,32 @@ mod tests {
         identity.save(&path).expect("saves identity");
         let loaded = IdentityManager::load(&path).expect("loads identity");
         assert_eq!(loaded.public_key(), identity.public_key());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_identity_file_is_owner_only() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = std::env::temp_dir().join(format!("pwb-identity-mode-{}", std::process::id()));
+        let path = dir.join("identity.json");
+        IdentityManager::new().save(&path).expect("saves identity");
+        let mode = std::fs::metadata(&path).unwrap().permissions().mode();
+        assert_eq!(mode & 0o777, 0o600, "identity file must be owner-only");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_permissive_identity_file_is_tightened_on_load() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = std::env::temp_dir().join(format!("pwb-identity-tighten-{}", std::process::id()));
+        let path = dir.join("identity.json");
+        IdentityManager::new().save(&path).expect("saves identity");
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).unwrap();
+        IdentityManager::load(&path).expect("loads identity");
+        let mode = std::fs::metadata(&path).unwrap().permissions().mode();
+        assert_eq!(mode & 0o777, 0o600, "load must tighten a world-readable identity");
         let _ = std::fs::remove_dir_all(&dir);
     }
 

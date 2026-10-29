@@ -56,6 +56,8 @@ pub enum JoinSourceError {
     MissingSignature,
     /// The descriptor's signer differs from the pinned signer.
     SignerMismatch { expected: PublicKey, got: PublicKey },
+    /// The source has no transport authentication and no known signer.
+    InsecureSource(String),
     /// No source produced a usable descriptor.
     NoSource,
 }
@@ -77,6 +79,11 @@ impl std::fmt::Display for JoinSourceError {
                 "join signer {} does not match pinned signer {}",
                 got.to_hex(),
                 expected.to_hex()
+            ),
+            JoinSourceError::InsecureSource(source) => write!(
+                f,
+                "'{source}' fetches the descriptor without transport security and no \
+                 signer is pinned"
             ),
             JoinSourceError::NoSource => write!(f, "no usable join source"),
         }
@@ -110,6 +117,9 @@ impl JoinSourceError {
             }
             JoinSourceError::MissingSignature | JoinSourceError::SignerMismatch { .. } => {
                 "The seed list did not pass the local signature policy. Check --join-signer and --require-join-signature."
+            }
+            JoinSourceError::InsecureSource(_) => {
+                "A plain-http fetch cannot be authenticated, so the signer cannot be established from it. Pin the signer out of band with --join-signer <hex>, or use an https:// source."
             }
             JoinSourceError::Fetch(_) | JoinSourceError::Parse(_) | JoinSourceError::NoSource => {
                 "Staying on LAN discovery; dial a peer yourself with --connect <link> or --bootstrap <host:port>/<key>."
@@ -258,7 +268,12 @@ pub fn check_descriptor(
 /// Fetch and merge every source, applying the signer policy.
 ///
 /// The first signed descriptor establishes the trust-on-first-use pin when
-/// `data_dir` is supplied and no explicit `pinned` key is given. Sources are
+/// `data_dir` is supplied and no explicit `pinned` key is given, but only from
+/// a source whose transport authenticates the response (`https://`, a local
+/// file, or inline JSON). A `http://` source carries no transport
+/// authentication: a man in the middle controls the whole document, including
+/// the signer key a first-run pin would trust, so cleartext descriptors are
+/// only accepted when their signer was pinned out of band. Sources are
 /// merged in order; seeds and anchors are deduplicated.
 pub async fn discover(
     sources: &[String],
@@ -276,8 +291,29 @@ pub async fn discover(
     let mut last_error: Option<JoinSourceError> = None;
 
     for source in sources {
+        let cleartext = source.starts_with("http://");
         match fetch_descriptor(source).await {
             Ok(mut descriptor) => {
+                if cleartext {
+                    match (expected, descriptor.signer) {
+                        (Some(known), Some(signer)) if known == signer => {}
+                        (Some(_), None) => {
+                            last_error = Some(JoinSourceError::MissingSignature);
+                            continue;
+                        }
+                        (Some(known), Some(got)) => {
+                            last_error = Some(JoinSourceError::SignerMismatch {
+                                expected: known,
+                                got,
+                            });
+                            continue;
+                        }
+                        (None, _) => {
+                            last_error = Some(JoinSourceError::InsecureSource(source.clone()));
+                            continue;
+                        }
+                    }
+                }
                 if let Err(error) = check_descriptor(&descriptor, expected, require_signature, now)
                 {
                     last_error = Some(error);
@@ -300,7 +336,11 @@ pub async fn discover(
                     if let Err(error) = save_pinned_signer(data_dir, signer) {
                         eprintln!("[Join] Could not pin join signer: {error}");
                     } else {
-                        println!("[Join] Pinned join signer {}", signer.to_hex());
+                        println!("[Join] Pinned join signer {} (trust on first use)", signer.to_hex());
+                        eprintln!(
+                            "[Join] First-use pin: whoever answered this fetch chose the key. \
+                             Pin it out of band with --join-signer <hex> to be safe."
+                        );
                     }
                     expected = Some(signer);
                 }
@@ -539,6 +579,48 @@ mod tests {
             discovered.trust_anchors.is_empty(),
             "an unsigned descriptor may name seeds but not funding authorities"
         );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_cleartext_source_never_establishes_trust() {
+        let dir = std::env::temp_dir().join(format!("pwb-join-clear-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let descriptor = descriptor();
+        let body = descriptor.to_json().unwrap();
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        std::thread::spawn(move || {
+            // Both `discover` calls below fetch the same URL, so the stub
+            // has to serve more than one connection.
+            while let Ok((mut stream, _)) = listener.accept() {
+                let mut request = [0u8; 1024];
+                let _ = stream.read(&mut request);
+                let response = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                    body.len()
+                );
+                let _ = stream.write_all(response.as_bytes());
+                let _ = stream.write_all(&body);
+            }
+        });
+        let url = format!("http://{addr}/join.json");
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+
+        // No signer known: the fetch must be refused, not trusted on first use.
+        let error = runtime
+            .block_on(discover(&[url.clone()], Some(&dir), None, false))
+            .expect_err("a cleartext first fetch cannot establish trust");
+        assert!(matches!(error, JoinSourceError::InsecureSource(_)));
+        assert!(load_pinned_signer(&dir).is_none(), "nothing was pinned");
+
+        // With the signer pinned out of band the same fetch is accepted.
+        let pinned = descriptor.signer.unwrap();
+        let discovered = runtime
+            .block_on(discover(&[url], Some(&dir), Some(pinned), true))
+            .expect("a pinned cleartext fetch is accepted");
+        assert_eq!(discovered, descriptor);
         let _ = std::fs::remove_dir_all(&dir);
     }
 

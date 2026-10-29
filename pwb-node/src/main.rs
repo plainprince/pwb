@@ -123,7 +123,10 @@ fn print_help() {
     println!();
     println!("Operations:");
     println!(
-        "      --health-addr <addr>   Loopback health/metrics endpoint (default: 127.0.0.1:7711)"
+        "      --health-addr <addr>   Health/metrics endpoint (default: 127.0.0.1:7711;\n                              must be a loopback address unless --health-public)"
+    );
+    println!(
+        "      --health-public        Allow --health-addr on a non-loopback address (exposes\n                              addresses, peer/index/registry counts, claim price, credits)"
     );
     println!("      --no-health            Disable the health endpoint");
     println!("      --cover-traffic        Emit decoy onion cells at randomized intervals (costs bandwidth)");
@@ -179,6 +182,7 @@ async fn main() {
     let mut issuer_key: Option<PublicKey> = None;
     let mut show_status = false;
     let mut health_addr: Option<String> = None;
+    let mut health_public = false;
     let mut no_health = false;
     while arg_index < args.len() {
         match args[arg_index].as_str() {
@@ -394,6 +398,10 @@ async fn main() {
                     std::process::exit(1);
                 }
             }
+            "--health-public" => {
+                health_public = true;
+                arg_index += 1;
+            }
             "--no-health" => {
                 no_health = true;
                 arg_index += 1;
@@ -548,6 +556,16 @@ async fn main() {
                 .ok()
                 .and_then(|value| parse_public_key(&value))
         });
+        // `--verify-join` proves a descriptor is what its host served. Over
+        // cleartext http that only means something against a signer the
+        // operator already knows; otherwise the answer could be forged by
+        // whoever is on path.
+        if source.starts_with("http://") && pinned.is_none() {
+            eprintln!(
+                "[Join] {source}: plain http cannot be authenticated; pass --join-signer <hex>"
+            );
+            std::process::exit(1);
+        }
         match join::fetch_descriptor(&source).await {
             Ok(descriptor) => {
                 let now = pwb_core::discovery::unix_time();
@@ -1046,6 +1064,18 @@ async fn main() {
                 eprintln!("[Health] Invalid --health-addr: {e}");
                 std::process::exit(1);
             });
+        // `/status` publishes the listen/public/discovery addresses, peer
+        // count, index and registry sizes, claim price and earned credits:
+        // operational state an internet-wide scan must never see. Only a
+        // loopback bind is accepted unless the operator opts in explicitly.
+        if !addr.ip().is_loopback() && !health_public {
+            eprintln!(
+                "[Health] Refusing to bind {addr}: /health, /status and /metrics expose \
+                 addresses, peer/index/registry counts, claim price and credits. Use a \
+                 loopback address, or pass --health-public to accept that exposure."
+            );
+            std::process::exit(1);
+        }
         match HealthServer::spawn(
             addr,
             Arc::new(HealthState {
