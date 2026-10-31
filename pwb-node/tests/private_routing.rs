@@ -42,6 +42,28 @@ async fn start_engine(keypair: Keypair, host: &str) -> (NodeEngine, SocketAddr) 
     (engine, addr)
 }
 
+/// Retry a private operation that failed because no circuit answered.
+///
+/// Every call already retransmits inside `send_onion_request_as`, but a
+/// CPU-starved runner (CI runs this suite in a debug build on a few shared
+/// cores) can still miss the whole deadline. Retrying the request is what a
+/// real caller does; the assertions still require a genuine onion answer, so
+/// a peer that never answers cannot make them pass.
+async fn retrying<T, E, Fut>(mut op: impl FnMut() -> Fut) -> Result<T, E>
+where
+    Fut: std::future::Future<Output = Result<T, E>>,
+    E: std::fmt::Debug,
+{
+    let mut last_error = None;
+    for _ in 0..3 {
+        match op().await {
+            Ok(value) => return Ok(value),
+            Err(error) => last_error = Some(error),
+        }
+    }
+    Err(last_error.expect("the loop ran at least once"))
+}
+
 fn bundle_bytes(title: &str, body: &str) -> Vec<u8> {
     let mut root = PlainNode::new(0, Tag::Document);
     let mut text = PlainNode::new(1, Tag::Text);
@@ -194,11 +216,13 @@ async fn private_search_fetch_and_domain_resolution_use_onion_circuits() {
             100,
             None,
         ));
-        if key.public == relays[0].0.public {
-            service
-                .claim("onion.pwb", content_id)
-                .expect("creates a signed private test domain");
-        }
+        // Every relay knows the name, exactly like the document: the requester
+        // reaches a random exit, and a private lookup only succeeds if that
+        // exit holds the record. Claiming it on one relay made the test depend
+        // on one particular node winning the race.
+        service
+            .claim("onion.pwb", content_id)
+            .expect("creates a signed private test domain");
         relay_services.push(spawn_responder(
             engine.clone(),
             Arc::clone(&federation),
@@ -218,8 +242,7 @@ async fn private_search_fetch_and_domain_resolution_use_onion_circuits() {
         requester_key.clone(),
     );
 
-    let results = requester_federation
-        .query_private("onion")
+    let results = retrying(|| requester_federation.query_private("onion"))
         .await
         .expect("a circuit answers the private query");
     assert!(
@@ -227,14 +250,12 @@ async fn private_search_fetch_and_domain_resolution_use_onion_circuits() {
         "the indexed document is returned through an onion exit: {results:?}"
     );
 
-    let fetched = requester_federation
-        .fetch_private(&content_id)
+    let fetched = retrying(|| requester_federation.fetch_private(&content_id))
         .await
         .expect("a holder answers the private artifact fetch");
     assert_eq!(fetched, bytes, "the bundle round-trips through the circuit");
 
-    let large_fetched = requester_federation
-        .fetch_private(&large_content_id)
+    let large_fetched = retrying(|| requester_federation.fetch_private(&large_content_id))
         .await
         .expect("the holder serves a multi-chunk artifact through onion circuits");
     assert_eq!(
@@ -250,8 +271,7 @@ async fn private_search_fetch_and_domain_resolution_use_onion_circuits() {
         0,
         None,
     );
-    let record = requester_domain
-        .resolve_private("onion.pwb")
+    let record = retrying(|| requester_domain.resolve_private("onion.pwb"))
         .await
         .expect("a circuit answers the private lookup")
         .expect("the relay knows the domain");

@@ -3,7 +3,7 @@ use super::*;
 use crate::crypto::{Keypair, PublicKey};
 use crate::net::PeerInfo;
 use std::collections::HashMap;
-use std::net::{Ipv4Addr, SocketAddr};
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 use tokio::net::UdpSocket;
@@ -19,6 +19,24 @@ async fn service_on(listen_port: u16) -> DiscoveryService {
     )
     .await
     .expect("bind ephemeral discovery port")
+}
+
+/// Turn a bound wildcard address into the loopback address of the same family.
+///
+/// A discovery socket binds `0.0.0.0` / `::`, and sending a datagram to a
+/// wildcard destination is undefined in practice: Linux happens to route it
+/// back to loopback, Windows rejects it with `WSAEADDRNOTAVAIL`. The unicast
+/// tests want a real local delivery, so they dial loopback explicitly.
+fn loopback(addr: SocketAddr) -> SocketAddr {
+    match addr.ip() {
+        IpAddr::V4(ip) if ip.is_unspecified() => {
+            SocketAddr::from((Ipv4Addr::LOCALHOST, addr.port()))
+        }
+        IpAddr::V6(ip) if ip.is_unspecified() => {
+            SocketAddr::from((Ipv6Addr::LOCALHOST, addr.port()))
+        }
+        _ => addr,
+    }
 }
 
 #[test]
@@ -161,7 +179,7 @@ async fn test_ipv6_unicast_beacon_discovery_merges_peer() {
 
     // A beacon sent to the IPv6 socket is validated and merged like any
     // other, and the peer is recorded at its real IPv6 source address.
-    a.send_beacon_to(addr_b, t)
+    a.send_beacon_to(loopback(addr_b), t)
         .await
         .expect("unicast v6 beacon");
     let seen = b.recv_beacon(t, Instant::now()).await.expect("valid");
@@ -182,7 +200,9 @@ async fn test_unicast_beacon_discovery_merges_peer() {
     let addr_b = b.local_addr().unwrap();
     let t = unix_time();
 
-    a.send_beacon_to(addr_b, t).await.expect("unicast beacon");
+    a.send_beacon_to(loopback(addr_b), t)
+        .await
+        .expect("unicast beacon");
     let seen = b.recv_beacon(t, Instant::now()).await.expect("valid");
     assert_eq!(seen, a.public_key());
 
@@ -195,7 +215,7 @@ async fn test_unicast_beacon_discovery_merges_peer() {
     );
 
     // A re-announce refreshes the same entry rather than duplicating it.
-    a.send_beacon_to(addr_b, t + 5).await.unwrap();
+    a.send_beacon_to(loopback(addr_b), t + 5).await.unwrap();
     b.recv_beacon(t + 5, Instant::now()).await.unwrap();
     assert_eq!(b.peer_table().lock().unwrap().len(), 1);
     assert!(b.peer(&seen).is_some());
@@ -209,7 +229,7 @@ async fn test_recv_rejects_stale_garbage_and_forged_beacons() {
     let t = unix_time();
 
     // Stale replay of an otherwise valid beacon.
-    a.send_beacon_to(addr_b, t).await.unwrap();
+    a.send_beacon_to(loopback(addr_b), t).await.unwrap();
     let err = b
         .recv_beacon(t + BEACON_MAX_AGE.as_secs() + 10, Instant::now())
         .await
@@ -222,7 +242,7 @@ async fn test_recv_rejects_stale_garbage_and_forged_beacons() {
 
     // Non-beacon garbage.
     let raw = UdpSocket::bind((Ipv4Addr::LOCALHOST, 0)).await.unwrap();
-    raw.send_to(b"hello", addr_b).await.unwrap();
+    raw.send_to(b"hello", loopback(addr_b)).await.unwrap();
     let err = b.recv_beacon(t, Instant::now()).await.expect_err("garbage");
     assert!(matches!(
         err,
@@ -232,7 +252,9 @@ async fn test_recv_rejects_stale_garbage_and_forged_beacons() {
     // Forged beacon: valid frame, tampered signature.
     let mut forged = a.beacon(t);
     forged.signature.0[0] ^= 0x01;
-    raw.send_to(&forged.encode(), addr_b).await.unwrap();
+    raw.send_to(&forged.encode(), loopback(addr_b))
+        .await
+        .unwrap();
     let err = b.recv_beacon(t, Instant::now()).await.expect_err("forged");
     assert!(matches!(
         err,
@@ -262,13 +284,19 @@ async fn test_address_rebind_grace_blocks_replay_redirect() {
     let t = unix_time();
 
     // First sighting: address recorded.
-    original.send_beacon_to(addr_listener, t).await.unwrap();
+    original
+        .send_beacon_to(loopback(addr_listener), t)
+        .await
+        .unwrap();
     let key = listener.recv_beacon(t, Instant::now()).await.unwrap();
     assert_eq!(listener.peer(&key).unwrap().address.port(), 8123);
 
     // Within the grace window the impostor refreshes liveness only —
     // the sticky address cannot be redirected.
-    impostor.send_beacon_to(addr_listener, t + 1).await.unwrap();
+    impostor
+        .send_beacon_to(loopback(addr_listener), t + 1)
+        .await
+        .unwrap();
     listener.recv_beacon(t + 1, Instant::now()).await.unwrap();
     assert_eq!(
         listener.peer(&key).unwrap().address.port(),
@@ -279,7 +307,10 @@ async fn test_address_rebind_grace_blocks_replay_redirect() {
     // After the grace window the new address is accepted (legitimate
     // DHCP/host moves eventually take effect).
     let later = Instant::now() + ADDR_REBIND_GRACE + Duration::from_secs(1);
-    impostor.send_beacon_to(addr_listener, t + 2).await.unwrap();
+    impostor
+        .send_beacon_to(loopback(addr_listener), t + 2)
+        .await
+        .unwrap();
     listener.recv_beacon(t + 2, later).await.unwrap();
     assert_eq!(
         listener.peer(&key).unwrap().address.port(),
@@ -307,7 +338,9 @@ async fn test_spawn_loop_announces_and_merges_into_shared_table() {
 
     let b = service_on(8124).await;
     let key_b = b.public_key();
-    b.send_beacon_to(addr_announcer, unix_time()).await.unwrap();
+    b.send_beacon_to(loopback(addr_announcer), unix_time())
+        .await
+        .unwrap();
 
     // The spawned loop validates and merges within a short deadline
     // (its immediate first announce tick runs concurrently).

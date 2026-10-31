@@ -261,18 +261,27 @@ fn test_alert_confirm_prompt_headless_fallbacks() {
 #[test]
 fn test_ws_open_connection_failure_queues_error_and_close() {
     let state = WebApiState::new();
-    // Port 9 (discard) on localhost: nothing listens, the connect fails
-    // promptly and the background thread reports Error + Close.
-    let id = ws_open(&state, "ws://127.0.0.1:9");
+    // Bind and immediately release a loopback port so nothing listens on it:
+    // the connect is refused and the background thread reports Error + Close.
+    // A well-known port (9/discard) is not reliable here — some hosts filter
+    // it, so the connect hangs instead of failing and no event is ever queued.
+    let addr = {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        listener.local_addr().unwrap()
+    };
+    let id = ws_open(&state, &format!("ws://{addr}/"));
     assert!(id > 0);
 
+    // A loaded runner can take a moment to start the connect thread, so wait
+    // well past a refused connect's usual instant failure.
     let mut events = Vec::new();
-    for _ in 0..100 {
+    let deadline = std::time::Instant::now() + Duration::from_secs(10);
+    while events.len() < 2 {
         events.extend(drain_async(&state));
-        if events.len() >= 2 {
+        if events.len() >= 2 || std::time::Instant::now() >= deadline {
             break;
         }
-        std::thread::sleep(std::time::Duration::from_millis(20));
+        std::thread::sleep(Duration::from_millis(20));
     }
     assert!(
         events.len() >= 2,
