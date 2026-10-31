@@ -226,7 +226,11 @@ mod tests {
         std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).unwrap();
         IdentityManager::load(&path).expect("loads identity");
         let mode = std::fs::metadata(&path).unwrap().permissions().mode();
-        assert_eq!(mode & 0o777, 0o600, "load must tighten a world-readable identity");
+        assert_eq!(
+            mode & 0o777,
+            0o600,
+            "load must tighten a world-readable identity"
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 

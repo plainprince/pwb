@@ -425,8 +425,10 @@ async fn main() {
         );
     }
 
-    // Join the swarm: dial every configured bootstrap/rendezvous peer and
-    // keep only the ones that answered a liveness probe.
+    // Join the swarm through one randomly drawn bootstrap/rendezvous peer and
+    // keep it only if it answered a liveness probe; the others are dialled
+    // only as failover, so a shared seed list is not hit by every client at
+    // once.
     let connected = engine.connect_bootstrap_verified().await;
     if !connected.is_empty() {
         println!("[Network] Joined via {} bootstrap peer(s)", connected.len());

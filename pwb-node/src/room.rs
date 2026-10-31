@@ -84,7 +84,7 @@ const MAX_TRACKED_AUTHORS: usize = 512;
 /// counter without a new key. A key-cycling attacker is still bounded by the
 /// engine's per-peer token bucket and by the dedup set.
 #[derive(Debug, Default)]
-struct AuthorFloodControl {
+pub(crate) struct AuthorFloodControl {
     windows: HashMap<PublicKey, AuthorWindow>,
 }
 
@@ -97,7 +97,7 @@ struct AuthorWindow {
 impl AuthorFloodControl {
     /// Record one post by `author` at `now`; `false` means over the limit
     /// (and the post must be dropped rather than stored or relayed).
-    fn allow(&mut self, author: &PublicKey, now: u64) -> bool {
+    pub(crate) fn allow(&mut self, author: &PublicKey, now: u64) -> bool {
         if !self.windows.contains_key(author) && self.windows.len() >= MAX_TRACKED_AUTHORS {
             // Reclaim finished windows first, then the one running longest.
             self.windows
@@ -273,15 +273,18 @@ fn post_digest(post: &RoomPostWire) -> ContentId {
 }
 
 /// Bounded set of post digests already handled, so flooding terminates.
+///
+/// Shared with [`crate::blog`]: both flooded feeds need the same "remember
+/// what I already forwarded" set to stop a message circulating forever.
 #[derive(Debug)]
-struct PostDedup {
+pub(crate) struct PostDedup {
     set: HashSet<ContentId>,
     order: VecDeque<ContentId>,
     cap: usize,
 }
 
 impl PostDedup {
-    fn new(cap: usize) -> Self {
+    pub(crate) fn new(cap: usize) -> Self {
         Self {
             set: HashSet::new(),
             order: VecDeque::new(),
@@ -290,7 +293,7 @@ impl PostDedup {
     }
 
     /// Record `digest` and report whether it was new.
-    fn insert(&mut self, digest: ContentId) -> bool {
+    pub(crate) fn insert(&mut self, digest: ContentId) -> bool {
         if !self.set.insert(digest) {
             return false;
         }
@@ -521,12 +524,7 @@ impl RoomService {
                 return Err(format!("not joined to {room} — open the room first"));
             }
         }
-        if !self
-            .flood
-            .lock()
-            .unwrap()
-            .allow(&self.local, unix_time())
-        {
+        if !self.flood.lock().unwrap().allow(&self.local, unix_time()) {
             return Err(format!(
                 "you are posting too fast — at most {AUTHOR_POST_LIMIT} messages per {AUTHOR_WINDOW_SECS}s"
             ));
@@ -635,12 +633,7 @@ impl RoomService {
         }
         // One key, one budget: an author past their limit is dropped before
         // anything is stored or re-flooded, so a flood cannot buy fan-out.
-        if !self
-            .flood
-            .lock()
-            .unwrap()
-            .allow(&post.sender, unix_time())
-        {
+        if !self.flood.lock().unwrap().allow(&post.sender, unix_time()) {
             eprintln!(
                 "[Room {}] dropped a post from {} (per-author rate limit)",
                 post.room,

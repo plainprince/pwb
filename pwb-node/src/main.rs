@@ -1350,10 +1350,12 @@ async fn main() {
         );
     }
 
-    // Join the swarm: dial every configured bootstrap/rendezvous peer and
-    // keep only the ones that answered a liveness probe. Bootstrap nodes
-    // share their peer tables via PeerExchange gossip, so a new node learns
-    // about the rest of the network automatically.
+    // Join the swarm through one randomly drawn bootstrap/rendezvous peer and
+    // keep it only if it answered a liveness probe; the others are dialled
+    // only as failover. Bootstrap nodes share their peer tables via
+    // PeerExchange gossip, so one reachable seed is enough to learn the rest of
+    // the network — and a published seed list is never hit by every client at
+    // once.
     let connected = engine.connect_bootstrap_verified().await;
     if !connected.is_empty() {
         println!("[Network] Joined via {} bootstrap peer(s)", connected.len());

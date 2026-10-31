@@ -18,6 +18,7 @@
 //! - `network.plain` — this node's addresses, peer table, and local services.
 //! - `help.plain`    — system-domain index plus namespace and credit rules.
 //! - `chat.plain`    — direct end-to-end-encrypted chat with another node.
+//! - `blog.plain`    — the global feed of blog entries, received live.
 //!
 //! Page *rendering* for these domains lives in `pwb-node::system` (it needs
 //! `pwb-web`'s PML/PSS compiler, which `pwb-core` cannot depend on). Everything
@@ -37,6 +38,7 @@ pub const RESERVED_SYSTEM_DOMAINS: &[&str] = &[
     "network.plain",
     "help.plain",
     "chat.plain",
+    "blog.plain",
     // Internal browser tools: no TLD, blocked so user sites cannot claim them.
     "devtools",
 ];
@@ -60,6 +62,8 @@ pub enum SystemDomain {
     Help,
     /// `chat.plain` — direct end-to-end-encrypted peer chat.
     Chat,
+    /// `blog.plain` — the single global feed of blog entries.
+    Blog,
 }
 
 impl SystemDomain {
@@ -74,6 +78,7 @@ impl SystemDomain {
             SystemDomain::Network => "network.plain",
             SystemDomain::Help => "help.plain",
             SystemDomain::Chat => "chat.plain",
+            SystemDomain::Blog => "blog.plain",
         }
     }
 
@@ -91,6 +96,7 @@ impl SystemDomain {
             "network.plain" => Some(SystemDomain::Network),
             "help.plain" => Some(SystemDomain::Help),
             "chat.plain" => Some(SystemDomain::Chat),
+            "blog.plain" => Some(SystemDomain::Blog),
             _ => None,
         }
     }
@@ -411,6 +417,7 @@ mod tests {
             ("network.plain", SystemDomain::Network),
             ("help.plain", SystemDomain::Help),
             ("chat.plain", SystemDomain::Chat),
+            ("blog.plain", SystemDomain::Blog),
         ] {
             let url = SystemUrl::parse(host).unwrap_or_else(|| panic!("{host} should parse"));
             assert_eq!(url.domain(), domain);
@@ -512,5 +519,20 @@ mod tests {
     fn test_chat_plain_is_reserved_and_chatless_claims_fail() {
         assert!(is_reserved_system_domain("chat.plain"));
         assert!(RESERVED_SYSTEM_DOMAINS.contains(&"chat.plain"));
+    }
+
+    #[test]
+    fn test_blog_plain_is_reserved() {
+        assert!(is_reserved_system_domain("blog.plain"));
+        assert!(RESERVED_SYSTEM_DOMAINS.contains(&"blog.plain"));
+        assert_eq!(
+            SystemDomain::from_host("BLOG.plain"),
+            Some(SystemDomain::Blog),
+            "host matching is case-insensitive like every other domain"
+        );
+        // The feed is global: there is no per-author or per-blog query
+        // parameter to parse, so the blog URL carries nothing to decode.
+        let url = SystemUrl::parse("plain://blog.plain?anything=1").expect("blog url parses");
+        assert_eq!(url.domain(), SystemDomain::Blog);
     }
 }

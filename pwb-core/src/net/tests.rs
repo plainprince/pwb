@@ -942,6 +942,79 @@ async fn test_connect_bootstrap_registers_peers() {
     engine.stop().await;
 }
 
+/// Joining dials one published seed, drawn at random, and stops there: a seed
+/// list is shared by every client, so a join must not probe all of it.
+#[tokio::test]
+async fn test_join_dials_one_seed_and_leaves_the_others_alone() {
+    let mut seeds = Vec::new();
+    let mut seed_engines = Vec::new();
+    for _ in 0..3 {
+        let kp = Keypair::generate();
+        let engine = NodeEngine::new(NodeConfig {
+            listen_addr: SocketAddr::from_str("127.0.0.1:0").unwrap(),
+            keypair: kp.clone(),
+            bootstrap_peers: Vec::new(),
+            stun_server: None,
+            max_peers: 100,
+            heartbeat_interval: Duration::from_secs(30),
+        });
+        engine.start().await.expect("seed starts");
+        let addr = engine.local_addr().expect("bound").expect("addr");
+        seeds.push(BootstrapPeer {
+            address: addr,
+            public_key: kp.public,
+        });
+        seed_engines.push(engine);
+    }
+
+    let newcomer_kp = Keypair::generate();
+    let newcomer = NodeEngine::new(NodeConfig {
+        listen_addr: SocketAddr::from_str("127.0.0.1:0").unwrap(),
+        keypair: newcomer_kp.clone(),
+        bootstrap_peers: seeds.clone(),
+        stun_server: None,
+        max_peers: 100,
+        heartbeat_interval: Duration::from_secs(30),
+    });
+    newcomer.start().await.expect("newcomer starts");
+
+    let joined = newcomer.connect_bootstrap_verified().await;
+    assert_eq!(joined.len(), 1, "one answering seed is a complete join");
+    let chosen = joined[0].public_key;
+    assert!(
+        seed_engines
+            .iter()
+            .enumerate()
+            .any(|(index, _)| seeds[index].public_key == chosen),
+        "the joined peer must be one of the configured seeds"
+    );
+
+    for (index, seed) in seeds.iter().enumerate() {
+        if seed.public_key == chosen {
+            let deadline = Instant::now() + Duration::from_secs(2);
+            let mut learned = false;
+            while Instant::now() < deadline {
+                if seed_engines[index].get_peer(&newcomer_kp.public).is_some() {
+                    learned = true;
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+            assert!(learned, "the seed that answered knows the newcomer");
+        } else {
+            assert!(
+                seed_engines[index].get_peer(&newcomer_kp.public).is_none(),
+                "a seed that was not drawn must not receive a join probe"
+            );
+        }
+    }
+
+    newcomer.stop().await;
+    for engine in seed_engines {
+        engine.stop().await;
+    }
+}
+
 /// `PeerExchange` gossip adds advertised peers to the peer table using their
 /// advertised addresses, so bootstrap/rendezvous nodes can teach newcomers
 /// about the rest of the swarm.

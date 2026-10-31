@@ -617,7 +617,7 @@ network, and browsing no longer defaults to revealing the local address:
 
 | Change | What it does |
 |---|---|
-| `pwb-core::join` + `pwb-node::join` | A signed, versioned descriptor (`deploy/join.json`) lists seeds plus optional funding anchors and an expiry. Clients fetch it over HTTPS, from a file, or from inline JSON (256 KiB cap), prove every seed with Ping/Pong, and merge several sources. The first signer seen is pinned under `--data`; `--join-signer`/`--require-join-signature` pin it up front. |
+| `pwb-core::join` + `pwb-node::join` | A signed, versioned descriptor (`deploy/join.json`) lists seeds plus optional funding anchors and an expiry. Clients fetch it over HTTPS, from a file, or from inline JSON (256 KiB cap), prove one randomly drawn seed with Ping/Pong (failing over to another only when it stays silent), and merge several sources. The first signer seen is pinned under `--data`; `--join-signer`/`--require-join-signature` pin it up front. |
 | `pwb-node --write-join` | Publishes a descriptor from `--join-seed`, `--trust-anchor`, and `--join-expires`, signs it with the node identity or `--write-join-key`, prints the signer key, and exits without starting the engine; write errors and an expiry in the past are fatal. |
 | `pwb-node --join` / `PWB_JOIN` / `--no-join` | Selects sources and makes the default public descriptor explicit; an explicit `--bootstrap` suppresses it so private deployments stay independent of GitHub. `--join-required` fails closed. |
 | `pwb-node::privacy` | Randomized three-hop circuits from direct peers, with the exit pinned when the caller needs one. |

@@ -184,6 +184,24 @@ pub async fn restore(engine: &NodeEngine, path: &Path) -> usize {
     connected
 }
 
+/// Periodically write the merged peer store so a restart can rejoin without a
+/// bootstrap. Existing remembered peers survive a temporarily empty table.
+pub async fn persist_loop(
+    engine: NodeEngine,
+    path: std::path::PathBuf,
+    interval: Duration,
+    local: PublicKey,
+) {
+    let mut ticker = tokio::time::interval(interval);
+    loop {
+        ticker.tick().await;
+        let peers = merged(&engine, &local, &path);
+        if let Err(error) = persist::save_peers(&path, &peers) {
+            eprintln!("[Network] Could not persist peer store: {error}");
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -245,7 +263,11 @@ mod tests {
         let mut stored = Vec::new();
         // A table flooded with fresh attacker entries…
         for seed in 0..30u8 {
-            stored.push(peer(seed, &format!("203.0.113.{}:7921", seed), 50_000 + u64::from(seed)));
+            stored.push(peer(
+                seed,
+                &format!("203.0.113.{}:7921", seed),
+                50_000 + u64::from(seed),
+            ));
         }
         // …on top of a few long-standing legitimate peers.
         for seed in 100..104u8 {
@@ -254,29 +276,14 @@ mod tests {
         let stored = store(stored);
         let selected = select_for_restore(&stored);
 
-        let old_kept = selected.iter().filter(|peer| peer.last_seen_unix < 1_000).count();
+        let old_kept = selected
+            .iter()
+            .filter(|peer| peer.last_seen_unix < 1_000)
+            .count();
         assert!(
             old_kept >= 4,
             "the reserved slots keep the long-standing peers (got {old_kept})"
         );
         assert!(selected.len() <= DIAL_LIMIT);
-    }
-}
-
-/// Periodically write the merged peer store so a restart can rejoin without a
-/// bootstrap. Existing remembered peers survive a temporarily empty table.
-pub async fn persist_loop(
-    engine: NodeEngine,
-    path: std::path::PathBuf,
-    interval: Duration,
-    local: PublicKey,
-) {
-    let mut ticker = tokio::time::interval(interval);
-    loop {
-        ticker.tick().await;
-        let peers = merged(&engine, &local, &path);
-        if let Err(error) = persist::save_peers(&path, &peers) {
-            eprintln!("[Network] Could not persist peer store: {error}");
-        }
     }
 }

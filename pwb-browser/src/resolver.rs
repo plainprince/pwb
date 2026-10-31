@@ -221,6 +221,13 @@ pub fn resolve_url_or_file_with_context(
                 Some(room) => handler.render_system_room_page(&room, peers),
                 None => handler.render_system_chat_page(system_url.chat_peer(), peers),
             },
+            // `blog.plain` is reserved by the protocol before its feed page
+            // exists; say so plainly instead of rendering an empty feed that
+            // would look like a blog with no posts.
+            SystemDomain::Blog => pwb_node::system::render_message_bundle(
+                SystemDomain::Blog.as_str(),
+                "The global feed is part of the protocol; this page is not wired up yet.",
+            ),
         };
         // Native system pages ship in the same compressed container as
         // authored sites; `Bundle::deserialize` accepts both forms.

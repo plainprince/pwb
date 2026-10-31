@@ -844,6 +844,37 @@ pub enum NetworkMessage {
         posts: Vec<RoomPostWire>,
     },
 
+    /// A blog entry for the single global feed at `blog.plain`.
+    ///
+    /// Like [`Self::RoomPost`] it is public and **flooded**: every holder
+    /// re-broadcasts it to its own peers, bounded by a hop budget and a
+    /// per-node dedup set, so an entry reaches the network through
+    /// intermediaries. There is deliberately no room field — the feed is
+    /// global — and authorship comes from `entry.signature`, verified by the
+    /// engine for every copy, never from the transport.
+    BlogEntry(BlogEntryWire),
+
+    /// Announce that `sender` has the `blog.plain` page open
+    /// (`subscribed: true`) or has closed it. One hop and
+    /// envelope-authenticated like [`Self::RoomSubscribe`], so no forwarder
+    /// can put a peer on the roster of readers it never opened. This is the
+    /// whole membership of the feed: a node stores and serves entries only
+    /// while it is subscribed, and relays without keeping them otherwise.
+    BlogSubscribe { sender: PublicKey, subscribed: bool },
+
+    /// Ask the peers with the page open for the entries this node missed.
+    /// Sent when `blog.plain` opens so a reader converges without waiting for
+    /// new traffic; answered directly (never flooded).
+    BlogSync { sender: PublicKey },
+
+    /// Direct answer to [`Self::BlogSync`]: up to [`BLOG_HISTORY_MAX`]
+    /// signed entries the responder holds, newest last. Every entry keeps its
+    /// author signature, so the receiver verifies each one before storing it.
+    BlogHistory {
+        sender: PublicKey,
+        entries: Vec<BlogEntryWire>,
+    },
+
     /// An application payload sealed with [`SendFlags::E2EE`]
     /// (see `pwb-core::net::e2ee` for the construction).
     ///
@@ -884,6 +915,27 @@ pub const ROOM_POST_HOPS: u8 = 8;
 /// Posts carried by one [`NetworkMessage::RoomHistory`] reply, and therefore
 /// the catch-up cost a joiner can ask a peer for.
 pub const ROOM_HISTORY_MAX: usize = 50;
+
+/// Domain-separation prefix for a signed global blog entry.
+pub const BLOG_ENTRY_PREFIX: &[u8] = b"PWBBLOGENTRY1";
+
+/// Largest UTF-8 title a peer will accept on `blog.plain`.
+pub const MAX_BLOG_TITLE: usize = 120;
+
+/// Largest UTF-8 body a peer will accept on `blog.plain`.
+///
+/// A blog entry is meant to be read, so it gets more room than a chat line;
+/// receivers still drop longer bodies before they reach an application.
+pub const MAX_BLOG_TEXT: usize = 4096;
+
+/// Hop budget an entry starts with when its author broadcasts it; each
+/// forwarder spends one. Same bound as [`ROOM_POST_HOPS`] so a global entry
+/// cannot travel further (or cost more) than a room post.
+pub const BLOG_ENTRY_HOPS: u8 = 8;
+
+/// Entries carried by one [`NetworkMessage::BlogHistory`] reply, and
+/// therefore the catch-up cost a reader can ask a peer for.
+pub const BLOG_HISTORY_MAX: usize = 50;
 
 /// Whether `name` is usable as a room name: non-empty, at most
 /// [`MAX_ROOM_NAME`] ASCII letters, digits, `-`, `_`, or `.`.
@@ -953,6 +1005,68 @@ impl RoomPostWire {
                     &self.room,
                     &self.id,
                     self.sent_at,
+                    &self.text,
+                ),
+            )
+    }
+}
+
+/// Canonical bytes a blog entry's author signs.
+///
+/// Binds the author, message id, timestamp, title, and body, so any copy of
+/// the entry proves who wrote it — including one relayed by a peer that never
+/// talked to the receiver. `hops` is deliberately unsigned: forwarders spend
+/// it without invalidating the author's signature.
+pub fn blog_entry_sign_message(
+    sender: &PublicKey,
+    id: &[u8; 16],
+    sent_at: u64,
+    title: &str,
+    text: &str,
+) -> Vec<u8> {
+    let mut msg = Vec::new();
+    msg.extend_from_slice(BLOG_ENTRY_PREFIX);
+    msg.extend_from_slice(&sender.0);
+    msg.extend_from_slice(id);
+    msg.extend_from_slice(&sent_at.to_le_bytes());
+    push_str(&mut msg, title);
+    push_str(&mut msg, text);
+    msg
+}
+
+/// One entry of the global `blog.plain` feed, signed by the identity that
+/// wrote it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BlogEntryWire {
+    /// The author — proven by [`Self::verify`], not by the transport.
+    pub sender: PublicKey,
+    /// Random per-entry id: dedup for flooding, order for the feed.
+    pub id: [u8; 16],
+    /// Author wall-clock unix timestamp (display only).
+    pub sent_at: u64,
+    /// Headline, at most [`MAX_BLOG_TITLE`] bytes.
+    pub title: String,
+    /// Body, at most [`MAX_BLOG_TEXT`] bytes.
+    pub text: String,
+    /// Remaining flood budget; decremented by each forwarder. Unsigned.
+    pub hops: u8,
+    /// Author signature over [`blog_entry_sign_message`].
+    pub signature: Signature,
+}
+
+impl BlogEntryWire {
+    /// The author's signature over exactly the fields they committed to, plus
+    /// the shape every node enforces (title and body length caps).
+    pub fn verify(&self) -> bool {
+        self.title.len() <= MAX_BLOG_TITLE
+            && self.text.len() <= MAX_BLOG_TEXT
+            && self.signature.verify(
+                &self.sender,
+                &blog_entry_sign_message(
+                    &self.sender,
+                    &self.id,
+                    self.sent_at,
+                    &self.title,
                     &self.text,
                 ),
             )

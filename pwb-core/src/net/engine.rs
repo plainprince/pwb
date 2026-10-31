@@ -7,6 +7,7 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use rand::rngs::OsRng;
+use rand::seq::SliceRandom;
 use rand::RngCore;
 use tokio::net::UdpSocket;
 use tokio::sync::mpsc;
@@ -35,6 +36,18 @@ pub(crate) const PEER_TIMEOUT: Duration = Duration::from_secs(300);
 
 /// How long a bootstrap dial waits for a Pong before giving up.
 const BOOTSTRAP_DIAL_TIMEOUT: Duration = Duration::from_millis(1500);
+
+/// Longest jittered pause before a failover seed is dialled.
+///
+/// Failover is a retry, not a scan: a client that moves on to the next seed
+/// waits a random moment first, so clients that share a seed list never probe
+/// it in lockstep.
+const BOOTSTRAP_FAILOVER_PAUSE_MS: u64 = 500;
+
+/// Pause before one failover attempt: 100-600 ms, uniformly random.
+fn failover_pause() -> Duration {
+    Duration::from_millis(100 + OsRng.next_u64() % BOOTSTRAP_FAILOVER_PAUSE_MS)
+}
 
 /// Capacity of the inbound authenticated-message queue. A burst beyond this is
 /// dropped by the receiver rather than buffered, so the queue can never grow
@@ -75,6 +88,23 @@ pub struct BootstrapPeer {
     pub address: SocketAddr,
     /// The bootstrap node's Ed25519 public key.
     pub public_key: PublicKey,
+}
+
+/// Rendezvous (seed) work this engine actually performed.
+///
+/// Reported through [`NodeEngine::subscribe_rendezvous`] so the node layer can
+/// meter seed service and mint rendezvous credits. A seed is a long-running
+/// node that admits newcomers and hands out its peer table; both are work the
+/// node can measure, unlike merely being reachable.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RendezvousEvent {
+    /// A peer this node had never authenticated before contacted it, so a
+    /// newcomer joined through this node. `probe_bytes` is the authenticated
+    /// payload that carried the join.
+    JoinServed { probe_bytes: u64 },
+    /// This node's peer table went out in a `PeerExchange`: `peers` entries per
+    /// copy, `bytes` of table served across every copy sent.
+    PeerTableServed { peers: u64, bytes: u64 },
 }
 
 /// Resolve one bootstrap specification into a dialable peer.
@@ -194,6 +224,8 @@ pub struct NodeEngine {
     pending_onion_replies: loops::PendingOnionReplies,
     /// Listeners for relayed onion cells (relay-credit accounting).
     relay_subscribers: loops::RelaySubscribers,
+    /// Listeners for rendezvous work (seed-credit accounting).
+    rendezvous_subscribers: loops::RendezvousSubscribers,
     pub(super) running: Arc<Mutex<bool>>,
     discovery_handle: Mutex<Option<tokio::task::JoinHandle<()>>>,
     /// Address the LAN discovery socket actually bound to (`None` when
@@ -248,6 +280,7 @@ impl NodeEngine {
             onion_request_subscribers: Arc::new(Mutex::new(Vec::new())),
             pending_onion_replies: Arc::new(Mutex::new(HashMap::new())),
             relay_subscribers: Arc::new(Mutex::new(Vec::new())),
+            rendezvous_subscribers: Arc::new(Mutex::new(Vec::new())),
             running: Arc::new(Mutex::new(false)),
             discovery_handle: Mutex::new(None),
             discovery_addr: Mutex::new(None),
@@ -356,6 +389,7 @@ impl NodeEngine {
         let onion_request_subscribers = Arc::clone(&self.onion_request_subscribers);
         let pending_onion_replies = Arc::clone(&self.pending_onion_replies);
         let relay_subscribers = Arc::clone(&self.relay_subscribers);
+        let rendezvous_subscribers = Arc::clone(&self.rendezvous_subscribers);
         let onion_outgoing = self.outgoing_tx.clone();
         let local_dh = self.dh_keypair.clone();
         let metrics_for_sender = Arc::clone(&self.metrics);
@@ -431,6 +465,7 @@ impl NodeEngine {
                     onion_request_subscribers,
                     pending_onion_replies,
                     relay_subscribers,
+                    rendezvous_subscribers,
                     outgoing_tx: onion_outgoing,
                     routing: routing_for_receiver,
                     local_key,
@@ -1520,24 +1555,36 @@ impl NodeEngine {
         connected
     }
 
-    /// Dial every configured bootstrap peer in parallel and return only the
-    /// peers that answered a liveness probe. This is how a node honestly joins
-    /// the swarm: bootstrap nodes are well-known rendezvous points, and an
-    /// unreachable one no longer counts as a successful join.
+    /// Join through one published bootstrap peer, drawn at random when several
+    /// are configured, and return it only after it answered a liveness probe.
+    ///
+    /// A seed list is shared by every client of the network, so dialling all of
+    /// it (as a parallel join does) turns each new client into a burst of
+    /// probes against every seed. This draws a single seed from the shuffled
+    /// list and stops as soon as it answers: one reachable seed is enough to
+    /// join, because it shares its peer table through `PeerExchange` gossip.
+    /// Only a seed that stays silent costs a failover attempt, and every
+    /// attempt after the first waits a jittered [`failover_pause`] first.
+    ///
+    /// Returns at most one peer, so callers can report a failed join honestly.
     pub async fn connect_bootstrap_verified(&self) -> Vec<PeerInfo> {
-        let mut joins = tokio::task::JoinSet::new();
-        for bootstrap in &self.config.bootstrap_peers {
-            let engine = self.clone();
-            let addr = bootstrap.address;
-            let pubkey = bootstrap.public_key;
-            joins
-                .spawn(async move { engine.dial(addr, pubkey, BOOTSTRAP_DIAL_TIMEOUT).await.ok() });
-        }
-
+        let mut candidates = self.config.bootstrap_peers.clone();
+        candidates.shuffle(&mut OsRng);
         let mut connected = Vec::new();
-        while let Some(result) = joins.join_next().await {
-            if let Ok(Some(peer)) = result {
+        for (attempt, bootstrap) in candidates.into_iter().enumerate() {
+            if attempt > 0 {
+                tokio::time::sleep(failover_pause()).await;
+            }
+            let joined = self
+                .dial(
+                    bootstrap.address,
+                    bootstrap.public_key,
+                    BOOTSTRAP_DIAL_TIMEOUT,
+                )
+                .await;
+            if let Ok(peer) = joined {
                 connected.push(peer);
+                break;
             }
         }
         connected
@@ -1641,6 +1688,7 @@ impl Clone for NodeEngine {
             onion_request_subscribers: Arc::clone(&self.onion_request_subscribers),
             pending_onion_replies: Arc::clone(&self.pending_onion_replies),
             relay_subscribers: Arc::clone(&self.relay_subscribers),
+            rendezvous_subscribers: Arc::clone(&self.rendezvous_subscribers),
             running: Arc::clone(&self.running),
             discovery_handle: Mutex::new(None), // join handle is not cloned
             discovery_addr: Mutex::new(*self.discovery_addr.lock().unwrap()),

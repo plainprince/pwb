@@ -23,8 +23,8 @@ use super::e2ee::{self, E2eeState};
 use super::engine::{NodeConfig, PeerInfo, PEER_TIMEOUT};
 use super::envelope::{self, Reassembler, ReplayGuard};
 use super::messages::{
-    decode_punch_probe, encode_punch_probe, NetworkMessage, OutgoingDatagram, RoomPostWire,
-    MAX_CHAT_TEXT, PUNCH_MAGIC,
+    decode_punch_probe, encode_punch_probe, BlogEntryWire, NetworkMessage, OutgoingDatagram,
+    RoomPostWire, MAX_CHAT_TEXT, PUNCH_MAGIC,
 };
 use super::onion_transport::{self, OnionAssembly, OnionKind, OnionRequest, RelayEvent};
 
@@ -1005,7 +1005,10 @@ fn claimed_identity_matches(message: &NetworkMessage, signer: &PublicKey) -> boo
         | NetworkMessage::ChatAck { sender, .. }
         | NetworkMessage::RoomSubscribe { sender, .. }
         | NetworkMessage::RoomSync { sender, .. }
-        | NetworkMessage::RoomHistory { sender, .. } => sender == signer,
+        | NetworkMessage::RoomHistory { sender, .. }
+        | NetworkMessage::BlogSubscribe { sender, .. }
+        | NetworkMessage::BlogSync { sender }
+        | NetworkMessage::BlogHistory { sender, .. } => sender == signer,
         NetworkMessage::CheckIndexProof { proof, .. } => proof.miner == *signer,
         NetworkMessage::ProofVerdict { verifier, .. } => verifier == signer,
         NetworkMessage::ClaimDomainAttested { owner, .. }
@@ -1100,14 +1103,19 @@ fn payload_signature_valid(message: &NetworkMessage) -> bool {
         // entry by entry.
         NetworkMessage::RoomPost(post) => post.verify(),
         NetworkMessage::RoomHistory { posts, .. } => posts.iter().all(RoomPostWire::verify),
+        // A blog entry carries its author's signature exactly like a room
+        // post does: the forwarder re-signs the envelope, so the author is
+        // proved by the entry itself.
+        NetworkMessage::BlogEntry(entry) => entry.verify(),
+        NetworkMessage::BlogHistory { entries, .. } => entries.iter().all(BlogEntryWire::verify),
         _ => true,
     }
 }
 
 /// Shape checks that are not signatures: a chat payload must respect the
-/// length cap, and a room message the room-name and history caps, so one peer
-/// cannot push megabytes of text into an application handler through an
-/// otherwise valid envelope.
+/// length cap, and a room or blog message its own caps, so one peer cannot
+/// push megabytes of text into an application handler through an otherwise
+/// valid envelope.
 fn payload_well_formed(message: &NetworkMessage) -> bool {
     match message {
         NetworkMessage::Chat { text, .. } => text.len() <= MAX_CHAT_TEXT,
@@ -1124,6 +1132,18 @@ fn payload_well_formed(message: &NetworkMessage) -> bool {
                 && posts.len() <= crate::net::ROOM_HISTORY_MAX
                 && posts.iter().all(|post| {
                     post.text.len() <= MAX_CHAT_TEXT && crate::net::is_valid_room_name(&post.room)
+                })
+        }
+        NetworkMessage::BlogEntry(entry) => {
+            entry.title.len() <= crate::net::MAX_BLOG_TITLE
+                && entry.text.len() <= crate::net::MAX_BLOG_TEXT
+                && entry.hops > 0
+        }
+        NetworkMessage::BlogHistory { entries, .. } => {
+            entries.len() <= crate::net::BLOG_HISTORY_MAX
+                && entries.iter().all(|entry| {
+                    entry.title.len() <= crate::net::MAX_BLOG_TITLE
+                        && entry.text.len() <= crate::net::MAX_BLOG_TEXT
                 })
         }
         _ => true,

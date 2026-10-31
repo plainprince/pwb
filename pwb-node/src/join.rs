@@ -336,7 +336,10 @@ pub async fn discover(
                     if let Err(error) = save_pinned_signer(data_dir, signer) {
                         eprintln!("[Join] Could not pin join signer: {error}");
                     } else {
-                        println!("[Join] Pinned join signer {} (trust on first use)", signer.to_hex());
+                        println!(
+                            "[Join] Pinned join signer {} (trust on first use)",
+                            signer.to_hex()
+                        );
                         eprintln!(
                             "[Join] First-use pin: whoever answered this fetch chose the key. \
                              Pin it out of band with --join-signer <hex> to be safe."
@@ -610,7 +613,12 @@ mod tests {
 
         // No signer known: the fetch must be refused, not trusted on first use.
         let error = runtime
-            .block_on(discover(&[url.clone()], Some(&dir), None, false))
+            .block_on(discover(
+                std::slice::from_ref(&url),
+                Some(&dir),
+                None,
+                false,
+            ))
             .expect_err("a cleartext first fetch cannot establish trust");
         assert!(matches!(error, JoinSourceError::InsecureSource(_)));
         assert!(load_pinned_signer(&dir).is_none(), "nothing was pinned");
