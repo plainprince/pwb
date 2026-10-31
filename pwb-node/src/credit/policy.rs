@@ -3,7 +3,7 @@
 use std::fmt;
 use std::time::Duration;
 
-/// The three verified services that mint credits.
+/// The verified services that mint credits.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum ServiceKind {
     /// Serving a `search.plain` query to a requester (challenge round-trip).
@@ -12,6 +12,8 @@ pub enum ServiceKind {
     IndexBundle,
     /// Relaying onion cells through this node.
     RelayOnionCell,
+    /// Running a seed: admitting newcomers and serving the peer table.
+    ServeRendezvous,
 }
 
 /// Amounts, floors, and windows for [`CreditMinter`].
@@ -23,6 +25,11 @@ pub struct MintPolicy {
     pub index_credits: u64,
     /// Credits per whole KiB (floor) of sealed relayed cells.
     pub relay_credits_per_kib: u64,
+    /// Credits per newcomer a seed admitted in one sealed window.
+    pub rendezvous_credits_per_join: u64,
+    /// Credits per whole KiB of peer table a seed handed out in one sealed
+    /// window (counted once per peer the gossip reached).
+    pub rendezvous_credits_per_kib: u64,
     /// Verified traffic bytes required per credit minted (the anti-ASIC
     /// floor: issuance rate is bounded by network flow, not compute).
     /// A shard response is small, so this is set at 64 bytes rather than a
@@ -45,6 +52,8 @@ impl Default for MintPolicy {
             query_credits: 5,
             index_credits: 10,
             relay_credits_per_kib: 1,
+            rendezvous_credits_per_join: 1,
+            rendezvous_credits_per_kib: 1,
             traffic_per_credit: 64,
             per_service_cooldown: Duration::from_secs(1),
             epoch: Duration::from_secs(3600),
@@ -75,6 +84,10 @@ pub enum MintError {
     RelayChainBroken,
     /// `mint_relay` called with no sealed window awaiting claim.
     NoSealedRelayWork,
+    /// The rendezvous receipt does not match the sealed work chain.
+    RendezvousChainBroken,
+    /// `mint_rendezvous` called with no sealed window awaiting claim.
+    NoSealedRendezvousWork,
     /// The per-service cooldown has not elapsed.
     Cooldown { retry_after: Duration },
     /// Verified traffic covers fewer bytes than the mint requires.
@@ -109,6 +122,12 @@ impl fmt::Display for MintError {
             }
             MintError::NoSealedRelayWork => {
                 write!(f, "no sealed relay window is awaiting mint")
+            }
+            MintError::RendezvousChainBroken => {
+                write!(f, "rendezvous receipt does not match the sealed work chain")
+            }
+            MintError::NoSealedRendezvousWork => {
+                write!(f, "no sealed rendezvous window is awaiting mint")
             }
             MintError::Cooldown { retry_after } => {
                 write!(f, "service cooldown active, retry in {retry_after:?}")

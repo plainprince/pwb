@@ -20,7 +20,7 @@ use crate::telemetry::Metrics;
 
 use super::addr::{map_dest_for, unmap_source};
 use super::e2ee::{self, E2eeState};
-use super::engine::{NodeConfig, PeerInfo, PEER_TIMEOUT};
+use super::engine::{NodeConfig, PeerInfo, RendezvousEvent, PEER_TIMEOUT};
 use super::envelope::{self, Reassembler, ReplayGuard};
 use super::messages::{
     decode_punch_probe, encode_punch_probe, BlogEntryWire, NetworkMessage, OutgoingDatagram,
@@ -56,6 +56,12 @@ pub(super) type RelaySink = mpsc::Sender<RelayEvent>;
 
 /// The set of registered relay-event listeners.
 pub(super) type RelaySubscribers = Arc<Mutex<Vec<RelaySink>>>;
+
+/// One rendezvous-event listener (seed-credit accounting).
+pub(super) type RendezvousSink = mpsc::Sender<RendezvousEvent>;
+
+/// The set of registered rendezvous-event listeners.
+pub(super) type RendezvousSubscribers = Arc<Mutex<Vec<RendezvousSink>>>;
 
 /// Sustained authenticated messages accepted per peer per second.
 const PEER_MESSAGE_RATE: f64 = 128.0;
@@ -271,6 +277,7 @@ pub(super) struct InboundState {
     pub onion_request_subscribers: OnionRequestSubscribers,
     pub pending_onion_replies: PendingOnionReplies,
     pub relay_subscribers: RelaySubscribers,
+    pub rendezvous_subscribers: RendezvousSubscribers,
     pub outgoing_tx: mpsc::Sender<OutgoingDatagram>,
     pub routing: Arc<Mutex<RoutingTable>>,
     pub local_key: PublicKey,
@@ -762,6 +769,7 @@ pub(super) async fn receiver_loop(
                                 &state,
                                 &inner_message.sender,
                                 *origin_addr,
+                                datagram.len() as u64,
                             );
                             state.metrics.record_message_received();
                             let _ = sender.try_send((
@@ -776,7 +784,9 @@ pub(super) async fn receiver_loop(
                 }
 
                 state.metrics.record_message_received();
-                register_peer(&state, &message.sender, message.from);
+                // The whole datagram is what the newcomer cost this node in
+                // verified bytes; the join event meters exactly that.
+                register_peer(&state, &message.sender, message.from, len as u64);
                 // A slow handler drops traffic instead of growing the queue;
                 // UDP already treats loss as normal, and the per-peer bucket
                 // keeps one sender from monopolising the queue.
@@ -791,26 +801,27 @@ pub(super) async fn receiver_loop(
 
 /// Insert or refresh an authenticated peer, always using the datagram's real
 /// source address. Unknown senders are only added while the table has room.
-fn register_peer(state: &InboundState, sender: &PublicKey, from: SocketAddr) {
+fn register_peer(state: &InboundState, sender: &PublicKey, from: SocketAddr, bytes: u64) {
     // Direct traffic proves the peer is dialable at this address, so any
     // previous relay route is no longer needed.
     state.relay_routes.lock().unwrap().remove(sender);
-    register_peer_at(state, sender, from);
+    register_peer_at(state, sender, from, bytes);
 }
 
 /// Register a peer reached through a relay at the address the origin
 /// advertised. The relay route is installed by the caller; replies are wrapped
 /// and sent to the relay instead of this (possibly private) address.
-fn register_peer_relayed(state: &InboundState, sender: &PublicKey, from: SocketAddr) {
-    register_peer_at(state, sender, from);
+fn register_peer_relayed(state: &InboundState, sender: &PublicKey, from: SocketAddr, bytes: u64) {
+    register_peer_at(state, sender, from, bytes);
 }
 
-fn register_peer_at(state: &InboundState, sender: &PublicKey, from: SocketAddr) {
+fn register_peer_at(state: &InboundState, sender: &PublicKey, from: SocketAddr, bytes: u64) {
     let now = Instant::now();
     let mut table = state.peer_table.lock().unwrap();
-    if let Some(peer) = table.get_mut(sender) {
+    let joined = if let Some(peer) = table.get_mut(sender) {
         peer.last_seen = now;
         peer.address = from;
+        false
     } else if table.len() < state.max_peers {
         table.insert(
             *sender,
@@ -821,8 +832,21 @@ fn register_peer_at(state: &InboundState, sender: &PublicKey, from: SocketAddr) 
                 reputation: 0,
             },
         );
-    }
+        // First authenticated contact: a newcomer joined through this node.
+        // Reported before the lock is released so the count can never be
+        // double-issued for one peer.
+        true
+    } else {
+        false
+    };
     drop(table);
+
+    if joined {
+        try_deliver(
+            &mut state.rendezvous_subscribers.lock().unwrap(),
+            RendezvousEvent::JoinServed { probe_bytes: bytes },
+        );
+    }
 
     // Feed the Kademlia table as well. A full bucket surfaces its LRU head for
     // a ping; the existing peer-liveness loop already pings everyone, so the
@@ -958,7 +982,7 @@ fn handle_onion_datagram(datagram: &[u8], from: SocketAddr, state: &InboundState
 /// A full subscriber queue drops the message (the subscriber is simply too
 /// slow) while a closed one is removed. Neither case grows the queue or blocks
 /// the engine, so a stalled application cannot exhaust memory.
-fn try_deliver<T: Clone>(subscribers: &mut Vec<mpsc::Sender<T>>, message: T) {
+pub(super) fn try_deliver<T: Clone>(subscribers: &mut Vec<mpsc::Sender<T>>, message: T) {
     subscribers.retain(|tx| {
         !matches!(
             tx.try_send(message.clone()),

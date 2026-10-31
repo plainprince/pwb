@@ -17,6 +17,13 @@
 //!   cell count/bytes/chain head into a signed [`RelayReceipt`] that
 //!   `mint_relay` re-checks against the sealed state (window-continuous,
 //!   claim-once).
+//! - **Running a seed** — [`CreditMinter::rendezvous_join`] and
+//!   [`CreditMinter::record_peer_table_served`] fold the newcomers a node
+//!   admitted and the peer-table bytes it handed out into their own chain;
+//!   [`CreditMinter::seal_rendezvous_window`] seals them into a signed
+//!   [`RendezvousReceipt`] that `mint_rendezvous` re-checks. A node is only
+//!   paid for rendezvous work its engine actually reported (see
+//!   [`crate::seed`]).
 //!
 //! Minting is **rate-limited by real network traffic flow**, not compute:
 //! every credit consumes `MintPolicy::traffic_per_credit` bytes of *verified*
@@ -39,5 +46,7 @@ pub use ledger::{CreditEntry, CreditLedger, LedgerError};
 pub use meter::TrafficMeter;
 pub use minter::CreditMinter;
 pub use policy::{MintError, MintPolicy, ServiceKind};
-pub use receipts::{canonical_term_hash, IndexReceipt, QueryReceipt, RelayReceipt};
+pub use receipts::{
+    canonical_term_hash, IndexReceipt, QueryReceipt, RelayReceipt, RendezvousReceipt,
+};
 pub(crate) use signing::index_sign_message;

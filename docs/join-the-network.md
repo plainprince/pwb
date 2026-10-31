@@ -155,7 +155,7 @@ credits once the bundle clears the traffic floor (64 verified bytes per credit,
 so 640 bytes — the compressed bundle, not your source folder), which a
 medium-sized site does immediately. If the balance is still short, the node
 **keeps serving** and retries the same claim every 15 seconds, because answered
-queries and relayed cells add verified traffic too; it does not exit and leave
+queries, relayed cells, and seed work add verified traffic too; it does not exit and leave
 the site unserved. `pwb-node --status` shows the balance.
 `.plain` is reserved for built-in pages and cannot be claimed.
 

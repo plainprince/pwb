@@ -127,6 +127,15 @@ Clients pick anchors out of the descriptor only when they were not pinned by
 - It does not index the network by itself. Search and content still come from
   the peers that hold the shards and artifacts.
 
+The seed **earns credits** for the rendezvous work it actually performs: every
+newcomer it admits and every peer-table byte it hands out in a `PeerExchange` is
+folded into a signed `RendezvousReceipt` and minted into the same signed ledger
+as query, index, and relay work, under the same traffic floor (64 verified bytes
+per credit), per-service cooldown, and epoch cap. Idle reachability mints
+nothing, and because issuance is byte-bounded an operator cannot farm credits by
+running a seed that serves no traffic. `pwb-node --status` shows the balance and
+its `rendezvous` ledger entries.
+
 Rotate or move a seed by publishing the new `host:port/<hex>`; the key stays
 stable only if you carry the identity file to the new host. If the key changes,
 clients must update their `--bootstrap` entry.

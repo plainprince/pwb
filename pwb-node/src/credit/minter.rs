@@ -6,10 +6,16 @@ use std::time::Instant;
 use pwb_core::crypto::{ContentId, Keypair, PublicKey};
 use pwb_core::wire::Bundle;
 
-use super::meter::{ChallengeLedger, RelayLedger, SealedRelay, TrafficMeter};
+use super::meter::{
+    ChallengeLedger, RelayLedger, RendezvousLedger, SealedRelay, SealedRendezvous, TrafficMeter,
+};
 use super::policy::{MintError, MintPolicy, ServiceKind};
-use super::receipts::{canonical_term_hash, IndexReceipt, QueryReceipt, RelayReceipt};
-use super::signing::{index_sign_message, query_sign_message, relay_sign_message};
+use super::receipts::{
+    canonical_term_hash, IndexReceipt, QueryReceipt, RelayReceipt, RendezvousReceipt,
+};
+use super::signing::{
+    index_sign_message, query_sign_message, relay_sign_message, rendezvous_sign_message,
+};
 
 /// KiB divisor for relay work accounting.
 const KIB: u64 = 1024;
@@ -29,6 +35,7 @@ pub struct CreditMinter {
     last_mint: HashMap<ServiceKind, Instant>,
     challenges: ChallengeLedger,
     relay: RelayLedger,
+    rendezvous: RendezvousLedger,
 }
 
 impl CreditMinter {
@@ -49,6 +56,7 @@ impl CreditMinter {
             epoch_minted: 0,
             last_mint: HashMap::new(),
             relay: RelayLedger::default(),
+            rendezvous: RendezvousLedger::default(),
         }
     }
 
@@ -229,6 +237,125 @@ impl CreditMinter {
             / KIB;
         let amount = self.authorize(ServiceKind::RelayOnionCell, amount, now)?;
         self.relay.sealed = None;
+        Ok(amount)
+    }
+
+    /// Admit one newcomer: a peer that had never authenticated to this node
+    /// contacted it. `probe_bytes` is the payload that carried the join, which
+    /// also counts as verified traffic backing the mint.
+    pub fn rendezvous_join(&mut self, probe_bytes: u64) {
+        self.fold_rendezvous(0, ContentId::compute(&probe_bytes.to_le_bytes()).0);
+        self.rendezvous.live_joins = self.rendezvous.live_joins.saturating_add(1);
+        self.traffic.record(probe_bytes);
+    }
+
+    /// Serve the peer table to the peers a gossip round reached: `peers`
+    /// entries per copy, `bytes` of table handed out in total.
+    pub fn record_peer_table_served(&mut self, peers: u64, bytes: u64) {
+        let mut digest = [0u8; 16];
+        digest[..8].copy_from_slice(&peers.to_le_bytes());
+        digest[8..].copy_from_slice(&bytes.to_le_bytes());
+        self.fold_rendezvous(1, ContentId::compute(&digest).0);
+        self.rendezvous.live_bytes = self.rendezvous.live_bytes.saturating_add(bytes);
+        self.traffic.record(bytes);
+    }
+
+    /// Newcomers admitted in the current unsealed window.
+    pub fn pending_rendezvous_joins(&self) -> u64 {
+        self.rendezvous.live_joins
+    }
+
+    /// Peer-table bytes served in the current unsealed window.
+    pub fn pending_rendezvous_bytes(&self) -> u64 {
+        self.rendezvous.live_bytes
+    }
+
+    fn fold_rendezvous(&mut self, tag: u8, digest: [u8; 32]) {
+        let mut fold = [0u8; 65];
+        fold[..32].copy_from_slice(&self.rendezvous.live_chain);
+        fold[32] = tag;
+        fold[33..].copy_from_slice(&digest);
+        self.rendezvous.live_chain = ContentId::compute(&fold).0;
+    }
+
+    /// Seal the current rendezvous window into a signed receipt.
+    ///
+    /// Returns `None` when nothing was served, when the previous seal is still
+    /// unclaimed, or when the peer-table bytes are below one whole KiB and no
+    /// newcomer joined (a window of a few hundred bytes would round to zero
+    /// credits and could never accumulate).
+    pub fn seal_rendezvous_window(&mut self, seed: &Keypair) -> Option<RendezvousReceipt> {
+        if self.rendezvous.sealed.is_some() {
+            return None;
+        }
+        let worth_minting = self.rendezvous.live_joins > 0 || self.rendezvous.live_bytes >= KIB;
+        if !worth_minting {
+            return None;
+        }
+        let receipt = RendezvousReceipt::sign(
+            seed,
+            self.rendezvous.next_window,
+            self.rendezvous.live_joins,
+            self.rendezvous.live_bytes,
+            self.rendezvous.live_chain,
+        );
+        self.rendezvous.sealed = Some(SealedRendezvous {
+            window: self.rendezvous.next_window,
+            joins: self.rendezvous.live_joins,
+            bytes: self.rendezvous.live_bytes,
+            chain_head: self.rendezvous.live_chain,
+        });
+        self.rendezvous.next_window = self.rendezvous.next_window.saturating_add(1);
+        self.rendezvous.live_joins = 0;
+        self.rendezvous.live_bytes = 0;
+        Some(receipt)
+    }
+
+    /// Mint for a sealed rendezvous window: the receipt must signature-verify
+    /// and exactly match the sealed window (window, joins, bytes, chain head).
+    pub fn mint_rendezvous(
+        &mut self,
+        receipt: &RendezvousReceipt,
+        now: Instant,
+    ) -> Result<u64, MintError> {
+        if receipt.seed != self.owner {
+            return Err(MintError::WrongSigner);
+        }
+        let message = rendezvous_sign_message(
+            receipt.seed,
+            receipt.window,
+            receipt.joins,
+            receipt.peer_bytes,
+            receipt.chain_head,
+        );
+        if !receipt.signature.verify(&receipt.seed, &message) {
+            return Err(MintError::BadSignature);
+        }
+        let sealed = self
+            .rendezvous
+            .sealed
+            .as_ref()
+            .ok_or(MintError::NoSealedRendezvousWork)?;
+        let matches = receipt.window == sealed.window
+            && receipt.joins == sealed.joins
+            && receipt.peer_bytes == sealed.bytes
+            && receipt.chain_head == sealed.chain_head;
+        if !matches {
+            return Err(MintError::RendezvousChainBroken);
+        }
+        let join_credits = receipt
+            .joins
+            .saturating_mul(self.policy.rendezvous_credits_per_join);
+        let table_credits = receipt
+            .peer_bytes
+            .saturating_mul(self.policy.rendezvous_credits_per_kib)
+            / KIB;
+        let amount = self.authorize(
+            ServiceKind::ServeRendezvous,
+            join_credits.saturating_add(table_credits),
+            now,
+        )?;
+        self.rendezvous.sealed = None;
         Ok(amount)
     }
 

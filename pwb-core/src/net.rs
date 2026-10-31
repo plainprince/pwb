@@ -43,6 +43,7 @@ pub use cell_channel::CellChannel;
 pub use e2ee::E2eeState;
 pub use engine::{
     peer_exchange_loop, resolve_bootstrap_peer, BootstrapPeer, NodeConfig, NodeEngine, PeerInfo,
+    RendezvousEvent,
 };
 pub use messages::{
     blog_entry_sign_message, decode_artifact_chunk, decode_punch_probe,

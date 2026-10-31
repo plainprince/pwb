@@ -803,6 +803,19 @@ impl NodeEngine {
         rx
     }
 
+    /// Subscribe to rendezvous work (newcomers admitted, peer tables served) so
+    /// the node layer can meter seed service and mint rendezvous credits.
+    pub fn subscribe_rendezvous(&self) -> mpsc::Receiver<RendezvousEvent> {
+        let (tx, rx) = mpsc::channel(SUBSCRIBER_QUEUE);
+        self.rendezvous_subscribers.lock().unwrap().push(tx);
+        rx
+    }
+
+    /// Report rendezvous work to the seed-credit listeners.
+    fn report_rendezvous(&self, event: RendezvousEvent) {
+        loops::try_deliver(&mut self.rendezvous_subscribers.lock().unwrap(), event);
+    }
+
     /// The local X25519 relay key (the last hop of an onion path addressed to
     /// this node, and what a local onion relay peels with).
     pub fn onion_key(&self) -> DhPublicKey {
@@ -1616,10 +1629,22 @@ pub async fn peer_exchange_loop(engine: NodeEngine, sender_pubkey: PublicKey, in
             guard.values().map(|p| (p.address, p.public_key)).collect()
         };
         if !peers.is_empty() {
-            let _ = engine.broadcast(NetworkMessage::PeerExchange {
+            let advertised = peers.len() as u64;
+            let message = NetworkMessage::PeerExchange {
                 peers,
                 sender_pubkey,
-            });
+            };
+            // Handing out the table is rendezvous work: meter the table itself
+            // (not the per-recipient ciphertext), once per peer it reaches.
+            let table_bytes = serde_json::to_vec(&message).map_or(0, |bytes| bytes.len() as u64);
+            let recipients = engine.peer_table().lock().unwrap().len() as u64;
+            if table_bytes > 0 && recipients > 0 {
+                engine.report_rendezvous(RendezvousEvent::PeerTableServed {
+                    peers: advertised,
+                    bytes: table_bytes.saturating_mul(recipients),
+                });
+            }
+            let _ = engine.broadcast(message);
         }
     }
 }

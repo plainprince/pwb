@@ -39,6 +39,27 @@ pub(crate) fn index_sign_message(
     msg
 }
 
+/// Canonical bytes a seed signs for one window of rendezvous work: the joins
+/// it admitted and the peer-table bytes it handed out, bound to the chain head
+/// that recorded them.
+pub(crate) fn rendezvous_sign_message(
+    seed: PublicKey,
+    window: u64,
+    joins: u64,
+    peer_bytes: u64,
+    chain_head: [u8; 32],
+) -> Vec<u8> {
+    let mut msg = Vec::new();
+    msg.extend_from_slice(CREDIT_SIGN_PREFIX);
+    msg.extend_from_slice(b"rendezvous");
+    msg.extend_from_slice(&seed.0);
+    msg.extend_from_slice(&window.to_le_bytes());
+    msg.extend_from_slice(&joins.to_le_bytes());
+    msg.extend_from_slice(&peer_bytes.to_le_bytes());
+    msg.extend_from_slice(&chain_head);
+    msg
+}
+
 pub(super) fn relay_sign_message(
     relayer: PublicKey,
     window: u64,

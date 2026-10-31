@@ -21,6 +21,7 @@ pub mod privacy;
 pub mod relay;
 pub mod room;
 pub mod search;
+pub mod seed;
 pub mod system;
 pub mod verifier;
 pub mod wallet;

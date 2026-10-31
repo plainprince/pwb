@@ -487,8 +487,93 @@ fn test_receipt_verify_and_evidence_digest() {
 }
 
 #[test]
+fn test_rendezvous_mint_pays_joins_and_peer_table_bytes() {
+    let seed = Keypair::generate();
+    let mut minter = minter_with(&seed, no_cooldown_policy());
+    let t0 = Instant::now();
+
+    // One newcomer and 2 KiB of peer table handed out, counted once per copy.
+    minter.rendezvous_join(600);
+    minter.record_peer_table_served(4, 2048);
+    assert_eq!(minter.pending_rendezvous_joins(), 1);
+    assert_eq!(minter.pending_rendezvous_bytes(), 2048);
+
+    let receipt = minter.seal_rendezvous_window(&seed).expect("sealed");
+    assert_eq!(receipt.seed, seed.public);
+    assert!(receipt.verify());
+    assert_eq!(
+        minter.mint_rendezvous(&receipt, t0),
+        Ok(MintPolicy::default().rendezvous_credits_per_join + 2),
+        "one credit per newcomer plus one per whole KiB served"
+    );
+    assert_eq!(minter.total_earned(), 3);
+
+    // A sealed window is claim-once, and the work is consumed with it.
+    assert_eq!(
+        minter.mint_rendezvous(&receipt, t0),
+        Err(MintError::NoSealedRendezvousWork)
+    );
+    assert_eq!(minter.pending_rendezvous_joins(), 0);
+    assert_eq!(minter.pending_rendezvous_bytes(), 0);
+}
+
+#[test]
+fn test_rendezvous_rejects_a_receipt_that_does_not_match_the_window() {
+    let seed = Keypair::generate();
+    let mut minter = minter_with(&seed, no_cooldown_policy());
+    let t0 = Instant::now();
+    minter.rendezvous_join(600);
+
+    // A rewritten window fails the seed signature before it can fail the chain.
+    let mut receipt = minter.seal_rendezvous_window(&seed).expect("sealed");
+    receipt.joins += 1;
+    assert_eq!(
+        minter.mint_rendezvous(&receipt, t0),
+        Err(MintError::BadSignature)
+    );
+
+    // A does-not-match receipt is still refused.
+    let other = RendezvousReceipt::sign(&seed, 99, 5, 5, [1u8; 32]);
+    assert_eq!(
+        minter.mint_rendezvous(&other, t0),
+        Err(MintError::RendezvousChainBroken)
+    );
+
+    // Another identity cannot claim this node's window either.
+    let receipt = minter
+        .seal_rendezvous_window(&seed)
+        .unwrap_or_else(|| RendezvousReceipt::sign(&seed, 0, 1, 600, [0u8; 32]));
+    let stranger = Keypair::generate();
+    let foreign = RendezvousReceipt::sign(&stranger, 0, 1, 600, receipt.chain_head);
+    assert_eq!(
+        minter.mint_rendezvous(&foreign, t0),
+        Err(MintError::WrongSigner)
+    );
+}
+
+#[test]
+fn test_rendezvous_window_holds_until_a_whole_kib_is_served() {
+    let seed = Keypair::generate();
+    let mut minter = minter_with(&seed, no_cooldown_policy());
+
+    // Nothing served: nothing to seal.
+    assert!(minter.seal_rendezvous_window(&seed).is_none());
+
+    // A few hundred bytes of table would round to zero credits, so the window
+    // stays open instead of being sealed away.
+    minter.record_peer_table_served(2, 512);
+    assert!(minter.seal_rendezvous_window(&seed).is_none());
+    minter.record_peer_table_served(2, 512);
+    let receipt = minter
+        .seal_rendezvous_window(&seed)
+        .expect("a whole KiB is worth sealing");
+    assert_eq!(receipt.peer_bytes, 1024);
+    assert_eq!(minter.mint_rendezvous(&receipt, Instant::now()), Ok(1));
+}
+
+#[test]
 fn test_mint_error_display_and_error_trait() {
-    let all: [MintError; 10] = [
+    let all: [MintError; 12] = [
         MintError::BadSignature,
         MintError::UnknownChallenge,
         MintError::ChallengeExpired,
@@ -498,6 +583,8 @@ fn test_mint_error_display_and_error_trait() {
         MintError::WrongSigner,
         MintError::RelayChainBroken,
         MintError::NoSealedRelayWork,
+        MintError::RendezvousChainBroken,
+        MintError::NoSealedRendezvousWork,
         MintError::Cooldown {
             retry_after: Duration::from_secs(2),
         },

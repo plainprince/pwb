@@ -73,3 +73,24 @@ pub(super) struct SealedRelay {
     pub(super) bytes: u64,
     pub(super) chain_head: [u8; 32],
 }
+
+/// Live rendezvous (seed) accounting plus the last sealed (unclaimed) window.
+#[derive(Debug, Clone, Default)]
+pub(super) struct RendezvousLedger {
+    /// Rolling chain over every rendezvous event ever served (continues across
+    /// windows).
+    pub(super) live_chain: [u8; 32],
+    pub(super) live_joins: u64,
+    pub(super) live_bytes: u64,
+    pub(super) next_window: u64,
+    /// Last sealed window awaiting `mint_rendezvous` (claim-once).
+    pub(super) sealed: Option<SealedRendezvous>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) struct SealedRendezvous {
+    pub(super) window: u64,
+    pub(super) joins: u64,
+    pub(super) bytes: u64,
+    pub(super) chain_head: [u8; 32],
+}

@@ -11,13 +11,15 @@ peer neighborhoods rather than self-declared.
 ### `pwb-node::credit` — Proof-of-Time & Useful Work Credit Minting
 
 Earn credits strictly by delivering verified network services over time:
-serving `search.plain` queries, indexing PML bundles, relaying onion cells.
+serving `search.plain` queries, indexing PML bundles, relaying onion cells, and
+running a seed (admitting newcomers and serving the peer table).
 
 - `CreditMinter` is bound to one owner `PublicKey` and mints only that identity's receipts (`MintError::WrongSigner` otherwise)
-- Three service kinds — each with domain-separated signed receipts:
+- Four service kinds — each with domain-separated signed receipts:
   - `QueryReceipt` (requester challenge nonce, TTL-bound, one claim via `ChallengeLedger`)
   - `IndexReceipt` (BLAKE3 content id over the exact bundle bytes + `canonical_term_hash` re-derived from the stored terms, shared with `search::extract_terms`)
   - `RelayReceipt` (window number, cell count, byte count, and chain head of the cell hash chain)
+  - `RendezvousReceipt` (window number, newcomers admitted, peer-table bytes served, and chain head of the rendezvous event chain)
 
 #### Mint gate order
 
@@ -31,6 +33,17 @@ Relay credits pay at whole-KiB floor (1 credit/KiB default) so relaying always b
 - `relay_cell` folds every cell into a live BLAKE3 chain and records its bytes
 - `seal_relay_window` seals (window monotone, claim-once, refuses empty seals or overwriting an unclaimed seal)
 - `mint_relay` requires a signature-valid receipt whose window / cells / bytes / chain-head exactly match the sealed state (`RelayChainBroken` on well-signed mismatch)
+
+#### Seed (rendezvous) windows
+
+A seed is paid for work its own engine can prove it did: `JoinServed` (a peer
+that had never authenticated to this node contacted it) and `PeerTableServed`
+(peer-table bytes a `PeerExchange` gossip round actually sent, counted once per
+recipient). Being reachable is not a service and mints nothing.
+
+- `rendezvous_join` / `record_peer_table_served` fold events into their own chain and record the bytes as verified traffic
+- `seal_rendezvous_window` seals once there is at least one newcomer or a whole KiB of peer table, so a small window cannot round to zero credits and be lost
+- `mint_rendezvous` pays `rendezvous_credits_per_join` per newcomer plus `rendezvous_credits_per_kib` per whole KiB served, under the same traffic floor, cooldown, and epoch cap as every other kind (`RendezvousChainBroken` on a well-signed mismatch)
 
 ### `pwb-node::ledger` — Sharded Peer-Attested Ledger ($k$-of-$N$ Neighborhoods)
 

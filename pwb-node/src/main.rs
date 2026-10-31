@@ -1006,6 +1006,16 @@ async fn main() {
     ));
     let relay_handle = tokio::spawn(Arc::clone(&relay_credits).run(identity.keypair.clone()));
 
+    // A seed also earns: newcomers it admits and peer tables it hands out are
+    // rendezvous work, minted into the same signed ledger under the same
+    // traffic floor and epoch cap as query, index, and relay credits.
+    let seed_credits = Arc::new(pwb_node::seed::SeedCreditService::with_defaults(
+        engine.clone(),
+        &identity.keypair,
+        Arc::clone(domain.ledger()),
+    ));
+    let seed_handle = tokio::spawn(Arc::clone(&seed_credits).run(identity.keypair.clone()));
+
     println!(
         "  Credit Ledger Balance    : {} credits (signed entry chain)",
         domain.available_credits()
@@ -1887,6 +1897,7 @@ async fn main() {
     room_handle.abort();
     attestation_handle.abort();
     relay_handle.abort();
+    seed_handle.abort();
     onion_handle.abort();
     px_handle.abort();
     if let Some(handle) = deferred_claim_handle {

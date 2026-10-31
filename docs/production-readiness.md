@@ -623,6 +623,7 @@ network, and browsing no longer defaults to revealing the local address:
 | `pwb-node::privacy` | Randomized three-hop circuits from direct peers, with the exit pinned when the caller needs one. |
 | Browser privacy defaults | `search.plain`, content fetch, and `.pwb` resolution run over onion circuits by default; `--direct` is the only opt-out and prints a warning. A failed circuit never falls back to a direct request. Nodes answer onion-delivered shard, artifact, and registry queries, so private browsing works against an ordinary swarm. |
 | `pwb-node --help` | Lists the join, hosting, credit, and privacy flags; before this pass `--help` was treated as an unknown flag and started a node. |
+| `pwb-node::seed` | A seed is paid for the rendezvous work its engine reports: newcomers it admitted (`JoinServed`) and peer-table bytes it served (`PeerTableServed`), sealed into a signed `RendezvousReceipt` and minted under the same traffic floor, per-service cooldown, and epoch cap as query, index, and relay credits. Idle reachability mints nothing. Covered by `pwb-node/tests/seed_credits.rs`. |
 
 Covered by `pwb-node/tests/join_discovery.rs` (signed HTTP descriptor, tamper
 rejection, writer round-trip), `rendezvous_join.rs` (two nodes discovering each

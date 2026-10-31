@@ -7,7 +7,9 @@ use pwb_core::wire::Bundle;
 
 use crate::search;
 
-use super::signing::{index_sign_message, query_sign_message, relay_sign_message};
+use super::signing::{
+    index_sign_message, query_sign_message, relay_sign_message, rendezvous_sign_message,
+};
 
 /// Signed proof that a `search.plain` query was served to a live requester.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -142,6 +144,74 @@ impl RelayReceipt {
             self.window,
             self.cells,
             self.bytes,
+            self.chain_head,
+        );
+        ContentId::compute(&message).0
+    }
+}
+
+/// Signed seal over one window of rendezvous (seed) work.
+///
+/// A seed is paid for admitting newcomers and for handing out its peer table,
+/// neither of which any other node can do on its behalf: only the node that
+/// authenticated the newcomer and sent the `PeerExchange` can seal them. The
+/// receipt is self-signed exactly like [`RelayReceipt`], so it proves what this
+/// node claims to have served, not that a peer watched it happen.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RendezvousReceipt {
+    /// The seed that served the window (the account that will mint).
+    pub seed: PublicKey,
+    /// Window index (monotone, starts at 0).
+    pub window: u64,
+    /// Newcomers admitted in the window.
+    pub joins: u64,
+    /// Peer-table bytes served in the window (once per recipient).
+    pub peer_bytes: u64,
+    /// Rolling hash-chain head over the window's rendezvous events.
+    pub chain_head: [u8; 32],
+    /// Seed signature over the canonical encoding of the fields above.
+    pub signature: Signature,
+}
+
+impl RendezvousReceipt {
+    /// Sign a window seal.
+    pub fn sign(
+        seed: &Keypair,
+        window: u64,
+        joins: u64,
+        peer_bytes: u64,
+        chain_head: [u8; 32],
+    ) -> Self {
+        let message = rendezvous_sign_message(seed.public, window, joins, peer_bytes, chain_head);
+        RendezvousReceipt {
+            seed: seed.public,
+            window,
+            joins,
+            peer_bytes,
+            chain_head,
+            signature: seed.sign(&message),
+        }
+    }
+
+    /// Verify the seed signature over the canonical encoding.
+    pub fn verify(&self) -> bool {
+        let message = rendezvous_sign_message(
+            self.seed,
+            self.window,
+            self.joins,
+            self.peer_bytes,
+            self.chain_head,
+        );
+        self.signature.verify(&self.seed, &message)
+    }
+
+    /// Evidence digest binding this receipt into an attestor ledger chain.
+    pub fn evidence_digest(&self) -> [u8; 32] {
+        let message = rendezvous_sign_message(
+            self.seed,
+            self.window,
+            self.joins,
+            self.peer_bytes,
             self.chain_head,
         );
         ContentId::compute(&message).0
