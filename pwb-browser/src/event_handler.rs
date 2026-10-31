@@ -52,6 +52,14 @@ impl EventHandlerRegistry {
         let handlers = self.click_handlers.lock().unwrap();
         handlers.get(element_id).cloned().unwrap_or_default()
     }
+
+    /// Drop every registered handler. Called on top-level navigation so a
+    /// handler from the previous page cannot run against the next page's DOM
+    /// (node ids are reused across bundles).
+    pub fn clear(&self) {
+        self.handlers.lock().unwrap().clear();
+        self.click_handlers.lock().unwrap().clear();
+    }
 }
 
 #[cfg(test)]

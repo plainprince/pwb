@@ -3,20 +3,10 @@ use super::*;
 use crate::crypto::{Keypair, PublicKey};
 use crate::net::PeerInfo;
 use std::collections::HashMap;
-use std::net::{Ipv4Addr, Ipv6Addr, SocketAddr};
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 use tokio::net::UdpSocket;
-
-/// Target the loopback address for the socket's family. Discovery binds
-/// `UNSPECIFIED`, and sending to `0.0.0.0`/`[::]` works on Unix but Windows
-/// rejects it with `WSAEADDRNOTAVAIL`; the bound port is what matters here.
-fn loopback(addr: SocketAddr) -> SocketAddr {
-    match addr {
-        SocketAddr::V4(addr) => (Ipv4Addr::LOCALHOST, addr.port()).into(),
-        SocketAddr::V6(addr) => (Ipv6Addr::LOCALHOST, addr.port()).into(),
-    }
-}
 
 async fn service_on(listen_port: u16) -> DiscoveryService {
     DiscoveryService::bind(

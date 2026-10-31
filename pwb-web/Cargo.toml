@@ -16,6 +16,8 @@ path = "src/main.rs"
 [dependencies]
 pwb-core = { path = "../pwb-core" }
 lightningcss = { version = "1.0.0-alpha.72", features = ["bundler"] }
+hex = "0.4"
+serde_json = "1"
 
 # Compression lives in `pwb-core::wire` (PWBZ container: zlib + BLAKE3), so the
 # browser, node, and CLI all read and write the same format.

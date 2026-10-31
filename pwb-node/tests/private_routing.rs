@@ -28,6 +28,12 @@ use pwb_node::host::ArtifactHost;
 use pwb_node::privacy::PrivacyMode;
 use pwb_node::search::SearchEngine;
 
+/// Whether this host routes a loopback alias such as `127.0.0.2`. Linux does
+/// by default; macOS only configures `127.0.0.1` unless an alias is added.
+fn loopback_alias_is_bindable(host: &str) -> bool {
+    std::net::UdpSocket::bind((host, 0)).is_ok()
+}
+
 async fn start_engine(keypair: Keypair, host: &str) -> (NodeEngine, SocketAddr) {
     let engine = NodeEngine::new(NodeConfig {
         listen_addr: format!("{host}:0").parse().unwrap(),
@@ -147,12 +153,21 @@ async fn private_search_fetch_and_domain_resolution_use_onion_circuits() {
     let requester_key = Keypair::generate();
     let (requester, requester_addr) = start_engine(requester_key.clone(), "127.0.0.1").await;
     let mut relays = Vec::new();
-    // Give every relay a distinct loopback address so the per-source onion cell
-    // limiter (keyed by IP) does not merge four independent circuits into one
-    // bucket, which is what a real deployment sees from distinct peers.
+    // Prefer distinct loopback addresses so the per-source onion cell limiter
+    // (keyed by IP) sees each relay as a separate source, like a real
+    // deployment. macOS has only 127.0.0.1 configured by default, so fall back
+    // to distinct ports there; the engines and limiters are still independent.
+    let distinct_aliases = (2..=5).all(|n| loopback_alias_is_bindable(&format!("127.0.0.{n}")));
+    if !distinct_aliases {
+        eprintln!("loopback aliases unavailable; using 127.0.0.1 with distinct ports");
+    }
     for index in 0..4 {
         let key = Keypair::generate();
-        let host = format!("127.0.0.{}", index + 2);
+        let host = if distinct_aliases {
+            format!("127.0.0.{}", index + 2)
+        } else {
+            "127.0.0.1".to_string()
+        };
         let (engine, addr) = start_engine(key.clone(), &host).await;
         relays.push((key, engine, addr));
     }

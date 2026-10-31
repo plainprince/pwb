@@ -7,7 +7,7 @@ It is pure protocol and pure data structures: no rendering, no sockets-driven po
 ## Modules
 
 - `spec` — PlainWeb Language Specification v0: the tag model, selector/style model, and document surface.
-- `wire` — the versioned `.pwb` bundle format: header, symbol table, binary DOM tree, and optional script payload.
+- `wire` — the versioned `.pwb` bundle format: header, symbol table, binary DOM tree, optional script payload, and optional Ed25519 author signature verified on every decode.
 - `crypto` — Ed25519 identity + signatures, BLAKE3 content addressing, X25519 ECDH, and unlinkable blind-signature credit vouchers with ZK ownership proofs and replay-rejecting spend tracking.
 - `net` — serverless transport framing and system-domain message types; the shared `NodeEngine` peer table, routing logic, and socket event loops.
 - `onion` — fixed-size (512-byte) Sphinx-style onion cells: layered ChaCha20-Poly1305 over per-hop X25519 ECDH keys.

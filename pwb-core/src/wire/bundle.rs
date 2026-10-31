@@ -1,5 +1,6 @@
 //! The `Bundle` type and node (de)serialization.
 
+use crate::crypto::{Keypair, PublicKey, Signature};
 use crate::spec::{PlainNode, Tag};
 use std::collections::HashMap;
 
@@ -21,7 +22,13 @@ const COMPRESSED_HEADER_LEN: usize = 41;
 pub struct Bundle {
     pub version: u16,
     pub title: String,
+    /// Ed25519 public key of the signing author. `None` means the bundle is
+    /// unsigned; a bundle that names an author must also carry a valid
+    /// [`author_signature`](Self::author_signature).
     pub author_pubkey: Option<[u8; 32]>,
+    /// Ed25519 signature by [`author_pubkey`](Self::author_pubkey) over
+    /// [`author_signing_payload`](Self::author_signing_payload).
+    pub author_signature: Option<[u8; 64]>,
     pub root_node: PlainNode,
     pub script_payload: Option<Vec<u8>>,
     /// Component registry: component name → component body node (without the
@@ -112,7 +119,52 @@ impl Bundle {
             out.extend_from_slice(script);
         }
 
+        // Optional author signature. Unsigned bundles remain byte-identical to
+        // the pre-signature v2 format; signed bundles append exactly 64 bytes,
+        // which older readers reject as trailing data instead of silently
+        // ignoring the authenticity claim.
+        if let Some(signature) = &self.author_signature {
+            debug_assert!(
+                self.author_pubkey.is_some(),
+                "an author signature must name its author"
+            );
+            out.extend_from_slice(signature);
+        }
+
         out
+    }
+
+    /// The exact bytes an author signs. The signature itself is excluded, so
+    /// the payload is stable when the signature is attached, detached, or
+    /// re-verified. The domain prefix prevents these bytes from being replayed
+    /// as a signature over another PlainWeb message.
+    pub fn author_signing_payload(&self) -> Vec<u8> {
+        let mut unsigned = self.clone();
+        unsigned.author_signature = None;
+        let mut payload = b"PWB-AUTHOR-V1\0".to_vec();
+        payload.extend_from_slice(&unsigned.serialize());
+        payload
+    }
+
+    /// Sign this bundle as `keypair`, replacing any previous author identity or
+    /// signature. The bundle can then be serialized/compressed and verified by
+    /// [`Bundle::deserialize`].
+    pub fn sign_author(&mut self, keypair: &Keypair) {
+        self.author_pubkey = Some(keypair.public.0);
+        self.author_signature = None;
+        let payload = self.author_signing_payload();
+        self.author_signature = Some(keypair.sign(&payload).to_bytes());
+    }
+
+    /// Whether this bundle's author claim is valid. Unsigned bundles have no
+    /// author to verify and return `true`; a bundle that names an author must
+    /// carry a matching Ed25519 signature over
+    /// [`author_signing_payload`](Self::author_signing_payload).
+    pub fn verify_author_signature(&self) -> bool {
+        let (Some(pubkey), Some(signature)) = (self.author_pubkey, self.author_signature) else {
+            return self.author_pubkey.is_none();
+        };
+        Signature::from_bytes(signature).verify(&PublicKey(pubkey), &self.author_signing_payload())
     }
 
     /// Compress the serialized bundle into the `PWBZ` container: magic,
@@ -388,18 +440,41 @@ impl Bundle {
             modules.insert(name, script);
         }
 
+        // A signed bundle appends exactly 64 signature bytes after the module
+        // map. Unsigned bundles remain exactly the old v2 format. Reject a
+        // short/long signature tail and a signature without an author key
+        // rather than guessing at a partial section.
+        let author_signature = if author_pubkey.is_some() && cursor < src.len() {
+            let remaining = src.len() - cursor;
+            if remaining != 64 {
+                return Err(WireError::TrailingBytes(remaining));
+            }
+            let mut signature = [0u8; 64];
+            signature.copy_from_slice(&src[cursor..cursor + 64]);
+            cursor += 64;
+            Some(signature)
+        } else {
+            None
+        };
+
         if cursor != src.len() {
             return Err(WireError::TrailingBytes(src.len() - cursor));
         }
-        Ok(Bundle {
+
+        let bundle = Bundle {
             version,
             title,
             author_pubkey,
+            author_signature,
             root_node,
             script_payload,
             components,
             modules,
-        })
+        };
+        if bundle.author_pubkey.is_some() && !bundle.verify_author_signature() {
+            return Err(WireError::InvalidAuthorSignature);
+        }
+        Ok(bundle)
     }
 }
 

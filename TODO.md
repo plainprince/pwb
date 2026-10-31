@@ -389,6 +389,58 @@ against a global passive adversary remains future work.
 
 ---
 
+## Production-readiness backlog (2026-10-31)
+
+These are the gaps the production-readiness audit still lists as open. They are
+ordered by risk; operator/design/external work is separated at the end so it
+is not mistaken for a missing local feature. Check items off as they land.
+
+- [x] **Bundle authorship is signed and verified.** `Bundle` now carries an
+  optional Ed25519 `author_signature` over the canonical bytes
+  (`PWB-AUTHOR-V1` domain tag); `Bundle::deserialize` rejects a named author
+  with a missing or invalid signature. `pwb-web --author-key` (or
+  `PWB_AUTHOR_KEY`) signs at compile time. Unsigned bundles keep the old byte
+  layout. Revocation is still undefined.
+- [x] **PlainJS pages are isolated.** Top-level navigation resets the QuickJS
+  context and page-scoped DOM/async state (handlers, timers, fetch callbacks,
+  detached nodes, focus, pending actions); devtools are re-mounted and their
+  script re-run in the fresh context.
+- [x] **Artifact decode errors surface in the UI.** A malformed bundle or an
+  invalid author signature now renders a native "cannot open page" page with
+  the decode reason instead of printing to stderr and leaving the old page.
+- [ ] **Script and event-handler errors surface.** Failed page scripts and
+  event handlers still print to stderr; add a visible page/status banner so a
+  broken handler is not silent.
+- [ ] **Browser downloads.** Links marked `download` are followed as ordinary
+  navigations; there is no save path or download state.
+- [ ] **PlainJS modules are not silently mangled.** `strip_esm_syntax` is a
+  line filter: multi-line imports, `export default`, and strings that start
+  with `import` are not handled correctly, and `pwb.import` re-evaluates the
+  original (untransformed) module source. Either compile a well-defined
+  script-mode subset or reject unsupported ESM with a clear build error.
+- [ ] **`bundle.toml` is honored or removed.** The manifest exists in
+  `pwb-browser/webpages/devtools/` but no crate reads it. Define its role
+  (title/author/assets) and implement it, or delete the stale format.
+- [ ] **Site-directory fuzz target.** `fuzz/` covers the parsers but not the
+  filesystem-facing site builder; add a bounded target and wire it into the
+  fuzz workflow.
+- [ ] **CI coverage threshold.** Coverage is uploaded but never enforced, so
+  a change can delete tested paths without failing CI.
+- [ ] **Distributed tracing.** Structured logs, metrics, and health endpoints
+  exist; there are no trace/span ids that follow a query across peers.
+- [ ] **Async panic cleanup.** Many `unwrap()`/`expect()` calls remain in
+  async tasks, timer paths, and mutex guards; a panic silently stops a
+  subsystem. Audit and convert reachable ones to logged errors.
+- [ ] **Search link/author/freshness signals.** Ranking is IDF/title based;
+  trustworthy link-graph and publication-time signals need a signed protocol,
+  not a local heuristic. This is design work.
+- [ ] **Operator/external work:** publish a real seed and anchor set, validate
+  large/NAT topologies, decide open-network sybil economics, and commission an
+  independent security review. These cannot be completed honestly by a local
+  checkout.
+
+---
+
 ## Next steps (open, not tracked here)
 
 The core modules are implemented; the following are suggested directions, not

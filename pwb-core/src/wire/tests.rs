@@ -1,4 +1,5 @@
 use super::*;
+use crate::crypto::Keypair;
 use crate::spec::{PlainNode, Tag};
 use std::collections::HashMap;
 
@@ -33,6 +34,7 @@ fn test_wire_roundtrip() {
         version: CURRENT_VERSION,
         title: "Test Site".to_string(),
         author_pubkey: None,
+        author_signature: None,
         root_node: root,
         script_payload: Some(vec![1, 2, 3, 4]),
         components: HashMap::from([("greeting".to_string(), comp)]),
@@ -94,6 +96,7 @@ fn repetitive_bundle() -> Bundle {
         version: CURRENT_VERSION,
         title: "Compressed Test".to_string(),
         author_pubkey: None,
+        author_signature: None,
         root_node: root,
         script_payload: Some(b"console.log('hello');".repeat(20)),
         components: HashMap::new(),
@@ -193,6 +196,57 @@ fn test_compressed_bundle_rejects_trailing_bytes() {
     compressed.extend_from_slice(b"trailing");
     let err = Bundle::deserialize(&compressed).expect_err("trailing container bytes rejected");
     assert!(matches!(err, WireError::TrailingBytes(_)), "got {err:?}");
+}
+
+#[test]
+fn test_signed_bundle_roundtrips_and_rejects_tampering() {
+    let keypair = Keypair::generate();
+    let mut bundle = repetitive_bundle();
+    bundle.sign_author(&keypair);
+    assert_eq!(bundle.author_pubkey, Some(keypair.public.0));
+    assert!(bundle.verify_author_signature());
+
+    // The signature survives the compressed container and is verified on
+    // decode, so a consumer never sees a bundle with a forged author claim.
+    let compressed = bundle.serialize_compressed();
+    let decoded = Bundle::deserialize(&compressed).expect("signed bundle decodes");
+    assert_eq!(decoded.author_pubkey, Some(keypair.public.0));
+    assert_eq!(decoded.author_signature, bundle.author_signature);
+    assert!(decoded.verify_author_signature());
+
+    // Any content change invalidates the signature. Flip a byte in the
+    // canonical payload, not in the signature itself, so the failure is an
+    // authenticity failure rather than a framing/length error.
+    let mut tampered = bundle.serialize();
+    let title_byte = tampered
+        .windows(bundle.title.len())
+        .position(|window| window == bundle.title.as_bytes())
+        .expect("title bytes are in the bundle");
+    tampered[title_byte] ^= 0x01;
+    assert!(matches!(
+        Bundle::deserialize(&tampered),
+        Err(WireError::InvalidAuthorSignature)
+    ));
+
+    // A named author without a signature is also rejected: authorship is
+    // never accepted from an unauthenticated field.
+    let mut unsigned = bundle.clone();
+    unsigned.author_signature = None;
+    assert!(matches!(
+        Bundle::deserialize(&unsigned.serialize()),
+        Err(WireError::InvalidAuthorSignature)
+    ));
+}
+
+#[test]
+fn test_unsigned_bundles_remain_compatible() {
+    let bundle = repetitive_bundle();
+    assert!(bundle.author_pubkey.is_none());
+    assert!(bundle.author_signature.is_none());
+    assert!(bundle.verify_author_signature());
+    let decoded = Bundle::deserialize(&bundle.serialize()).expect("unsigned bundle decodes");
+    assert!(decoded.author_pubkey.is_none());
+    assert!(decoded.author_signature.is_none());
 }
 
 #[test]

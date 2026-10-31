@@ -6,7 +6,7 @@ use crate::webapi::WebApiState;
 use rquickjs::{Context, Runtime};
 use std::cell::RefCell;
 use std::rc::Rc;
-use std::sync::atomic::AtomicBool;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
 /// Errors raised while initializing or executing JavaScript.
@@ -70,6 +70,29 @@ pub struct DomHandle {
 }
 
 impl DomHandle {
+    /// Drop every piece of page-scoped state before a top-level navigation:
+    /// event handlers, focus/selection, pending navigation targets, timers and
+    /// async queues, and detached DOM nodes. The JS globals are reset separately
+    /// by [`reset_js_context`]; together they make a page's globals and handlers
+    /// unable to affect the next page.
+    pub fn reset_page_state(&mut self) {
+        self.event_registry.clear();
+        self.inspect_mode.store(false, Ordering::Relaxed);
+        self.suppress_context_menu.store(false, Ordering::Relaxed);
+        *self.selected_node_id.borrow_mut() = None;
+        *self.focused_input.borrow_mut() = None;
+        *self.pending_navigate.borrow_mut() = None;
+        *self.pending_connect.borrow_mut() = None;
+        *self.pending_chat.borrow_mut() = None;
+        *self.pending_room.borrow_mut() = None;
+        self.scroll_to_bottom.borrow_mut().clear();
+        // A new WebApiState drops the old async queue, WebSocket outbound
+        // queues, session storage, and detached nodes. Background threads that
+        // still hold a clone deliver into the old queue, which the new page
+        // never drains.
+        self.web = WebApiState::new();
+    }
+
     pub fn new(dom: Dom) -> Self {
         Self {
             dom: Rc::new(RefCell::new(dom)),
@@ -97,6 +120,18 @@ impl DomHandle {
 // `document`/`console` bindings for the current DOM handle.
 thread_local! {
     static JS_CONTEXT: RefCell<Option<rquickjs::Context>> = const { RefCell::new(None) };
+}
+
+/// Drop the shared page engine. The next `execute_script` creates a new
+/// `Runtime`/`Context`, so globals, prototypes, and registered JS callbacks
+/// from the previous page cannot leak into the next one.
+///
+/// This deliberately does not reset browser chrome state (devtools); callers
+/// re-run the devtools script after mounting it on the new page.
+pub(crate) fn reset_js_context() {
+    JS_CONTEXT.with(|cell| {
+        *cell.borrow_mut() = None;
+    });
 }
 
 pub(crate) fn get_or_create_context() -> Result<rquickjs::Context, JsError> {

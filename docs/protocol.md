@@ -23,6 +23,18 @@ hostile artifact fails instead of inflating without limit. Legacy uncompressed
 `PWB1` artifacts are accepted for backwards compatibility. Content IDs are
 computed over the artifact bytes as stored (the `PWBZ` container when compressed).
 
+### Author signatures
+
+The uncompressed `PWB1` body may end with exactly 64 Ed25519 signature bytes
+after the script-module map. The optional header `author_pubkey` names the
+signer; an artifact that names an author must carry a valid signature. The
+signed payload is the canonical bundle serialized with the signature removed
+and prefixed with the ASCII domain tag `PWB-AUTHOR-V1\0`. Unsigned bundles keep
+the old byte layout exactly; a signed bundle is rejected by older readers as
+trailing data rather than being accepted without authenticity. Verification
+happens in `Bundle::deserialize`, so every consumer (browser, node host, CLI,
+indexer) enforces it, not just the UI that happens to display the title.
+
 ---
 
 ## 1. Onion routing layer (`pwb-core::onion`)

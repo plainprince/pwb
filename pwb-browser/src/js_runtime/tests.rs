@@ -299,6 +299,44 @@ fn test_contextmenu_without_prevent_default() {
 }
 
 #[test]
+fn test_reset_js_context_drops_page_globals() {
+    let handle = test_handle();
+    execute_script(&handle, "globalThis.__pwb_page_marker = 42;").unwrap();
+    reset_js_context();
+    execute_script(
+        &handle,
+        "__pwb_setText('#main-btn', typeof globalThis.__pwb_page_marker);",
+    )
+    .unwrap();
+    assert_eq!(
+        btn_text(&handle),
+        "undefined",
+        "a global set by the previous page must not exist in the new context"
+    );
+}
+
+#[test]
+fn test_reset_page_state_clears_handlers_and_pending_actions() {
+    let mut handle = test_handle();
+    handle
+        .event_registry
+        .add_handler(2, "click", "this.setText('stale');".to_string());
+    *handle.pending_navigate.borrow_mut() = Some("stale.plain".to_string());
+    *handle.focused_input.borrow_mut() = Some((2, 0));
+    handle.scroll_to_bottom.borrow_mut().push(2);
+
+    handle.reset_page_state();
+
+    assert!(
+        handle.event_registry.get_handlers(2, "click").is_empty(),
+        "handlers do not survive navigation"
+    );
+    assert!(handle.pending_navigate.borrow().is_none());
+    assert!(handle.focused_input.borrow().is_none());
+    assert!(handle.scroll_to_bottom.borrow().is_empty());
+}
+
+#[test]
 fn test_js_error_reports_message() {
     let handle = test_handle();
     let err = execute_script(&handle, "throw new Error('boom');").unwrap_err();

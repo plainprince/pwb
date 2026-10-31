@@ -41,6 +41,7 @@ fn bundle_bytes(title: &str, body: &str) -> Vec<u8> {
         version: CURRENT_VERSION,
         title: title.to_string(),
         author_pubkey: None,
+        author_signature: None,
         root_node: root,
         script_payload: None,
         components: HashMap::new(),

@@ -9,6 +9,7 @@ mod script;
 pub use async_ops::{
     execute_event_handler, execute_event_handler_typed, log_console, poll_async_ops, pump_timers,
 };
+pub(crate) use core::reset_js_context;
 pub use core::{DomHandle, JsError};
 pub use script::execute_script;
 

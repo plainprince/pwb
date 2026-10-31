@@ -516,12 +516,17 @@ Production gaps:
   backend exists (console fallback otherwise), and the context menu is painted
   in-window instead of being a no-op.
 - *(Fixed)* CORS is enforced by default: cross-origin `fetch` responses need `Access-Control-Allow-Origin: *`; `--features permissive-cors` is the explicit local-development opt-out.
-- JS runs in one shared global context in script mode: no ESM execution, no
-  per-page isolation, and devtools share the page's DOM.
+- *(Fixed 2026-10-31)* Navigation resets the QuickJS context and all
+  page-scoped DOM/async state (handlers, timers, fetch callbacks, detached
+  nodes, focus, pending actions), so one page cannot leave globals or handlers
+  that affect the next. Devtools are re-mounted and their script re-run in the
+  fresh context. JS still runs in script mode: ESM is not executed.
 - *(Fixed)* The window has tabs, per-tab history, bookmarks, an editable address bar, and reload/back/forward; the remaining gap is downloads.
 - *(Fixed)* `SystemDomain::Network` renders the live address/peer/service page and `Help` renders the system-domain index with namespace and credit rules.
-- Page loads and searches are "best effort": errors are printed, not surfaced
-  in the UI consistently.
+- *(Partial 2026-10-31)* Artifact decode failures (including an invalid author
+  signature) now render a native error page with the reason. Page-script and
+  event-handler failures still print to stderr, so a broken handler can remain
+  silent.
 
 ### `pwb-web` / wire format
 
@@ -530,9 +535,11 @@ Production gaps:
   legacy uncompressed bundles, with a 64 MiB bound.
 - `bundle.toml` is never read by any crate (one exists in
   `webpages/devtools/`).
-- Bundles have an optional `author_pubkey`, but no production code ever sets it
-  (`None` everywhere) and no code verifies it. There is no author authenticity,
-  no signature over the bundle, and no revocation.
+- *(Fixed 2026-10-31)* Bundles carry an optional Ed25519 author signature over
+  the canonical bytes (domain-separated `PWB-AUTHOR-V1`), and
+  `Bundle::deserialize` rejects a named author with a missing or invalid
+  signature. `pwb-web --author-key` signs at compile time. Unsigned bundles
+  remain byte-compatible; revocation is still undefined.
 - *(Fixed)* `Bundle::deserialize` now requires the cursor to reach the end of
   the input (truncated and trailing-byte bundles are rejected), including for
   the compressed `PWBZ` container.
@@ -680,13 +687,35 @@ Not closed by this pass, and not to be mistaken for done:
 
 - Search link/author and freshness signals need a signed link graph or a
   trustworthy publication-time protocol; local heuristics would be gameable.
-- Browser downloads, per-page JS isolation/ESM, and consistent in-UI error
-  surfacing remain separate features.
-- Bundle author signatures, `bundle.toml`, the line-based
-  `strip_esm_syntax` limitation, a site-directory fuzz target, a CI coverage
-  threshold, distributed tracing, and the remaining async `unwrap`/`expect`
-  cleanup remain engineering work outside this search pass.
+- Browser downloads, ESM execution, and consistent in-UI error surfacing remain
+  separate features. Per-page JS/dom isolation is closed (2026-10-31).
+- `bundle.toml`, the line-based `strip_esm_syntax` limitation, a
+  site-directory fuzz target, a CI coverage threshold, distributed tracing,
+  and the remaining async `unwrap`/`expect` cleanup remain engineering work
+  outside this pass. Bundle author signatures are closed (2026-10-31).
 - Seed/anchor publication, real multi-node topology and large-swarm
   validation, open-network sybil economics, and an independent security
   review are operator/design/external work, not code that a local checkout can
   complete honestly.
+
+## Status after the 2026-10-31 authenticity/isolation pass
+
+Closed in code:
+
+- **Bundle author signatures.** `Bundle` carries `author_signature` after the
+  optional `author_pubkey`; `sign_author` signs `PWB-AUTHOR-V1` plus the
+  canonical unsigned bytes, and `Bundle::deserialize` rejects a named author
+  with a missing, malformed, or invalid signature. `pwb-web --author-key`
+  (or `PWB_AUTHOR_KEY`) signs at compile time and refuses an identity file
+  whose public key does not match its seed. Unsigned bundles retain the exact
+  old byte layout.
+- **Per-page isolation.** Top-level navigation drops the QuickJS context,
+  clears the event registry and page-scoped async/DOM state, and re-mounts
+  devtools in the fresh context. A global, timer, fetch callback, or handler
+  from the previous page cannot run against the next page's reused node ids.
+
+Not closed by this pass: browser downloads, ESM execution and the
+`strip_esm_syntax` text hack, script/event-handler error surfacing, `bundle.toml`,
+the site-directory fuzz target, a CI coverage threshold, distributed tracing,
+and the remaining async `unwrap`/`expect` cleanup. The operator/external items
+above are unchanged.

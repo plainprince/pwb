@@ -26,7 +26,7 @@ use std::sync::{Arc, Mutex};
 use winit::event_loop::EventLoop;
 
 use super::app::BrowserApp;
-use super::devtools::DevToolsState;
+use super::devtools::{mount_devtools, DevToolsState};
 
 #[derive(Debug)]
 pub enum PipelineError {
@@ -64,6 +64,7 @@ pub fn build_browser_app(
 
     let mut devtools_mounted = false;
     let mut devtools_root_id = None;
+    let mut devtools_bundle: Option<Bundle> = None;
 
     let mut initial_dom = Dom::from_bundle(&bundle);
     let mut shell = crate::shell::Shell::new("welcome.plain");
@@ -99,37 +100,13 @@ pub fn build_browser_app(
 
     if let Some(dir) = devtools_dir {
         match bundler::bundle_from_dir(&dir) {
-            Ok(devtools_bundle) => {
-                let mut devtools_dom = Dom::from_bundle(&devtools_bundle);
-                // Mark the root so F12 / the close button can find and hide it.
-                devtools_root_id = Some(devtools_dom.root.id);
-                devtools_dom
-                    .root
-                    .attributes
-                    .insert("data-devtools".to_string(), "root".to_string());
-                // Devtools start closed by default: hide the mounted root via
-                // `display: none` (the DOM attribute is the source of truth for the
-                // F12 toggle). `PWB_DEVTOOLS_OPEN=1` overrides for debugging.
-                if !devtools_start_open {
-                    devtools_dom
-                        .root
-                        .attributes
-                        .insert("display".to_string(), "none".to_string());
-                }
-                if let Ok(mut dom) = dom_handle.dom.try_borrow_mut() {
-                    dom.add_child(devtools_dom.root);
-                }
-                devtools_mounted = true;
+            Ok(bundle) => {
+                // Mount and run the devtools script; the bundle is retained so
+                // navigation can re-mount it after resetting the page context.
+                devtools_root_id = mount_devtools(&dom_handle, &bundle, devtools_start_open);
+                devtools_mounted = devtools_root_id.is_some();
+                devtools_bundle = Some(bundle);
                 println!("[DevTools] Mounted devtools DOM as child of main document");
-
-                // Run the devtools script so its buttons/tabs register handlers.
-                if let Some(script_bytes) = &devtools_bundle.script_payload {
-                    if let Ok(script_str) = std::str::from_utf8(script_bytes) {
-                        if let Err(e) = execute_script(&dom_handle, script_str) {
-                            eprintln!("[DevTools JS Error] Devtools script failed: {:?}", e);
-                        }
-                    }
-                }
             }
             Err(e) => eprintln!("[DevTools] Failed to load devtools bundle: {:?}", e),
         }
@@ -180,6 +157,7 @@ pub fn build_browser_app(
         swallow_click: false,
         devtools_root_id,
         devtools_mounted,
+        devtools_bundle,
         dump_png_path,
         scroll_y: 0.0,
         element_scrolls: std::collections::HashMap::new(),

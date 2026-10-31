@@ -2252,8 +2252,10 @@ dependencies = [
 name = "pwb-web"
 version = "0.0.0"
 dependencies = [
+ "hex",
  "lightningcss",
  "pwb-core",
+ "serde_json",
 ]
 
 [[package]]

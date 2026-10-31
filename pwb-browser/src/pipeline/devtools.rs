@@ -1,12 +1,46 @@
 //! DevTools panel state and refresh helpers.
 
+use crate::dom::Dom;
 use crate::js_runtime::{execute_script, DomHandle};
 use crate::layout::find_box_by_id;
+use pwb_core::wire::Bundle;
 
 /// DevTools state
 #[derive(Default)]
 pub(super) struct DevToolsState {
     pub(super) is_open: bool,
+}
+
+/// Mount the devtools DOM as a child of the page and run its script in the
+/// current JS context. Returns the devtools root node id. The caller decides
+/// whether it starts open or hidden; either way the script runs so its
+/// handlers are registered. Re-mounting after a navigation is what keeps
+/// devtools working when the page context is recreated.
+pub(super) fn mount_devtools(handle: &DomHandle, bundle: &Bundle, open: bool) -> Option<usize> {
+    let mut devtools_dom = Dom::from_bundle(bundle);
+    let root_id = devtools_dom.root.id;
+    devtools_dom
+        .root
+        .attributes
+        .insert("data-devtools".to_string(), "root".to_string());
+    if !open {
+        devtools_dom
+            .root
+            .attributes
+            .insert("display".to_string(), "none".to_string());
+    }
+    {
+        let mut dom = handle.dom.try_borrow_mut().ok()?;
+        dom.add_child(devtools_dom.root);
+    }
+    if let Some(script_bytes) = &bundle.script_payload {
+        if let Ok(script) = std::str::from_utf8(script_bytes) {
+            if let Err(e) = execute_script(handle, script) {
+                eprintln!("[DevTools JS Error] Devtools script failed: {:?}", e);
+            }
+        }
+    }
+    Some(root_id)
 }
 
 /// Scroll every listed box to its bottom (the devtools console jumps to the

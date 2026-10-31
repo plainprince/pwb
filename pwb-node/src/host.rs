@@ -133,6 +133,7 @@ mod tests {
             version: pwb_core::wire::CURRENT_VERSION,
             title: "Demo".into(),
             author_pubkey: None,
+            author_signature: None,
             root_node: PlainNode::new(0, Tag::Document),
             script_payload: None,
             components: std::collections::HashMap::new(),
