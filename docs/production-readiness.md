@@ -434,9 +434,17 @@ What is not production-ready:
   or checking the signer.
 - Replicas are the ≤3 known peers closest by XOR; no replication repair, no
   handoff when a node leaves, no anti-entropy.
-- Ranking is summed term frequency plus a 5× title boost. No IDF, no link or
-  author signal, no spam resistance, no freshness. Snippets are the literal
-  string `Content ID: ...`.
+- *(Fixed 2026-10-31)* Ranking is IDF-weighted and sublinear in term
+  frequency, with a title-match boost and an untitled-page penalty. Exact
+  title+snippet clones are collapsed into one result slot, and results are
+  capped at 50. The requester still has no link/author signal, freshness
+  model, or defense against near-duplicate spam.
+- *(Fixed 2026-10-31)* Results carry a real bounded body excerpt instead of
+  `Content ID: ...`. The excerpt is extracted at index time, persisted with
+  the index, replicated to responsible shards in a separately signed optional
+  field, returned in `ShardResponse` under its own signature, and rendered as
+  inert text on `search.plain` (angle brackets are neutralized so a hostile
+  page cannot inject markup into the local results page).
 - Fixed 400 ms query deadline, no retries, no indication of partial results.
 - Queries are sent in plaintext; no onion or end-to-end protection.
 - `index_and_publish` now mints index credits against an `IndexReceipt` over the bundle bytes (fixed; kept here as part of the original audit).

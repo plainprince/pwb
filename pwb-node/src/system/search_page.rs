@@ -29,8 +29,12 @@ const RESULTS_STYLES: &str = r#"
     font-size: 20px;
     padding: 0;
 }
-.result-cid {
+.result-snippet {
     color: #bac2de;
+    font-size: 15px;
+}
+.result-empty {
+    color: #6c7086;
     font-size: 14px;
 }
 .visit-link {
@@ -40,13 +44,22 @@ const RESULTS_STYLES: &str = r#"
 }
 "#;
 
+/// Neutralize angle brackets in text interpolated into PML. The parser has no
+/// entity support, so replacing `<` with a visible lookalike is the safest way
+/// to keep a remote page title or excerpt from closing a tag and injecting
+/// markup into the results page.
+fn escape_pml_text(text: &str) -> String {
+    text.replace('<', "‹").replace('>', "›")
+}
+
 /// Render a federated `search.plain` results page from a pre-merged result
-/// list. Each card exposes the result title and a "Visit Site" link, both
-/// pointing at `content.pwb/<content-id>`, which the browser resolves from its
-/// artifact host (filling it from peers on a miss). Navigation is native — no
-/// script payload is needed.
+/// list. Each card shows the title, a body excerpt, and a "Visit Site" link;
+/// title and link point at `content.pwb/<content-id>`, which the browser
+/// resolves from its artifact host (filling it from peers on a miss).
+/// Navigation is native — no script payload is needed.
 pub fn render_search_results_bundle(query: &str, results: &[SearchResult]) -> Bundle {
-    let title = format!("search.plain — Results for \"{}\"", query);
+    let query_text = escape_pml_text(query);
+    let title = format!("search.plain — Results for \"{}\"", query_text);
     let mut pml_markup = format!(
         r##"<plain>
             <head>
@@ -57,7 +70,7 @@ pub fn render_search_results_bundle(query: &str, results: &[SearchResult]) -> Bu
                 <text class="search-query">Query: "{}" (Found {} results)</text>
             "##,
         title,
-        query,
+        query_text,
         results.len()
     );
 
@@ -68,15 +81,22 @@ pub fn render_search_results_bundle(query: &str, results: &[SearchResult]) -> Bu
     } else {
         for (idx, res) in results.iter().enumerate() {
             let cid = res.content_id.to_hex();
+            let title = escape_pml_text(&res.title);
+            let snippet = escape_pml_text(res.snippet.trim());
+            let preview = if snippet.is_empty() {
+                r##"<text class="result-empty">No preview available for this page.</text>"##
+                    .to_string()
+            } else {
+                format!(r##"<text class="result-snippet">{snippet}</text>"##)
+            };
             pml_markup.push_str(&format!(
                 r##"<view class="result-card">
                         <link class="result-heading" href="content.pwb/{cid}">#{}. {}</link>
-                        <text class="result-cid">Content ID: {}</text>
+                        {preview}
                         <link class="visit-link" href="content.pwb/{cid}">Visit Site →</link>
                     </view>"##,
                 idx + 1,
-                res.title,
-                res.content_id
+                title,
             ));
         }
     }
@@ -99,6 +119,7 @@ pub fn render_search_results_bundle(query: &str, results: &[SearchResult]) -> Bu
 /// Render the transient "searching the swarm…" page shown while shard queries
 /// are in flight.
 pub fn render_search_pending_bundle(query: &str) -> Bundle {
+    let query = escape_pml_text(query);
     let title = format!("search.plain — Searching for \"{}\"", query);
     let pml_markup = format!(
         r##"<plain>

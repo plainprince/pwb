@@ -43,6 +43,17 @@ pub struct PostingWire {
     pub term_frequency: u32,
 }
 
+/// A short, human-readable excerpt of a document, carried beside search
+/// postings so results can show *why* a page matched instead of a raw content
+/// id. Snippets are bounded by the node layer before they are stored or
+/// served, and travel under their own optional signature so peers that predate
+/// them keep verifying the base postings/response unchanged.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct SnippetWire {
+    pub content_id: ContentId,
+    pub snippet: String,
+}
+
 /// Wire copy of a `QueryReceipt[^1]`: a serving node's signature over the query
 /// it answered, the content ids it returned, and the requester's challenge
 /// nonce. Lets a requester verify that results came from a live round-trip.
@@ -258,7 +269,8 @@ pub const POSTINGS_BATCH_MAX: usize = 64;
 
 /// Canonical bytes a publisher signs when writing a batch of postings to one
 /// shard. The batch is signed as a whole; receivers reject the whole message
-/// if any field was rewritten.
+/// if any field was rewritten. This statement is unchanged from the original
+/// batched-write protocol so old peers can still verify it.
 pub fn postings_sign_message(postings: &[PostingWire], publisher: &PublicKey) -> Vec<u8> {
     let mut msg = Vec::new();
     msg.extend_from_slice(POSTINGS_PREFIX);
@@ -269,6 +281,31 @@ pub fn postings_sign_message(postings: &[PostingWire], publisher: &PublicKey) ->
         push_str(&mut msg, &posting.title);
         msg.extend_from_slice(&posting.term_frequency.to_le_bytes());
     }
+    msg.extend_from_slice(&publisher.0);
+    msg
+}
+
+/// Domain-separation prefix for the optional snippet attached to a batch.
+/// Kept separate from [`POSTINGS_PREFIX`] so a node that predates snippets
+/// still accepts and verifies the postings.
+pub const POSTINGS_SNIPPET_PREFIX: &[u8] = b"PWBPOSTSNIP1";
+
+/// Canonical bytes a publisher signs over the excerpt it sends with a batch.
+/// Binds the excerpt to every content id in the batch so a relay cannot move
+/// the text to a different document.
+pub fn postings_snippet_sign_message(
+    postings: &[PostingWire],
+    snippet: &str,
+    publisher: &PublicKey,
+) -> Vec<u8> {
+    let mut msg = Vec::new();
+    msg.extend_from_slice(POSTINGS_SNIPPET_PREFIX);
+    msg.extend_from_slice(&(postings.len() as u32).to_le_bytes());
+    for posting in postings {
+        push_str(&mut msg, &posting.term);
+        msg.extend_from_slice(&posting.content_id.0);
+    }
+    push_str(&mut msg, snippet);
     msg.extend_from_slice(&publisher.0);
     msg
 }
@@ -303,7 +340,9 @@ pub const SHARD_RESPONSE_PREFIX: &[u8] = b"PWBSHARD1";
 ///
 /// Binds the postings to the exact query (`query_id`), the term, the
 /// requester's challenge (so a response cannot be replayed into another
-/// query), and the responder's identity.
+/// query), and the responder's identity. The optional snippets added later are
+/// signed separately by [`shard_snippets_sign_message`], so this statement is
+/// unchanged from the original protocol.
 pub fn shard_response_sign_message(
     query_id: u64,
     term: &str,
@@ -323,6 +362,39 @@ pub fn shard_response_sign_message(
         msg.extend_from_slice(&posting.term_frequency.to_le_bytes());
     }
     msg.extend_from_slice(challenge);
+    msg.extend_from_slice(&responder.0);
+    msg
+}
+
+/// Domain-separation prefix for the optional excerpts attached to a shard
+/// response. Separate from [`SHARD_RESPONSE_PREFIX`] so a requester that
+/// predates snippets still verifies the postings.
+pub const SHARD_SNIPPETS_PREFIX: &[u8] = b"PWBSHARDSNIP1";
+
+/// Canonical bytes a shard signs over the excerpts in one response. Binds
+/// them to the query, the postings' content ids, and the responder so a relay
+/// cannot swap in text for a different result set.
+pub fn shard_snippets_sign_message(
+    query_id: u64,
+    term: &str,
+    postings: &[PostingWire],
+    snippets: &[SnippetWire],
+    responder: &PublicKey,
+) -> Vec<u8> {
+    let mut msg = Vec::new();
+    msg.extend_from_slice(SHARD_SNIPPETS_PREFIX);
+    msg.extend_from_slice(&query_id.to_le_bytes());
+    push_str(&mut msg, term);
+    msg.extend_from_slice(&(postings.len() as u32).to_le_bytes());
+    for posting in postings {
+        push_str(&mut msg, &posting.term);
+        msg.extend_from_slice(&posting.content_id.0);
+    }
+    msg.extend_from_slice(&(snippets.len() as u32).to_le_bytes());
+    for snippet in snippets {
+        msg.extend_from_slice(&snippet.content_id.0);
+        push_str(&mut msg, &snippet.snippet);
+    }
     msg.extend_from_slice(&responder.0);
     msg
 }
@@ -454,6 +526,16 @@ pub enum NetworkMessage {
     /// exhaust the per-peer token bucket and lose the tail of its index.
     StorePostings {
         postings: Vec<PostingWire>,
+        /// Bounded excerpt of the document these postings describe, so every
+        /// responsible shard can answer with a real snippet instead of a raw
+        /// content id.
+        #[serde(default)]
+        snippet: String,
+        /// Signature over [`postings_snippet_sign_message`]. Optional so a
+        /// message without an excerpt remains valid, and so old peers that do
+        /// not know the field accept the postings signature unchanged.
+        #[serde(default)]
+        snippet_signature: Option<Signature>,
         publisher: PublicKey,
         signature: Signature,
     },
@@ -482,6 +564,15 @@ pub enum NetworkMessage {
         query_id: u64,
         term: String,
         postings: Vec<PostingWire>,
+        /// Bounded excerpts for the content ids above. Missing entries are
+        /// legal (an old peer or a document indexed without preview text);
+        /// callers fall back to the title.
+        #[serde(default)]
+        snippets: Vec<SnippetWire>,
+        /// Signature over [`shard_snippets_sign_message`]. Optional for the
+        /// same compatibility reason as `StorePostings::snippet_signature`.
+        #[serde(default)]
+        snippets_signature: Option<Signature>,
         responder: PublicKey,
         signature: Signature,
         receipt: Option<QueryReceiptWire>,

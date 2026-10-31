@@ -32,9 +32,9 @@ use pwb_core::crypto::{ContentId, Keypair, PublicKey};
 use pwb_core::dht::NodeId;
 use pwb_core::net::{
     decode_artifact_chunk, encode_artifact_chunk, index_proof_sign_message, posting_sign_message,
-    postings_sign_message, shard_query_sign_message, shard_response_sign_message, IndexProofWire,
-    NetworkMessage, NodeEngine, PostingWire, QueryReceiptWire, MAX_ARTIFACT_CHUNK,
-    POSTINGS_BATCH_MAX,
+    postings_sign_message, postings_snippet_sign_message, shard_query_sign_message,
+    shard_response_sign_message, shard_snippets_sign_message, IndexProofWire, NetworkMessage,
+    NodeEngine, PostingWire, QueryReceiptWire, SnippetWire, MAX_ARTIFACT_CHUNK, POSTINGS_BATCH_MAX,
 };
 use pwb_core::wire::Bundle;
 use rand::seq::SliceRandom;
@@ -213,7 +213,8 @@ impl DistributedSearch {
         let content_id = self.host.store(bytes.to_vec()).ok()?;
         self.index.record_title(content_id, bundle.title.clone());
         let postings = self.index.index_bundle(content_id, &bundle);
-        self.publish_postings(&postings);
+        let snippet = self.index.snippet(&content_id).unwrap_or_default();
+        self.publish_postings(&postings, &snippet);
 
         // `gossip.plain`: announce the new artifact so peers that do not
         // happen to be responsible for its terms can still learn about it and
@@ -271,7 +272,7 @@ impl DistributedSearch {
     /// hundreds. Before batching, each term was its own message and any
     /// document larger than the receiver's per-peer burst bucket lost the tail
     /// of its index (and the follow-up `CheckIndexProof`) to the rate limiter.
-    fn publish_postings(&self, postings: &[PostingWire]) {
+    fn publish_postings(&self, postings: &[PostingWire], snippet: &str) {
         for posting in postings {
             self.index.record_posting(posting);
         }
@@ -294,10 +295,16 @@ impl DistributedSearch {
         for ((_, address), batch) in batches {
             for chunk in batch.chunks(POSTINGS_BATCH_MAX) {
                 let signature = self.keypair.sign(&postings_sign_message(chunk, &publisher));
+                let snippet_signature = (!snippet.is_empty()).then(|| {
+                    self.keypair
+                        .sign(&postings_snippet_sign_message(chunk, snippet, &publisher))
+                });
                 let _ = self.engine.send_to_addr(
                     address,
                     NetworkMessage::StorePostings {
                         postings: chunk.to_vec(),
+                        snippet: snippet.to_string(),
+                        snippet_signature,
                         publisher,
                         signature,
                     },
@@ -384,12 +391,32 @@ impl DistributedSearch {
             // so this service never trusts an unverified batch.
             NetworkMessage::StorePostings {
                 postings,
+                snippet,
+                snippet_signature,
                 publisher,
                 signature,
             } => {
+                // The receiver loop already verified both signatures. Check
+                // the base signature again so this service never trusts an
+                // unverified batch, and only store the excerpt when it was
+                // actually signed by the publisher.
                 if signature.verify(&publisher, &postings_sign_message(&postings, &publisher)) {
+                    let snippet_ok = !snippet.is_empty()
+                        && snippet_signature.is_some_and(|snippet_signature| {
+                            snippet_signature.verify(
+                                &publisher,
+                                &postings_snippet_sign_message(&postings, &snippet, &publisher),
+                            )
+                        });
                     for posting in &postings {
                         self.index.record_posting(posting);
+                    }
+                    if snippet_ok {
+                        self.index.record_snippets(
+                            postings
+                                .iter()
+                                .map(|posting| (posting.content_id, snippet.as_str())),
+                        );
                     }
                 }
             }
@@ -501,14 +528,37 @@ impl DistributedSearch {
             let results: Vec<ContentId> = postings.iter().map(|p| p.content_id).collect();
             Some(QueryReceipt::sign(&self.keypair, &term, results, challenge))
         };
+        // One excerpt per distinct document, not per term. Shards that only
+        // learned postings (or old peers) simply contribute no snippet and the
+        // requester falls back to the title.
+        let mut seen = std::collections::HashSet::new();
+        let snippets: Vec<SnippetWire> = postings
+            .iter()
+            .filter(|posting| seen.insert(posting.content_id))
+            .filter_map(|posting| {
+                self.index
+                    .snippet(&posting.content_id)
+                    .map(|snippet| SnippetWire {
+                        content_id: posting.content_id,
+                        snippet,
+                    })
+            })
+            .collect();
         let responder = self.keypair.public;
         let signature = self.keypair.sign(&shard_response_sign_message(
             query_id, &term, &postings, &challenge, &responder,
         ));
+        let snippets_signature = (!snippets.is_empty()).then(|| {
+            self.keypair.sign(&shard_snippets_sign_message(
+                query_id, &term, &postings, &snippets, &responder,
+            ))
+        });
         let response = NetworkMessage::ShardResponse {
             query_id,
             term,
             postings,
+            snippets,
+            snippets_signature,
             responder,
             signature,
             receipt: receipt.as_ref().map(QueryReceiptWire::from),
@@ -617,7 +667,8 @@ impl DistributedSearch {
             postings.extend(term_postings);
             receipts.extend(term_receipts);
         }
-        (search::aggregate(postings), receipts)
+        let snippets = self.index.snippets_snapshot();
+        (search::aggregate(postings, &snippets), receipts)
     }
 
     /// Gather a single term's postings (and service receipts) from the local
@@ -673,6 +724,8 @@ impl DistributedSearch {
                     query_id: response_id,
                     term: response_term,
                     postings: remote,
+                    snippets,
+                    snippets_signature,
                     responder,
                     signature,
                     receipt,
@@ -700,11 +753,40 @@ impl DistributedSearch {
                     {
                         continue;
                     }
+                    // Snippets are informational, but they still enter the
+                    // local index. Accept only excerpts that the responder
+                    // signed and that belong to a document in this response;
+                    // an unsigned or foreign excerpt is ignored without
+                    // discarding the postings.
+                    let named: std::collections::HashSet<ContentId> =
+                        remote.iter().map(|posting| posting.content_id).collect();
+                    let snippets_ok = if snippets.is_empty() {
+                        true
+                    } else {
+                        snippets_signature.is_some_and(|snippets_signature| {
+                            snippets_signature.verify(
+                                &responder,
+                                &shard_snippets_sign_message(
+                                    query_id, term, &remote, &snippets, &responder,
+                                ),
+                            )
+                        }) && snippets.len() <= named.len()
+                            && snippets
+                                .iter()
+                                .all(|snippet| named.contains(&snippet.content_id))
+                    };
                     if let Some(receipt) = &receipt {
                         if !receipt_valid(receipt, term, &challenge, &responder, &remote) {
                             continue;
                         }
                         receipts.push(receipt.clone());
+                    }
+                    if snippets_ok {
+                        self.index.record_snippets(
+                            snippets
+                                .iter()
+                                .map(|snippet| (snippet.content_id, snippet.snippet.as_str())),
+                        );
                     }
                     postings.extend(remote);
                 }
@@ -732,7 +814,8 @@ impl DistributedSearch {
             let (term_postings, _) = self.query_term_private(term).await?;
             postings.extend(term_postings);
         }
-        Ok(search::aggregate(postings))
+        let snippets = self.index.snippets_snapshot();
+        Ok(search::aggregate(postings, &snippets))
     }
 
     async fn query_term_private(
@@ -794,6 +877,8 @@ impl DistributedSearch {
                     query_id: response_id,
                     term: response_term,
                     postings: remote,
+                    snippets,
+                    snippets_signature,
                     responder,
                     signature,
                     receipt,
@@ -821,21 +906,50 @@ impl DistributedSearch {
                 {
                     return None;
                 }
+                let named: std::collections::HashSet<ContentId> =
+                    remote.iter().map(|posting| posting.content_id).collect();
+                let snippets = if snippets.is_empty() {
+                    Vec::new()
+                } else if snippets_signature.is_some_and(|snippets_signature| {
+                    snippets_signature.verify(
+                        &responder,
+                        &shard_snippets_sign_message(
+                            query_id,
+                            &term_owned,
+                            &remote,
+                            &snippets,
+                            &responder,
+                        ),
+                    )
+                }) && snippets.len() <= named.len()
+                    && snippets
+                        .iter()
+                        .all(|snippet| named.contains(&snippet.content_id))
+                {
+                    snippets
+                } else {
+                    Vec::new()
+                };
                 if let Some(receipt) = &receipt {
                     if !receipt_valid(receipt, &term_owned, &challenge, &responder, &remote) {
                         return None;
                     }
                 }
-                Some((remote, receipt))
+                Some((remote, snippets, receipt))
             });
         }
 
         let mut answered = 0usize;
         while let Some(joined) = tasks.join_next().await {
-            let Ok(Some((remote, receipt))) = joined else {
+            let Ok(Some((remote, snippets, receipt))) = joined else {
                 continue;
             };
             answered += 1;
+            self.index.record_snippets(
+                snippets
+                    .iter()
+                    .map(|snippet| (snippet.content_id, snippet.snippet.as_str())),
+            );
             postings.extend(remote);
             if let Some(receipt) = receipt {
                 receipts.push(receipt);

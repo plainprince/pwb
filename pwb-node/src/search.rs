@@ -10,10 +10,10 @@
 use pwb_core::crypto::ContentId;
 use pwb_core::dht::NodeId;
 use pwb_core::net::PostingWire;
-use pwb_core::spec::Tag;
+use pwb_core::spec::{PlainNode, Tag};
 use pwb_core::wire::Bundle;
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
@@ -21,9 +21,24 @@ use std::sync::Mutex;
 
 use crate::persist::atomic_write;
 
-/// Term-frequency multiplier applied when ranking hits (title terms already
-/// carry a 5× boost from [`extract_terms`]).
-const RANK_WEIGHT: f32 = 1.5;
+/// Extra weight for a document whose title contains the query term. Title
+/// terms already carry a 5× term-frequency boost from [`extract_terms`]; this
+/// is the separate, cheaper signal that the title itself matches the query.
+const TITLE_MATCH_BOOST: f32 = 1.35;
+
+/// Ranking penalty for a result with no title. An untitled document can still
+/// be a legitimate page, but it should not outrank a titled one on frequency
+/// alone.
+const UNTITLED_PENALTY: f32 = 0.7;
+
+/// Most results returned for one query. Ranking is bounded so a large shard or
+/// a spam run cannot make the results page arbitrarily expensive to render.
+pub const MAX_RESULTS: usize = 50;
+
+/// Longest document excerpt kept per content id, in characters. Snippets are
+/// attacker-controlled on the remote path and travel on every shard response,
+/// so they are capped where they enter the index.
+pub const MAX_SNIPPET_LEN: usize = 240;
 
 /// Longest term kept in the index, in bytes. Terms come from bundle text and
 /// from remote shard writes, so an unbounded term is an unbounded key in a
@@ -54,6 +69,52 @@ fn sanitize_title(title: &str) -> String {
         end -= 1;
     }
     title[..end].to_string()
+}
+
+/// Collapse whitespace and bound a document excerpt. Snippets arrive from
+/// local bundles and from remote shard responses, so this is the single
+/// choke point for both.
+fn sanitize_snippet(snippet: &str) -> String {
+    // Bound the work before normalizing: a remote message may carry up to the
+    // 4 MiB message cap, while only the first few hundred characters can ever
+    // be displayed.
+    let capped: String = snippet.chars().take(MAX_SNIPPET_LEN * 4).collect();
+    let collapsed = capped.split_whitespace().collect::<Vec<_>>().join(" ");
+    if collapsed.chars().count() <= MAX_SNIPPET_LEN {
+        return collapsed;
+    }
+    let mut truncated: String = collapsed.chars().take(MAX_SNIPPET_LEN - 1).collect();
+    truncated.push('…');
+    truncated
+}
+
+/// Build a readable excerpt from a bundle's visible body text. Titles are
+/// skipped (they are shown separately) and the page title is used as the
+/// fallback when the body has no text.
+fn extract_snippet(root: &PlainNode, title: &str) -> String {
+    let mut parts: Vec<String> = Vec::new();
+    collect_visible_text(root, &mut parts);
+    let body = parts.join(" ");
+    let body = sanitize_snippet(&body);
+    if body.is_empty() {
+        title.trim().to_string()
+    } else {
+        body
+    }
+}
+
+fn collect_visible_text(node: &PlainNode, parts: &mut Vec<String>) {
+    if !matches!(node.tag, Tag::Title | Tag::Head | Tag::Script) {
+        if let Some(text) = &node.text_content {
+            let text = text.trim();
+            if !text.is_empty() {
+                parts.push(text.to_string());
+            }
+        }
+    }
+    for child in &node.children {
+        collect_visible_text(child, parts);
+    }
 }
 
 /// Normalize a term for the index; `None` for anything that must not be
@@ -90,6 +151,10 @@ pub struct SearchResult {
     pub content_id: ContentId,
     pub title: String,
     pub rank_score: f32,
+    /// Bounded body excerpt. Empty when the document was learned only from a
+    /// posting written by an old peer or by a node that never parsed the
+    /// bundle; callers should fall back to the title instead of a content id.
+    pub snippet: String,
 }
 
 #[derive(Default)]
@@ -98,6 +163,8 @@ struct Index {
     inverted_index: HashMap<String, Vec<(ContentId, u32)>>,
     /// Document titles mapping.
     titles: HashMap<ContentId, String>,
+    /// Document excerpts (`content_id` -> bounded body text).
+    snippets: HashMap<ContentId, String>,
 }
 
 pub struct SearchEngine {
@@ -113,12 +180,22 @@ pub struct SearchEngine {
 struct IndexSnapshot {
     titles: Vec<TitleEntry>,
     terms: Vec<TermEntry>,
+    /// Additive since the search-quality pass; old snapshots load with no
+    /// snippets and results fall back to the title.
+    #[serde(default)]
+    snippets: Vec<SnippetEntry>,
 }
 
 #[derive(Serialize, Deserialize)]
 struct TitleEntry {
     content_id: ContentId,
     title: String,
+}
+
+#[derive(Serialize, Deserialize)]
+struct SnippetEntry {
+    content_id: ContentId,
+    snippet: String,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -157,13 +234,30 @@ impl IndexSnapshot {
                     .collect(),
             })
             .collect();
-        Self { titles, terms }
+        let snippets = index
+            .snippets
+            .iter()
+            .map(|(content_id, snippet)| SnippetEntry {
+                content_id: *content_id,
+                snippet: snippet.clone(),
+            })
+            .collect();
+        Self {
+            titles,
+            terms,
+            snippets,
+        }
     }
 
     fn into_index(self) -> Index {
         let mut index = Index::default();
         for entry in self.titles {
             index.titles.insert(entry.content_id, entry.title);
+        }
+        for entry in self.snippets {
+            index
+                .snippets
+                .insert(entry.content_id, sanitize_snippet(&entry.snippet));
         }
         for entry in self.terms {
             index.inverted_index.insert(
@@ -253,6 +347,7 @@ impl SearchEngine {
         let mut term_counts: HashMap<String, u32> = HashMap::new();
         extract_terms(&bundle.root_node, &mut term_counts);
         let title = sanitize_title(&bundle.title);
+        let snippet = sanitize_snippet(&extract_snippet(&bundle.root_node, &title));
 
         let postings: Vec<PostingWire> = term_counts
             .iter()
@@ -267,6 +362,9 @@ impl SearchEngine {
         {
             let mut index = self.inner.lock().unwrap();
             index.titles.insert(content_id, title);
+            if !snippet.is_empty() {
+                index.snippets.insert(content_id, snippet);
+            }
             for posting in &postings {
                 Self::upsert(
                     index
@@ -328,6 +426,61 @@ impl SearchEngine {
         self.persist();
     }
 
+    /// Record a bounded document excerpt, usually learned from a shard
+    /// response. An existing longer excerpt is kept; an empty or oversized
+    /// incoming value is sanitized first.
+    pub fn record_snippet(&self, content_id: ContentId, snippet: &str) {
+        self.record_snippets(std::iter::once((content_id, snippet)));
+    }
+
+    /// Record many excerpts with a single index write. A shard response can
+    /// carry dozens of excerpts; persisting once per entry would rewrite the
+    /// whole snapshot for every result in a query.
+    pub fn record_snippets<I, S>(&self, snippets: I)
+    where
+        I: IntoIterator<Item = (ContentId, S)>,
+        S: AsRef<str>,
+    {
+        let sanitized: Vec<(ContentId, String)> = snippets
+            .into_iter()
+            .filter_map(|(content_id, snippet)| {
+                let snippet = sanitize_snippet(snippet.as_ref());
+                (!snippet.is_empty()).then_some((content_id, snippet))
+            })
+            .collect();
+        if sanitized.is_empty() {
+            return;
+        }
+
+        let mut changed = false;
+        {
+            let mut index = self.inner.lock().unwrap();
+            for (content_id, snippet) in sanitized {
+                match index.snippets.get(&content_id) {
+                    Some(existing) if existing.chars().count() >= snippet.chars().count() => {}
+                    _ => {
+                        index.snippets.insert(content_id, snippet);
+                        changed = true;
+                    }
+                }
+            }
+        }
+        if changed {
+            self.persist();
+        }
+    }
+
+    /// The excerpt for one document, if known.
+    pub fn snippet(&self, content_id: &ContentId) -> Option<String> {
+        self.inner.lock().unwrap().snippets.get(content_id).cloned()
+    }
+
+    /// A copy of every known excerpt. Callers rank a batch of postings against
+    /// this without holding the index lock.
+    pub fn snippets_snapshot(&self) -> HashMap<ContentId, String> {
+        self.inner.lock().unwrap().snippets.clone()
+    }
+
     /// The local postings list for a term, as wire postings.
     pub fn postings_wire(&self, term: &str) -> Vec<PostingWire> {
         let Some(term) = sanitize_term(term) else {
@@ -355,26 +508,33 @@ impl SearchEngine {
         self.inner.lock().unwrap().titles.get(content_id).cloned()
     }
 
-    /// Exact single-query lookup over the local index (the pre-federation
-    /// behavior, retained for local rendering and tests).
+    /// Local multi-term search over this node's index. Uses the same ranking
+    /// as federated results so a local lookup and a merged network query order
+    /// documents the same way.
     pub fn search(&self, query: &str) -> Vec<SearchResult> {
-        let query_term = query.trim().to_lowercase();
-        let index = self.inner.lock().unwrap();
-        let mut results = Vec::new();
-
-        if let Some(matches) = index.inverted_index.get(&query_term) {
-            for (cid, count) in matches {
-                let title = index.titles.get(cid).cloned().unwrap_or_default();
-                results.push(SearchResult {
-                    content_id: *cid,
-                    title,
-                    rank_score: *count as f32 * RANK_WEIGHT,
-                });
-            }
+        let terms = tokenize(query);
+        if terms.is_empty() {
+            return Vec::new();
         }
-
-        results.sort_by(|a, b| b.rank_score.partial_cmp(&a.rank_score).unwrap());
-        results
+        let (postings, snippets) = {
+            let index = self.inner.lock().unwrap();
+            let mut postings = Vec::new();
+            for term in &terms {
+                let Some(list) = index.inverted_index.get(term) else {
+                    continue;
+                };
+                for (content_id, term_frequency) in list {
+                    postings.push(PostingWire {
+                        term: term.clone(),
+                        content_id: *content_id,
+                        title: index.titles.get(content_id).cloned().unwrap_or_default(),
+                        term_frequency: *term_frequency,
+                    });
+                }
+            }
+            (postings, index.snippets.clone())
+        };
+        aggregate(postings, &snippets)
     }
 }
 
@@ -400,36 +560,123 @@ pub fn tokenize(query: &str) -> Vec<String> {
     terms
 }
 
-/// Merge postings gathered from all term shards into a ranked result list:
-/// documents are deduplicated by content id and ranked by summed term
-/// frequency (so a document matching several query terms wins).
-pub fn aggregate(postings: impl IntoIterator<Item = PostingWire>) -> Vec<SearchResult> {
-    let mut by_doc: HashMap<ContentId, (String, u32)> = HashMap::new();
+/// Merge postings gathered from all term shards into a ranked result list.
+///
+/// Ranking is IDF-weighted, sublinear in term frequency, and boosted when the
+/// document title contains the query term:
+///
+/// `score = Σ (1 + ln tf) · ln(1 + N/df) · title_boost`
+///
+/// where `N` is the number of distinct candidate documents and `df` is the
+/// number containing that term. A term present in every candidate therefore
+/// contributes little, while a rare term that ties otherwise-identical
+/// documents together dominates — the property raw term frequency lacked, and
+/// the reason a single keyword-stuffed page used to outrank everything.
+///
+/// Postings replicated across shards are collapsed to one contribution per
+/// `(term, document)`, and exact title+snippet clones are folded into their
+/// best-ranked copy so a spam run cannot occupy several result slots with the
+/// same page content. Results are capped at [`MAX_RESULTS`].
+///
+/// `snippets` maps content ids to excerpts learned from local indexing or
+/// trusted shard responses; a missing entry yields an empty snippet and the
+/// UI falls back to the title.
+pub fn aggregate(
+    postings: impl IntoIterator<Item = PostingWire>,
+    snippets: &HashMap<ContentId, String>,
+) -> Vec<SearchResult> {
+    // One contribution per (term, document), keeping the highest frequency
+    // reported by replicas and the first non-empty title.
+    let mut unique: HashMap<(String, ContentId), (String, u32)> = HashMap::new();
     for posting in postings {
-        let entry = by_doc
-            .entry(posting.content_id)
-            .or_insert_with(|| (posting.title.clone(), 0));
-        if entry.0.is_empty() {
-            entry.0 = posting.title.clone();
+        let term = posting.term.trim().to_lowercase();
+        if term.is_empty() {
+            continue;
         }
-        entry.1 = entry.1.saturating_add(posting.term_frequency);
+        let tf = posting.term_frequency.clamp(1, MAX_TERM_FREQUENCY);
+        unique
+            .entry((term, posting.content_id))
+            .and_modify(|(title, existing)| {
+                if title.is_empty() && !posting.title.is_empty() {
+                    *title = posting.title.clone();
+                }
+                *existing = (*existing).max(tf);
+            })
+            .or_insert((posting.title, tf));
     }
 
-    let mut results: Vec<SearchResult> = by_doc
-        .into_iter()
-        .map(|(content_id, (title, tf))| SearchResult {
+    let candidates: HashSet<ContentId> = unique.keys().map(|(_, cid)| *cid).collect();
+    let candidate_count = candidates.len().max(1) as f32;
+
+    // Document frequency per term across the candidate set.
+    let mut term_docs: HashMap<&str, HashSet<ContentId>> = HashMap::new();
+    for (term, content_id) in unique.keys() {
+        term_docs
+            .entry(term.as_str())
+            .or_default()
+            .insert(*content_id);
+    }
+
+    let mut scored: Vec<SearchResult> = Vec::new();
+    let mut by_doc: HashMap<ContentId, (&str, f32)> = HashMap::new();
+    for ((term, content_id), (title, tf)) in &unique {
+        let df = term_docs.get(term.as_str()).map_or(1, HashSet::len) as f32;
+        let idf = (1.0 + candidate_count / df).ln();
+        let tf_weight = 1.0 + (*tf as f32).ln();
+        let title_boost = if title_contains_term(title, term) {
+            TITLE_MATCH_BOOST
+        } else if title.trim().is_empty() {
+            UNTITLED_PENALTY
+        } else {
+            1.0
+        };
+        let contribution = tf_weight * idf * title_boost;
+        by_doc
+            .entry(*content_id)
+            .and_modify(|(_, score)| *score += contribution)
+            .or_insert((title.as_str(), contribution));
+    }
+
+    for (content_id, (title, rank_score)) in by_doc {
+        scored.push(SearchResult {
             content_id,
-            title,
-            rank_score: tf as f32 * RANK_WEIGHT,
-        })
-        .collect();
-    results.sort_by(|a, b| {
+            title: title.to_string(),
+            rank_score,
+            snippet: snippets.get(&content_id).cloned().unwrap_or_default(),
+        });
+    }
+
+    scored.sort_by(|a, b| {
         b.rank_score
             .partial_cmp(&a.rank_score)
             .unwrap_or(std::cmp::Ordering::Equal)
             .then_with(|| a.title.cmp(&b.title))
+            .then_with(|| a.content_id.to_hex().cmp(&b.content_id.to_hex()))
     });
-    results
+
+    // Fold exact clones (same normalized title *and* excerpt) into the first,
+    // best-ranked copy. A document without an excerpt cannot be identified as
+    // a clone, so it keeps its own slot.
+    let mut seen: HashSet<(String, String)> = HashSet::new();
+    scored.retain(|result| {
+        let snippet = result.snippet.trim().to_lowercase();
+        if snippet.is_empty() {
+            return true;
+        }
+        seen.insert((result.title.trim().to_lowercase(), snippet))
+    });
+    scored.truncate(MAX_RESULTS);
+    scored
+}
+
+/// Whether `title` contains `term` as a whole, case-insensitive word.
+fn title_contains_term(title: &str, term: &str) -> bool {
+    if term.is_empty() {
+        return false;
+    }
+    title
+        .split(|c: char| !c.is_alphanumeric())
+        .any(|word| word.eq_ignore_ascii_case(term) || word.to_lowercase() == term)
 }
 
 /// Extract the indexed term multiset from a node tree — shared with
@@ -571,7 +818,7 @@ mod tests {
     }
 
     #[test]
-    fn test_aggregate_sums_term_frequencies_and_dedupes() {
+    fn test_aggregate_multi_term_and_replica_dedupe() {
         let doc = ContentId([7; 32]);
         let other = ContentId([8; 32]);
         let postings = vec![
@@ -587,6 +834,13 @@ mod tests {
                 title: "Rust".into(),
                 term_frequency: 3,
             },
+            // A replicated copy from another shard must not double-count.
+            PostingWire {
+                term: "rust".into(),
+                content_id: doc,
+                title: "Rust".into(),
+                term_frequency: 2,
+            },
             PostingWire {
                 term: "rust".into(),
                 content_id: other,
@@ -594,10 +848,104 @@ mod tests {
                 term_frequency: 1,
             },
         ];
-        let results = aggregate(postings);
+        let results = aggregate(postings, &HashMap::new());
         assert_eq!(results.len(), 2);
         assert_eq!(results[0].content_id, doc, "multi-term match ranks first");
-        assert_eq!(results[0].rank_score, 5.0 * RANK_WEIGHT);
+        assert!(results[0].rank_score > results[1].rank_score);
+    }
+
+    #[test]
+    fn test_aggregate_weights_rare_terms_more_than_common_ones() {
+        let rare = ContentId([0x31; 32]);
+        let common = ContentId([0x32; 32]);
+        let also_common = ContentId([0x33; 32]);
+        let postings = vec![
+            PostingWire {
+                term: "quantum".into(),
+                content_id: rare,
+                title: "A page".into(),
+                term_frequency: 1,
+            },
+            PostingWire {
+                term: "web".into(),
+                content_id: common,
+                title: "B page".into(),
+                term_frequency: 1,
+            },
+            PostingWire {
+                term: "web".into(),
+                content_id: also_common,
+                title: "C page".into(),
+                term_frequency: 1,
+            },
+        ];
+        let results = aggregate(postings, &HashMap::new());
+        assert_eq!(
+            results[0].content_id, rare,
+            "the rare term carries more IDF"
+        );
+    }
+
+    #[test]
+    fn test_aggregate_collapses_exact_title_and_snippet_clones() {
+        let original = ContentId([0x41; 32]);
+        let clone = ContentId([0x42; 32]);
+        let postings = vec![
+            PostingWire {
+                term: "spam".into(),
+                content_id: original,
+                title: "Buy now".into(),
+                term_frequency: 1,
+            },
+            PostingWire {
+                term: "spam".into(),
+                content_id: clone,
+                title: "buy NOW".into(),
+                term_frequency: 1,
+            },
+        ];
+        let mut snippets = HashMap::new();
+        snippets.insert(original, "Same copied body text".to_string());
+        snippets.insert(clone, "same copied body text".to_string());
+        let results = aggregate(postings, &snippets);
+        assert_eq!(results.len(), 1, "one content clone owns one result slot");
+    }
+
+    #[test]
+    fn test_snippet_comes_from_body_and_skips_the_title() {
+        let engine = SearchEngine::new();
+        let cid = ContentId([0x51; 32]);
+        let mut root = PlainNode::new(0, Tag::Document);
+        root.children.push(title_node(1, "Hidden Title"));
+        root.children
+            .push(text_node(2, "  A   real\nbody   excerpt  "));
+        engine.index_bundle(cid, &bundle_with(root));
+
+        let results = engine.search("real");
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].snippet, "A real body excerpt");
+        assert!(!results[0].snippet.contains("Hidden Title"));
+    }
+
+    #[test]
+    fn test_snippet_falls_back_to_title_and_is_bounded() {
+        let engine = SearchEngine::new();
+        let empty = ContentId([0x52; 32]);
+        let mut bundle = bundle_with(PlainNode::new(0, Tag::Document));
+        bundle.title = "Only A Title".into();
+        engine.index_bundle(empty, &bundle);
+        assert_eq!(
+            engine.snippet(&empty).as_deref(),
+            Some("Only A Title"),
+            "a body-less page shows its title rather than a content id"
+        );
+
+        let long = ContentId([0x53; 32]);
+        let long_text = "word ".repeat(MAX_SNIPPET_LEN);
+        engine.index_bundle(long, &bundle_with(text_node(0, &long_text)));
+        let snippet = engine.snippet(&long).expect("bounded snippet");
+        assert!(snippet.chars().count() <= MAX_SNIPPET_LEN);
+        assert!(snippet.ends_with('…'));
     }
 
     #[test]
@@ -654,6 +1002,11 @@ mod tests {
 
         let reopened = SearchEngine::open(&path);
         assert_eq!(reopened.title(&cid).as_deref(), Some("Durable"));
+        assert_eq!(
+            reopened.snippet(&cid).as_deref(),
+            Some("durable plainweb index"),
+            "snippets survive a restart with the postings"
+        );
         let postings = reopened.postings_wire("durable");
         assert_eq!(postings.len(), 1);
         assert_eq!(postings[0].content_id, cid);
