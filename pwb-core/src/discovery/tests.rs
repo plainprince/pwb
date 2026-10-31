@@ -3,10 +3,20 @@ use super::*;
 use crate::crypto::{Keypair, PublicKey};
 use crate::net::PeerInfo;
 use std::collections::HashMap;
-use std::net::{Ipv4Addr, SocketAddr};
+use std::net::{Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 use tokio::net::UdpSocket;
+
+/// Target the loopback address for the socket's family. Discovery binds
+/// `UNSPECIFIED`, and sending to `0.0.0.0`/`[::]` works on Unix but Windows
+/// rejects it with `WSAEADDRNOTAVAIL`; the bound port is what matters here.
+fn loopback(addr: SocketAddr) -> SocketAddr {
+    match addr {
+        SocketAddr::V4(addr) => (Ipv4Addr::LOCALHOST, addr.port()).into(),
+        SocketAddr::V6(addr) => (Ipv6Addr::LOCALHOST, addr.port()).into(),
+    }
+}
 
 async fn service_on(listen_port: u16) -> DiscoveryService {
     DiscoveryService::bind(
@@ -150,9 +160,11 @@ async fn test_ipv4_socket_is_allowed_to_broadcast() {
 async fn test_ipv6_unicast_beacon_discovery_merges_peer() {
     let a = service_on(8123).await;
     let b = service_on(8124).await;
-    let addr_b = b
-        .local_addr_v6()
-        .expect("IPv6 discovery socket bound on this host");
+    let Some(addr_b) = b.local_addr_v6() else {
+        // A host without an IPv6 stack has no IPv6 path to test; the service
+        // deliberately carries on with IPv4 alone.
+        return;
+    };
     assert_eq!(
         addr_b.ip(),
         std::net::IpAddr::V6(std::net::Ipv6Addr::UNSPECIFIED)
@@ -161,7 +173,7 @@ async fn test_ipv6_unicast_beacon_discovery_merges_peer() {
 
     // A beacon sent to the IPv6 socket is validated and merged like any
     // other, and the peer is recorded at its real IPv6 source address.
-    a.send_beacon_to(addr_b, t)
+    a.send_beacon_to(loopback(addr_b), t)
         .await
         .expect("unicast v6 beacon");
     let seen = b.recv_beacon(t, Instant::now()).await.expect("valid");
@@ -179,7 +191,7 @@ async fn test_ipv6_unicast_beacon_discovery_merges_peer() {
 async fn test_unicast_beacon_discovery_merges_peer() {
     let a = service_on(8123).await;
     let b = service_on(8124).await;
-    let addr_b = b.local_addr().unwrap();
+    let addr_b = loopback(b.local_addr().unwrap());
     let t = unix_time();
 
     a.send_beacon_to(addr_b, t).await.expect("unicast beacon");
@@ -205,7 +217,7 @@ async fn test_unicast_beacon_discovery_merges_peer() {
 async fn test_recv_rejects_stale_garbage_and_forged_beacons() {
     let a = service_on(8123).await;
     let b = service_on(8124).await;
-    let addr_b = b.local_addr().unwrap();
+    let addr_b = loopback(b.local_addr().unwrap());
     let t = unix_time();
 
     // Stale replay of an otherwise valid beacon.
@@ -258,7 +270,7 @@ async fn test_address_rebind_grace_blocks_replay_redirect() {
         .await
         .unwrap();
     let listener = service_on(9000).await;
-    let addr_listener = listener.local_addr().unwrap();
+    let addr_listener = loopback(listener.local_addr().unwrap());
     let t = unix_time();
 
     // First sighting: address recorded.
@@ -302,7 +314,7 @@ async fn test_spawn_loop_announces_and_merges_into_shared_table() {
     )
     .await
     .unwrap();
-    let addr_announcer = announcer.local_addr().unwrap();
+    let addr_announcer = loopback(announcer.local_addr().unwrap());
     let handle = announcer.spawn();
 
     let b = service_on(8124).await;
