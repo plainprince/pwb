@@ -35,6 +35,13 @@ const UNTITLED_PENALTY: f32 = 0.7;
 /// a spam run cannot make the results page arbitrarily expensive to render.
 pub const MAX_RESULTS: usize = 50;
 
+/// SimHash distances for folding near-duplicate pages. Short excerpts are
+/// noisy, so the body threshold is deliberately looser than an exact match;
+/// the title must also agree, which keeps unrelated pages with shared
+/// boilerplate apart.
+const NEAR_DUPLICATE_BODY_DISTANCE: u32 = 10;
+const NEAR_DUPLICATE_TITLE_DISTANCE: u32 = 20;
+
 /// Longest document excerpt kept per content id, in characters. Snippets are
 /// attacker-controlled on the remote path and travel on every shard response,
 /// so they are capped where they enter the index.
@@ -654,19 +661,93 @@ pub fn aggregate(
             .then_with(|| a.content_id.to_hex().cmp(&b.content_id.to_hex()))
     });
 
-    // Fold exact clones (same normalized title *and* excerpt) into the first,
-    // best-ranked copy. A document without an excerpt cannot be identified as
-    // a clone, so it keeps its own slot.
-    let mut seen: HashSet<(String, String)> = HashSet::new();
+    // Fold copies into the first, best-ranked result. Exact normalized
+    // title/excerpt clones are always folded; longer excerpts are also
+    // clustered by SimHash so a spam run cannot occupy the results page with
+    // near-identical pages. A document without an excerpt cannot be identified
+    // as a clone, so it keeps its own slot.
+    let mut seen_exact: HashSet<(String, String)> = HashSet::new();
+    let mut kept_fingerprints: Vec<((u64, u64), String)> = Vec::new();
     scored.retain(|result| {
         let snippet = result.snippet.trim().to_lowercase();
         if snippet.is_empty() {
             return true;
         }
-        seen.insert((result.title.trim().to_lowercase(), snippet))
+        let title = result.title.trim().to_lowercase();
+        if !seen_exact.insert((title.clone(), snippet.clone())) {
+            return false;
+        }
+        let fingerprint = (
+            simhash(&fingerprint_tokens(&result.snippet)),
+            simhash(&fingerprint_tokens(&result.title)),
+        );
+        if kept_fingerprints.iter().any(|(other, other_snippet)| {
+            near_duplicate(&result.snippet, fingerprint, other_snippet, *other)
+        }) {
+            return false;
+        }
+        kept_fingerprints.push((fingerprint, result.snippet.trim().to_string()));
+        true
     });
     scored.truncate(MAX_RESULTS);
     scored
+}
+
+/// Normalize text into lowercase alphanumeric tokens for near-duplicate
+/// fingerprinting. The cap bounds work on a hostile remote excerpt.
+fn fingerprint_tokens(text: &str) -> Vec<String> {
+    text.split(|c: char| !c.is_alphanumeric())
+        .filter(|token| !token.is_empty())
+        .take(256)
+        .map(|token| token.to_lowercase())
+        .collect()
+}
+
+/// 64-bit SimHash over a token list. SimHash keeps the result order-stable
+/// and changes only a few bits when a copied page edits a word or two, which
+/// is what makes it useful for near-duplicate spam without another index.
+fn simhash(tokens: &[String]) -> u64 {
+    let mut buckets = [0i32; 64];
+    for token in tokens {
+        let digest = ContentId::compute(token.as_bytes()).0;
+        let mut hash = [0u8; 8];
+        hash.copy_from_slice(&digest[..8]);
+        let hash = u64::from_le_bytes(hash);
+        for (bit, bucket) in buckets.iter_mut().enumerate() {
+            *bucket += if (hash >> bit) & 1 == 1 { 1 } else { -1 };
+        }
+    }
+    let mut fingerprint = 0u64;
+    for (bit, bucket) in buckets.iter().enumerate() {
+        if *bucket > 0 {
+            fingerprint |= 1 << bit;
+        }
+    }
+    fingerprint
+}
+
+/// Whether two results are near-duplicate copies of the same page. Both a
+/// body and a title fingerprint must agree: two independent pages that share
+/// boilerplate but have different titles keep their own slots, while a spam
+/// farm that copies a body and only tweaks a word or two is folded into the
+/// best-ranked copy. Short excerpts are left alone because a 64-bit SimHash
+/// is not meaningful for a handful of words; exact clones are still caught by
+/// the caller's normalized-title/excerpt set.
+fn near_duplicate(
+    left_snippet: &str,
+    left_fingerprint: (u64, u64),
+    right_snippet: &str,
+    right_fingerprint: (u64, u64),
+) -> bool {
+    if fingerprint_tokens(left_snippet).len() < 6 || fingerprint_tokens(right_snippet).len() < 6 {
+        return false;
+    }
+    let body_distance = (left_fingerprint.0 ^ right_fingerprint.0).count_ones();
+    if body_distance > NEAR_DUPLICATE_BODY_DISTANCE {
+        return false;
+    }
+    let title_distance = (left_fingerprint.1 ^ right_fingerprint.1).count_ones();
+    title_distance <= NEAR_DUPLICATE_TITLE_DISTANCE
 }
 
 /// Whether `title` contains `term` as a whole, case-insensitive word.
@@ -728,6 +809,7 @@ mod tests {
             version: pwb_core::wire::CURRENT_VERSION,
             title: "Doc".into(),
             author_pubkey: None,
+            author_signature: None,
             root_node: root,
             script_payload: None,
             components: HashMap::new(),
@@ -909,6 +991,75 @@ mod tests {
         snippets.insert(clone, "same copied body text".to_string());
         let results = aggregate(postings, &snippets);
         assert_eq!(results.len(), 1, "one content clone owns one result slot");
+    }
+
+    #[test]
+    fn test_aggregate_collapses_near_duplicate_copies() {
+        let original = ContentId([0x43; 32]);
+        let near_clone = ContentId([0x44; 32]);
+        let postings = vec![
+            PostingWire {
+                term: "spam".into(),
+                content_id: original,
+                title: "Cheap pills online".into(),
+                term_frequency: 2,
+            },
+            PostingWire {
+                term: "spam".into(),
+                content_id: near_clone,
+                title: "Cheap pills online now".into(),
+                term_frequency: 1,
+            },
+        ];
+        let mut snippets = HashMap::new();
+        snippets.insert(
+            original,
+            "Buy the best cheap pills today with free shipping and no prescription needed"
+                .to_string(),
+        );
+        snippets.insert(
+            near_clone,
+            "Buy the best cheap pills today with free shipping and no prescription required"
+                .to_string(),
+        );
+        let results = aggregate(postings, &snippets);
+        assert_eq!(
+            results.len(),
+            1,
+            "a near-identical copy does not get a slot"
+        );
+        assert_eq!(results[0].content_id, original, "the best-ranked copy wins");
+    }
+
+    #[test]
+    fn test_aggregate_keeps_distinct_pages_with_similar_boilerplate() {
+        let alpha = ContentId([0x45; 32]);
+        let beta = ContentId([0x46; 32]);
+        let postings = vec![
+            PostingWire {
+                term: "rust".into(),
+                content_id: alpha,
+                title: "Ownership and borrowing".into(),
+                term_frequency: 1,
+            },
+            PostingWire {
+                term: "rust".into(),
+                content_id: beta,
+                title: "Async runtimes compared".into(),
+                term_frequency: 1,
+            },
+        ];
+        let mut snippets = HashMap::new();
+        snippets.insert(
+            alpha,
+            "This site uses cookies to improve your experience. Ownership moves values and borrowing checks references.".to_string(),
+        );
+        snippets.insert(
+            beta,
+            "This site uses cookies to improve your experience. Async runtimes schedule futures on executor threads.".to_string(),
+        );
+        let results = aggregate(postings, &snippets);
+        assert_eq!(results.len(), 2, "different titles keep both results");
     }
 
     #[test]

@@ -114,6 +114,7 @@ mod tests {
             version: pwb_core::wire::CURRENT_VERSION,
             title: "Doc".into(),
             author_pubkey: None,
+            author_signature: None,
             root_node: root,
             script_payload: None,
             components: HashMap::new(),

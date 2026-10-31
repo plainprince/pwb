@@ -1778,12 +1778,16 @@ async fn main() {
     if let Some(query) = private_search_query {
         run_daemon = false;
         println!("\n[Search] Private (onion) query for '{}'…", query);
-        match federation.query_private(&query).await {
+        match federation.query_private_report(&query).await {
             Err(e) => {
                 eprintln!("[Search] {e}");
                 action_failed = true;
             }
-            Ok(results) => {
+            Ok(report) => {
+                let partial = report.partial();
+                let answered = report.shards_answered;
+                let expected = report.shards_expected;
+                let results = report.results;
                 if results.is_empty() {
                     println!("  No results from the sharded index.");
                 }
@@ -1796,6 +1800,11 @@ async fn main() {
                         result.rank_score
                     );
                 }
+                if partial {
+                    println!(
+                        "  [Partial] {answered}/{expected} shards answered; results may be incomplete."
+                    );
+                }
             }
         }
     }
@@ -1806,7 +1815,11 @@ async fn main() {
     if let Some(query) = search_query {
         run_daemon = false;
         println!("\n[Search] Querying the swarm for '{}'…", query);
-        let results = federation.query(&query).await;
+        let report = federation.query_report(&query).await;
+        let partial = report.partial();
+        let answered = report.shards_answered;
+        let expected = report.shards_expected;
+        let results = report.results;
         if results.is_empty() {
             println!("  No results from shards.");
         } else {
@@ -1828,6 +1841,11 @@ async fn main() {
                 ),
                 None => println!("[Fetch] No artifact response for {}", top.content_id),
             }
+        }
+        if partial {
+            println!(
+                "  [Partial] {answered}/{expected} shards answered; results may be incomplete."
+            );
         }
     }
 

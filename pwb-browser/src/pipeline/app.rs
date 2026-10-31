@@ -1,6 +1,6 @@
 //! Browser application state and the winit event handler.
 
-use super::devtools::{refresh_devtools, DevToolsState};
+use super::devtools::{mount_devtools, refresh_devtools, DevToolsState};
 use super::dom::{
     ancestor_node_ids, compute_selected_text, element_node_id, find_node_by_id,
     find_node_with_attr, hovered_title, node_id_attr, node_in_subtree, TOOLTIP_DELAY,
@@ -9,7 +9,8 @@ use super::resize::{resize_bounds, resize_new_dimensions, ResizeDrag};
 use crate::context_menu;
 use crate::dom::Dom;
 use crate::js_runtime::{
-    execute_event_handler, execute_event_handler_typed, execute_script, log_console, DomHandle,
+    execute_event_handler, execute_event_handler_typed, execute_script, log_console,
+    reset_js_context, DomHandle,
 };
 use crate::layout::{
     build_layout_tree, caret_index_at_x, find_box_by_id, hit_test_resize_handle,
@@ -37,7 +38,7 @@ use pwb_node::privacy::PrivacyMode;
 use pwb_node::room::RoomService;
 use pwb_node::search::SearchEngine;
 use pwb_node::system::{
-    render_message_bundle, render_search_pending_bundle, render_search_results_bundle,
+    render_message_bundle, render_search_pending_bundle, render_search_results_bundle_with_status,
     NetworkSnapshot,
 };
 use std::num::NonZeroU32;
@@ -75,6 +76,9 @@ pub struct BrowserApp {
     pub(super) swallow_click: bool,
     pub(super) devtools_root_id: Option<usize>,
     pub(super) devtools_mounted: bool,
+    /// The compiled devtools bundle, kept so the panel can be re-mounted (and
+    /// its script re-run) after a navigation creates a fresh JS context.
+    pub(super) devtools_bundle: Option<pwb_core::wire::Bundle>,
     pub(super) dump_png_path: Option<String>,
     pub(super) scroll_y: f32,
     /// Per-element vertical scroll offsets for `overflow: scroll/auto` boxes,
@@ -320,8 +324,9 @@ impl BrowserApp {
                 Some((domain, cid)) => self.domain.claim_and_render(&self.host, &domain, &cid),
                 None => self.domain.render_view(&self.host, None, None),
             };
-            if !self.install_bundle(&bytes) {
-                return false;
+            if let Err(error) = self.install_bundle(&bytes) {
+                self.show_error_page("cannot open page", &error);
+                return true;
             }
             println!("[Browser] Navigated to {}", url);
             return true;
@@ -374,8 +379,9 @@ impl BrowserApp {
             self.federation.index_and_publish(&bytes);
         }
 
-        if !self.install_bundle(&bytes) {
-            return false;
+        if let Err(error) = self.install_bundle(&bytes) {
+            self.show_error_page("cannot open page", &error);
+            return true;
         }
         println!("[Browser] Navigated to {}", url);
         true
@@ -433,7 +439,9 @@ impl BrowserApp {
                     "bookmarks"
                 };
                 let bytes = shell::list_page(&self.shell, kind);
-                self.install_bundle(&bytes);
+                if let Err(error) = self.install_bundle(&bytes) {
+                    self.show_error_page("cannot open page", &error);
+                }
                 return;
             }
             _ => {}
@@ -458,7 +466,9 @@ impl BrowserApp {
             &format!("PlainWeb could not resolve '{url}'."),
         )
         .serialize();
-        self.install_bundle(&bytes);
+        if let Err(error) = self.install_bundle(&bytes) {
+            eprintln!("[Browser] Could not render the fallback page: {error}");
+        }
     }
 
     /// Execute a chrome button click. Returns `false` for actions this shell
@@ -669,16 +679,21 @@ impl BrowserApp {
 
     /// Install already-resolved `.pwb` bundle bytes as the live DOM: replace the
     /// DOM handle, set the storage path, re-run the page script, and update the
-    /// window title. Returns `true` on success.
-    pub(super) fn install_bundle(&mut self, bytes: &[u8]) -> bool {
+    /// window title. Returns the decode error when the artifact is malformed or
+    /// its author signature is invalid, so the caller can render a readable page.
+    pub(super) fn install_bundle(&mut self, bytes: &[u8]) -> Result<(), String> {
         self.inline_menu = None;
-        let bundle = match pwb_core::wire::Bundle::deserialize(bytes) {
-            Ok(b) => b,
-            Err(e) => {
-                eprintln!("[Browser] Failed to deserialize bundle: {:?}", e);
-                return false;
-            }
-        };
+        let bundle = pwb_core::wire::Bundle::deserialize(bytes).map_err(|e| {
+            eprintln!("[Browser] Failed to deserialize bundle: {e}");
+            e.to_string()
+        })?;
+
+        // A top-level navigation is a new page. Drop the previous page's
+        // globals, handlers, timers, fetch callbacks, and detached nodes before
+        // installing the new tree; node ids are reused across bundles, so
+        // keeping them would let one page run code against the next page.
+        self.dom_handle_render.reset_page_state();
+        reset_js_context();
 
         // Replace the DOM in place (the JS context shares this DomHandle, so
         // it will see the new tree on the next script call), then mount the
@@ -688,6 +703,17 @@ impl BrowserApp {
         let mut new_dom = Dom::from_bundle(&bundle);
         shell::install_chrome(&mut new_dom, &self.shell);
         *self.dom_handle_render.dom.borrow_mut() = new_dom;
+
+        // Re-mount devtools in the fresh context. The panel is browser chrome,
+        // not page state: it keeps its open/closed setting across navigation.
+        if let Some(devtools_bundle) = self.devtools_bundle.clone() {
+            let open = self.devtools_state.lock().unwrap().is_open;
+            self.devtools_root_id = mount_devtools(&self.dom_handle_render, &devtools_bundle, open);
+            self.devtools_mounted = self.devtools_root_id.is_some();
+        } else {
+            self.devtools_root_id = None;
+            self.devtools_mounted = false;
+        }
 
         // Set localStorage path for the new bundle.
         {
@@ -720,7 +746,17 @@ impl BrowserApp {
                 self.shell.connection_label()
             ));
         }
-        true
+        Ok(())
+    }
+
+    /// Render a readable local error page. The page is a normal unsigned
+    /// bundle, so it goes through the same install path (fresh JS context,
+    /// chrome, devtools) instead of leaving the previous page on screen.
+    pub(super) fn show_error_page(&mut self, title: &str, message: &str) {
+        let bytes = render_message_bundle(title, message).serialize();
+        if let Err(error) = self.install_bundle(&bytes) {
+            eprintln!("[Browser] Could not render the error page: {error}");
+        }
     }
 
     /// Start a federated, swarm-wide search: show a transient "searching" page
@@ -731,7 +767,9 @@ impl BrowserApp {
     pub(super) fn start_federated_search(&mut self, query: &str) {
         if self.window.is_some() {
             let pending = render_search_pending_bundle(query).serialize();
-            self.install_bundle(&pending);
+            if let Err(error) = self.install_bundle(&pending) {
+                self.show_error_page("search unavailable", &error);
+            }
         }
 
         let (tx, rx) = std::sync::mpsc::channel();
@@ -750,13 +788,18 @@ impl BrowserApp {
         );
         self.runtime.spawn(async move {
             let bytes = match privacy {
-                PrivacyMode::Onion => match federation.query_private(&query).await {
-                    Ok(results) => {
+                PrivacyMode::Onion => match federation.query_private_report(&query).await {
+                    Ok(report) => {
+                        let partial = report.partial();
+                        let answered = report.shards_answered;
+                        let expected = report.shards_expected;
+                        let results = report.results;
                         println!(
-                            "[Search] Merged {} result(s) through onion circuits.",
+                            "[Search] Merged {} result(s) through onion circuits ({answered}/{expected} shards answered).",
                             results.len()
                         );
-                        render_search_results_bundle(&query, &results).serialize()
+                        render_search_results_bundle_with_status(&query, &results, partial)
+                            .serialize()
                     }
                     Err(error) => render_message_bundle(
                         "private search unavailable",
@@ -767,15 +810,19 @@ impl BrowserApp {
                     .serialize(),
                 },
                 PrivacyMode::Direct => {
-                    let results = federation.query(&query).await;
+                    let report = federation.query_report(&query).await;
+                    let partial = report.partial();
+                    let answered = report.shards_answered;
+                    let expected = report.shards_expected;
+                    let results = report.results;
                     for result in results.iter().take(SEARCH_PREFETCH) {
                         let _ = federation.fetch(&result.content_id).await;
                     }
                     println!(
-                        "[Search] Merged {} result(s) from the sharded index.",
+                        "[Search] Merged {} result(s) from the sharded index ({answered}/{expected} shards answered).",
                         results.len()
                     );
-                    render_search_results_bundle(&query, &results).serialize()
+                    render_search_results_bundle_with_status(&query, &results, partial).serialize()
                 }
             };
             let _ = tx.send((format!("search.plain?q={query}"), bytes));
@@ -985,7 +1032,9 @@ impl ApplicationHandler for BrowserApp {
                     // history and the address bar reflect what is on screen.
                     self.shell.navigate(&url);
                     if self.window.is_some() {
-                        self.install_bundle(&bytes);
+                        if let Err(error) = self.install_bundle(&bytes) {
+                            self.show_error_page("page unavailable", &error);
+                        }
                     } else {
                         self.refresh_chrome();
                     }

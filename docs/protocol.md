@@ -23,6 +23,18 @@ hostile artifact fails instead of inflating without limit. Legacy uncompressed
 `PWB1` artifacts are accepted for backwards compatibility. Content IDs are
 computed over the artifact bytes as stored (the `PWBZ` container when compressed).
 
+### Author signatures
+
+The uncompressed `PWB1` body may end with exactly 64 Ed25519 signature bytes
+after the script-module map. The optional header `author_pubkey` names the
+signer; an artifact that names an author must carry a valid signature. The
+signed payload is the canonical bundle serialized with the signature removed
+and prefixed with the ASCII domain tag `PWB-AUTHOR-V1\0`. Unsigned bundles keep
+the old byte layout exactly; a signed bundle is rejected by older readers as
+trailing data rather than being accepted without authenticity. Verification
+happens in `Bundle::deserialize`, so every consumer (browser, node host, CLI,
+indexer) enforces it, not just the UI that happens to display the title.
+
 ---
 
 ## 1. Onion routing layer (`pwb-core::onion`)
@@ -138,7 +150,9 @@ attributed to a peer are therefore signed separately and verified on receipt:
   `shard_query_sign_message(term, query_id, sender, challenge)` (prefix
   `PWBSHARDQ1`). The serving node verifies it before recording the challenge
   nonce, so a server cannot manufacture a challenge for itself and then mint
-  against it. The challenged nonce is TTL-bound and claim-once.
+  against it. The challenge is TTL-bound and claim-once; a claimed nonce stays
+  closed for its TTL, so the requester's one retry can receive a second signed
+  response without letting the responder mint twice.
 - `StorePosting` — publisher signature over `posting_sign_message(posting, publisher)`;
   unsigned or wrongly signed postings are never indexed.
 - `ShardResponse` — responder signature over
@@ -469,6 +483,12 @@ signature is unchanged, so a peer that predates excerpts accepts the postings
 and ignores the optional fields; a new peer stores the excerpt only when its
 signature verifies. `ShardResponse` follows the same rule under
 `PWBSHARDSNIP1`.
+
+A requester waits up to 400 ms for shard responses and re-sends the same
+signed `ShardQuery` once at 150 ms to every responsible shard that has not
+answered. Duplicate responses are ignored by responder key. The requester
+exposes `shards_expected` / `shards_answered`; a missing shard leaves the
+result marked partial instead of being silently treated as an empty answer.
 
 ## 9. NAT traversal: hole punching and relay fallback (2026-10-22)
 

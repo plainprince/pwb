@@ -14,6 +14,7 @@
 - **Context menu**: Right-click selects "Copy" or "Inspect Element"; native AppKit menu on macOS, an in-window menu on Linux/Windows with a live hover highlight (click outside or press Escape to dismiss).
 - **PNG images**: `<image>`/`<img>` decodes PNGs (file paths, `file://`, or `data:image/png;base64,…`), caches them, and scales them to the layout box; unreadable sources show a placeholder.
 - **Native links**: Clicking `<link href="…">`/`<a href="…">` (or text inside it) follows the target through the normal navigation path, with no JavaScript required.
+- **Verified authorship & page isolation**: signed artifacts are verified on decode (a tampered or missing author signature is rejected with a readable error page), and every top-level navigation gets a fresh QuickJS context and DOM/async state so one page cannot leave globals or handlers behind. Unsigned bundles remain supported.
 
 ## Native system domains
 

@@ -8,7 +8,8 @@ use super::resize::{resize_bounds, resize_new_dimensions};
 use crate::dom::DomNode;
 use crate::js_runtime::DomHandle;
 use crate::layout::ResizeEdge;
-use pwb_core::spec::Tag;
+use pwb_core::crypto::Keypair;
+use pwb_core::spec::{PlainNode, Tag};
 use std::collections::HashMap;
 
 fn tn(id: usize, text: &str) -> DomNode {
@@ -394,9 +395,8 @@ fn test_find_title_for_node() {
 use super::app::BrowserApp;
 use super::{build_browser_app, PipelineError};
 use crate::shell::ChromeAction;
-use pwb_core::crypto::{ContentId, Keypair};
+use pwb_core::crypto::ContentId;
 use pwb_core::net::{NodeConfig, NodeEngine};
-use pwb_core::spec::PlainNode;
 use pwb_core::wire::{Bundle, CURRENT_VERSION};
 use pwb_node::domain::{DomainRegistry, DomainService};
 use pwb_node::federation::DistributedSearch;
@@ -420,6 +420,7 @@ fn page_bytes() -> Vec<u8> {
         version: CURRENT_VERSION,
         title: "Harness".to_string(),
         author_pubkey: None,
+        author_signature: None,
         root_node: root,
         script_payload: None,
         components: HashMap::new(),
@@ -551,8 +552,44 @@ fn build_browser_app_rejects_garbage_bytes() {
 }
 
 #[test]
+fn invalid_author_signature_renders_a_readable_error_page() {
+    let mut h = harness();
+    let mut bundle = pwb_web::bundle::create_bundle(
+        PlainNode::new(0, Tag::Document),
+        "signed page".to_string(),
+        None,
+        None,
+        HashMap::new(),
+        HashMap::new(),
+    );
+    bundle.sign_author(&Keypair::generate());
+    // Change the content after signing without re-signing: decode must fail.
+    bundle.title = "tampered page".to_string();
+    let bytes = bundle.serialize();
+
+    let error = h
+        .app
+        .install_bundle(&bytes)
+        .expect_err("tampered signature must be rejected");
+    assert!(
+        error.contains("author signature"),
+        "the error names the failed check: {error}"
+    );
+
+    h.app.show_error_page("cannot open page", &error);
+    let dom = h.app.dom_handle_render.dom.borrow();
+    assert_eq!(dom.title, "cannot open page");
+    assert!(has_chrome(&dom), "the error page still has browser chrome");
+}
+
+#[test]
 fn navigate_to_swaps_the_dom_for_each_native_page() {
     let mut h = harness();
+    h.app.dom_handle_render.event_registry.add_handler(
+        2,
+        "isolation-probe",
+        "this.setText('stale');".to_string(),
+    );
     for target in [
         "welcome.plain",
         "demo.plain",
@@ -565,6 +602,18 @@ fn navigate_to_swaps_the_dom_for_each_native_page() {
         let dom = h.app.dom_handle_render.dom.borrow();
         assert!(!dom.title.is_empty(), "{target} rendered a titled page");
         assert!(has_chrome(&dom), "chrome is reinstalled around {target}");
+        assert!(
+            h.app.devtools_root_id.is_some(),
+            "devtools is re-mounted after the page context is reset"
+        );
+        assert!(
+            h.app
+                .dom_handle_render
+                .event_registry
+                .get_handlers(2, "isolation-probe")
+                .is_empty(),
+            "a handler from the previous page does not survive navigation"
+        );
     }
 
     // A target that resolves nowhere returns false so the caller can fall

@@ -21,7 +21,8 @@ use pwb_node::identity::IdentityManager;
 use pwb_node::join;
 use pwb_node::search::SearchEngine;
 use pwb_node::system::{
-    render_message_bundle, render_search_results_bundle, NetworkSnapshot, SystemDomainHandler,
+    render_message_bundle, render_search_results_bundle_with_status, NetworkSnapshot,
+    SystemDomainHandler,
 };
 use std::env;
 use std::net::SocketAddr;
@@ -645,32 +646,43 @@ async fn main() {
             }
         );
         match privacy {
-            pwb_node::privacy::PrivacyMode::Onion => match federation.query_private(&query).await {
-                Ok(results) => {
-                    println!(
-                        "[Search] Merged {} result(s) through onion circuits.",
-                        results.len()
-                    );
-                    render_search_results_bundle(&query, &results).serialize()
+            pwb_node::privacy::PrivacyMode::Onion => {
+                match federation.query_private_report(&query).await {
+                    Ok(report) => {
+                        let partial = report.partial();
+                        let answered = report.shards_answered;
+                        let expected = report.shards_expected;
+                        let results = report.results;
+                        println!(
+                            "[Search] Merged {} result(s) through onion circuits ({answered}/{expected} shards answered).",
+                            results.len()
+                        );
+                        render_search_results_bundle_with_status(&query, &results, partial)
+                            .serialize()
+                    }
+                    Err(error) => render_message_bundle(
+                        "private search unavailable",
+                        &format!(
+                            "Could not search anonymously: {error}. The browser will not fall back to direct traffic; join more peers or pass --direct to accept revealing your address."
+                        ),
+                    )
+                    .serialize(),
                 }
-                Err(error) => render_message_bundle(
-                    "private search unavailable",
-                    &format!(
-                        "Could not search anonymously: {error}. The browser will not fall back to direct traffic; join more peers or pass --direct to accept revealing your address."
-                    ),
-                )
-                .serialize(),
-            },
+            }
             pwb_node::privacy::PrivacyMode::Direct => {
-                let results = federation.query(&query).await;
+                let report = federation.query_report(&query).await;
+                let partial = report.partial();
+                let answered = report.shards_answered;
+                let expected = report.shards_expected;
+                let results = report.results;
                 for result in results.iter().take(PREFETCH_RESULTS) {
                     let _ = federation.fetch(&result.content_id).await;
                 }
                 println!(
-                    "[Search] Merged {} result(s) from the sharded index.",
+                    "[Search] Merged {} result(s) from the sharded index ({answered}/{expected} shards answered).",
                     results.len()
                 );
-                render_search_results_bundle(&query, &results).serialize()
+                render_search_results_bundle_with_status(&query, &results, partial).serialize()
             }
         }
     } else if is_register_target(&target) {

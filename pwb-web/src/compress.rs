@@ -40,6 +40,7 @@ mod tests {
             version: CURRENT_VERSION,
             title: "sample".to_string(),
             author_pubkey: None,
+            author_signature: None,
             root_node: root,
             script_payload: None,
             components: HashMap::new(),

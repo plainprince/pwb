@@ -27,4 +27,7 @@ pub use crate::room::RoomSnapshot;
 pub use handler::{NetworkSnapshot, SystemDomainHandler};
 pub use network_page::{render_help_page_bundle, render_network_page_bundle};
 pub use registry_page::{render_message_bundle, render_register_page_bundle};
-pub use search_page::{render_search_pending_bundle, render_search_results_bundle};
+pub use search_page::{
+    render_search_pending_bundle, render_search_results_bundle,
+    render_search_results_bundle_with_status,
+};

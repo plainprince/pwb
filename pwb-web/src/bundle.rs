@@ -5,6 +5,10 @@ use pwb_core::wire::{Bundle, CURRENT_VERSION};
 
 /// Create a `Bundle` from an AST root node, title, optional author public key,
 /// script payload, component registry, and named script-module map.
+///
+/// Passing `Some(author_pubkey)` is only half of authorship: call
+/// [`Bundle::sign_author`] before serializing, or `Bundle::deserialize` will
+/// reject the artifact because the named author has no valid signature.
 #[allow(clippy::too_many_arguments)]
 pub fn create_bundle(
     root: PlainNode,
@@ -18,6 +22,7 @@ pub fn create_bundle(
         version: CURRENT_VERSION,
         title,
         author_pubkey,
+        author_signature: None,
         root_node: root,
         script_payload,
         components,

@@ -22,7 +22,7 @@
 //! `subscribe()` + `send_to_addr()`. Both the browser's embedded node and the
 //! full `pwb-node` instantiate it.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::net::SocketAddr;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
@@ -53,6 +53,12 @@ pub const SHARD_REPLICATION: usize = 3;
 
 /// How long a query waits for shard responses before ranking what arrived.
 pub const QUERY_TIMEOUT: Duration = Duration::from_millis(400);
+
+/// When the first attempt has not been answered, re-send the same signed
+/// query once to the silent shards. The retry stays inside [`QUERY_TIMEOUT`]
+/// and is safe against double-minting because the serving node keeps a
+/// claimed challenge closed for its full TTL.
+const QUERY_RETRY_DELAY: Duration = Duration::from_millis(150);
 
 /// How long an artifact fetch waits for any peer to answer.
 pub const FETCH_TIMEOUT: Duration = Duration::from_millis(600);
@@ -112,6 +118,36 @@ impl From<&QueryReceipt> for QueryReceiptWire {
             signature: receipt.signature,
         }
     }
+}
+
+/// One query's merged results plus how much of the shard set answered. A
+/// partial report is still usable; callers should show the gap instead of
+/// presenting a timed-out response as complete.
+#[derive(Debug, Clone, Default)]
+pub struct SearchReport {
+    pub results: Vec<SearchResult>,
+    pub receipts: Vec<QueryReceiptWire>,
+    /// Remote term shards this query asked (local postings are not counted).
+    pub shards_expected: usize,
+    /// Remote shards that returned a valid signed response.
+    pub shards_answered: usize,
+}
+
+impl SearchReport {
+    /// Whether some requested shards never answered with a valid response.
+    pub fn partial(&self) -> bool {
+        self.shards_answered < self.shards_expected
+    }
+}
+
+/// Internal per-term result, including the shard counts used by
+/// [`SearchReport`].
+#[derive(Default)]
+struct TermOutcome {
+    postings: Vec<PostingWire>,
+    receipts: Vec<QueryReceiptWire>,
+    expected: usize,
+    answered: usize,
 }
 
 /// A node's federated search service: local index + shard routing + service
@@ -649,47 +685,65 @@ impl DistributedSearch {
     /// Federated search: tokenize the query, consult every term's shard, and
     /// merge the postings into a ranked result list.
     pub async fn query(&self, query: &str) -> Vec<SearchResult> {
-        self.query_with_receipts(query).await.0
+        self.query_report(query).await.results
     }
 
-    /// Like [`Self::query`], but also returns the signed [`QueryReceiptWire`]s
-    /// the answering shard nodes sent, so a caller can verify that each result
-    /// came from a live round-trip (and audit peers' claimed work).
+    /// Like [`Self::query`], but also reports how many shards answered and the
+    /// signed [`QueryReceiptWire`]s the answering shard nodes sent, so a caller
+    /// can show a partial-result warning and audit peers' claimed work.
     pub async fn query_with_receipts(
         &self,
         query: &str,
     ) -> (Vec<SearchResult>, Vec<QueryReceiptWire>) {
+        let report = self.query_report(query).await;
+        (report.results, report.receipts)
+    }
+
+    /// Run a federated query and return both the ranked results and shard
+    /// coverage. Shards that stay silent are retried once inside the query
+    /// deadline; a response that never arrives leaves `partial()` true instead
+    /// of being silently presented as a complete result.
+    pub async fn query_report(&self, query: &str) -> SearchReport {
         let terms = search::tokenize(query);
         let mut postings = Vec::new();
         let mut receipts = Vec::new();
+        let mut shards_expected = 0;
+        let mut shards_answered = 0;
         for term in &terms {
-            let (term_postings, term_receipts) = self.query_term(term).await;
-            postings.extend(term_postings);
-            receipts.extend(term_receipts);
+            let outcome = self.query_term(term).await;
+            postings.extend(outcome.postings);
+            receipts.extend(outcome.receipts);
+            shards_expected += outcome.expected;
+            shards_answered += outcome.answered;
         }
         let snippets = self.index.snippets_snapshot();
-        (search::aggregate(postings, &snippets), receipts)
+        SearchReport {
+            results: search::aggregate(postings, &snippets),
+            receipts,
+            shards_expected,
+            shards_answered,
+        }
     }
 
     /// Gather a single term's postings (and service receipts) from the local
-    /// index and its responsible shards.
-    async fn query_term(&self, term: &str) -> (Vec<PostingWire>, Vec<QueryReceiptWire>) {
-        let mut postings = self.index.postings_wire(term);
-        let mut receipts = Vec::new();
+    /// index and its responsible shards. Silent shards get one retry at
+    /// [`QUERY_RETRY_DELAY`]; duplicates are ignored by responder key.
+    async fn query_term(&self, term: &str) -> TermOutcome {
+        let mut outcome = TermOutcome {
+            postings: self.index.postings_wire(term),
+            ..TermOutcome::default()
+        };
         let target = search::shard_id(term);
         let responsible = self.responsible_nodes(&target);
-        let responders: std::collections::HashSet<PublicKey> = responsible
-            .iter()
-            .map(|(public_key, _)| *public_key)
-            .collect();
-        let peers: Vec<SocketAddr> = responsible
+        let peers: Vec<(PublicKey, SocketAddr)> = responsible
             .into_iter()
             .filter(|(public_key, _)| *public_key != self.keypair.public)
-            .map(|(_, address)| address)
             .collect();
+        outcome.expected = peers.len();
         if peers.is_empty() {
-            return (postings, receipts);
+            return outcome;
         }
+        let peer_keys: HashSet<PublicKey> = peers.iter().map(|(key, _)| *key).collect();
 
         let query_id = self.next_query_id.fetch_add(1, Ordering::Relaxed);
         let mut challenge = [0u8; 32];
@@ -703,9 +757,9 @@ impl DistributedSearch {
         let sender_signature = self.keypair.sign(&shard_query_sign_message(
             term, query_id, &sender, &challenge,
         ));
-        for address in &peers {
+        let send_query = |address: SocketAddr| {
             let _ = self.engine.send_to_addr(
-                *address,
+                address,
                 NetworkMessage::ShardQuery {
                     term: term.to_string(),
                     query_id,
@@ -714,12 +768,34 @@ impl DistributedSearch {
                     sender_signature,
                 },
             );
+        };
+        for (_, address) in &peers {
+            send_query(*address);
         }
 
         let deadline = tokio::time::Instant::now() + QUERY_TIMEOUT;
-        let mut received = 0usize;
-        while received < peers.len() {
-            match tokio::time::timeout_at(deadline, rx.recv()).await {
+        let retry_at = tokio::time::Instant::now() + QUERY_RETRY_DELAY;
+        let mut heard: HashSet<PublicKey> = HashSet::new();
+        let mut answered: HashSet<PublicKey> = HashSet::new();
+        let mut retried = false;
+        loop {
+            if heard.len() == outcome.expected || answered.len() == outcome.expected {
+                break;
+            }
+            let now = tokio::time::Instant::now();
+            if !retried && now >= retry_at {
+                retried = true;
+                for (key, address) in &peers {
+                    if !heard.contains(key) {
+                        send_query(*address);
+                    }
+                }
+            }
+            if now >= deadline {
+                break;
+            }
+            let wake = if retried { deadline } else { retry_at };
+            match tokio::time::timeout_at(wake, rx.recv()).await {
                 Ok(Some(NetworkMessage::ShardResponse {
                     query_id: response_id,
                     term: response_term,
@@ -730,15 +806,19 @@ impl DistributedSearch {
                     signature,
                     receipt,
                 })) => {
-                    received += 1;
-
                     // A shard response is only usable if it is bound to this
-                    // query, signed by a node responsible for the term, and
+                    // query, comes from a node responsible for the term, and
                     // its receipt (when present) matches the results.
                     if response_id != query_id
                         || response_term.to_lowercase() != *term
-                        || !responders.contains(&responder)
+                        || !peer_keys.contains(&responder)
                     {
+                        continue;
+                    }
+                    // A response from a responsible peer means a retry to it
+                    // is pointless even when the response is invalid.
+                    heard.insert(responder);
+                    if answered.contains(&responder) {
                         continue;
                     }
                     let message = shard_response_sign_message(
@@ -758,7 +838,7 @@ impl DistributedSearch {
                     // signed and that belong to a document in this response;
                     // an unsigned or foreign excerpt is ignored without
                     // discarding the postings.
-                    let named: std::collections::HashSet<ContentId> =
+                    let named: HashSet<ContentId> =
                         remote.iter().map(|posting| posting.content_id).collect();
                     let snippets_ok = if snippets.is_empty() {
                         true
@@ -779,7 +859,7 @@ impl DistributedSearch {
                         if !receipt_valid(receipt, term, &challenge, &responder, &remote) {
                             continue;
                         }
-                        receipts.push(receipt.clone());
+                        outcome.receipts.push(receipt.clone());
                     }
                     if snippets_ok {
                         self.index.record_snippets(
@@ -788,14 +868,23 @@ impl DistributedSearch {
                                 .map(|snippet| (snippet.content_id, snippet.snippet.as_str())),
                         );
                     }
-                    postings.extend(remote);
+                    answered.insert(responder);
+                    outcome.postings.extend(remote);
                 }
                 Ok(Some(_)) => {}
-                Ok(None) | Err(_) => break,
+                Ok(None) => break,
+                Err(_) => {
+                    // The retry is sent at the top of the next iteration; a
+                    // deadline timeout with no retry left ends the wait.
+                    if retried {
+                        break;
+                    }
+                }
             }
         }
+        outcome.answered = answered.len();
         self.pending_queries.lock().unwrap().remove(&query_id);
-        (postings, receipts)
+        outcome
     }
 
     /// Federated search over onion circuits: the local index contributes its
@@ -808,22 +897,40 @@ impl DistributedSearch {
     /// when at least one remote shard answered; missing shards simply contribute
     /// nothing.
     pub async fn query_private(&self, query: &str) -> Result<Vec<SearchResult>, PrivacyError> {
-        let terms = search::tokenize(query);
-        let mut postings = Vec::new();
-        for term in &terms {
-            let (term_postings, _) = self.query_term_private(term).await?;
-            postings.extend(term_postings);
-        }
-        let snippets = self.index.snippets_snapshot();
-        Ok(search::aggregate(postings, &snippets))
+        self.query_private_report(query)
+            .await
+            .map(|report| report.results)
     }
 
-    async fn query_term_private(
-        &self,
-        term: &str,
-    ) -> Result<(Vec<PostingWire>, Vec<QueryReceiptWire>), PrivacyError> {
-        let mut postings = self.index.postings_wire(term);
+    /// Like [`Self::query_private`], plus shard coverage for a partial-result
+    /// warning.
+    pub async fn query_private_report(&self, query: &str) -> Result<SearchReport, PrivacyError> {
+        let terms = search::tokenize(query);
+        let mut postings = Vec::new();
         let mut receipts = Vec::new();
+        let mut shards_expected = 0;
+        let mut shards_answered = 0;
+        for term in &terms {
+            let outcome = self.query_term_private(term).await?;
+            postings.extend(outcome.postings);
+            receipts.extend(outcome.receipts);
+            shards_expected += outcome.expected;
+            shards_answered += outcome.answered;
+        }
+        let snippets = self.index.snippets_snapshot();
+        Ok(SearchReport {
+            results: search::aggregate(postings, &snippets),
+            receipts,
+            shards_expected,
+            shards_answered,
+        })
+    }
+
+    async fn query_term_private(&self, term: &str) -> Result<TermOutcome, PrivacyError> {
+        let mut outcome = TermOutcome {
+            postings: self.index.postings_wire(term),
+            ..TermOutcome::default()
+        };
         let target = search::shard_id(term);
         let direct: std::collections::HashSet<PublicKey> =
             privacy::direct_peers(&self.engine).into_iter().collect();
@@ -833,8 +940,9 @@ impl DistributedSearch {
             .map(|(key, _)| key)
             .filter(|key| *key != self.keypair.public && direct.contains(key))
             .collect();
+        outcome.expected = responders.len();
         if responders.is_empty() {
-            return Ok((postings, receipts));
+            return Ok(outcome);
         }
 
         let query_id = self.next_query_id.fetch_add(1, Ordering::Relaxed);
@@ -950,11 +1058,12 @@ impl DistributedSearch {
                     .iter()
                     .map(|snippet| (snippet.content_id, snippet.snippet.as_str())),
             );
-            postings.extend(remote);
+            outcome.postings.extend(remote);
             if let Some(receipt) = receipt {
-                receipts.push(receipt);
+                outcome.receipts.push(receipt);
             }
         }
+        outcome.answered = answered;
         if answered == 0 && !responders.is_empty() {
             return Err(path_error.unwrap_or_else(|| {
                 PrivacyError::RequestFailed(format!(
@@ -963,7 +1072,7 @@ impl DistributedSearch {
                 ))
             }));
         }
-        Ok((postings, receipts))
+        Ok(outcome)
     }
 
     /// Retrieve a bundle by content id through independent onion circuits. Each

@@ -24,6 +24,7 @@ fn test_bundle(text: &str) -> Bundle {
         version: pwb_core::wire::CURRENT_VERSION,
         title: "PlainWeb Demo".to_string(),
         author_pubkey: None,
+        author_signature: None,
         root_node: root,
         script_payload: None,
         components: Map::new(),

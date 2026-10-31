@@ -45,7 +45,7 @@ impl CreditMinter {
         CreditMinter {
             owner,
             challenges: ChallengeLedger {
-                outstanding: HashMap::new(),
+                states: HashMap::new(),
                 ttl: policy.challenge_ttl,
             },
             policy,
@@ -123,7 +123,7 @@ impl CreditMinter {
             self.policy.query_credits,
             now,
         )?;
-        self.challenges.claim(&receipt.challenge);
+        self.challenges.claim(&receipt.challenge, now);
         Ok(amount)
     }
 

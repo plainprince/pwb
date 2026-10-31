@@ -52,6 +52,7 @@ fn bundle_bytes(title: &str, body: &str) -> Vec<u8> {
         version: CURRENT_VERSION,
         title: title.to_string(),
         author_pubkey: None,
+        author_signature: None,
         root_node: root,
         script_payload: None,
         components: HashMap::new(),
@@ -451,6 +452,121 @@ async fn test_unsigned_snippet_does_not_discard_valid_postings() {
 
 /// Shard responses must carry a signature from a node responsible for the
 /// term; a malicious peer's answer is ignored.
+#[tokio::test]
+async fn test_silent_shard_is_reported_as_partial_after_a_retry() {
+    let kp_a = Keypair::generate();
+    let kp_b = Keypair::generate();
+    let (engine_a, addr_a) = start_engine(kp_a.clone()).await;
+    let (engine_b, addr_b) = start_engine(kp_b.clone()).await;
+
+    // B knows A and treats it as the responsible shard, but A has no search
+    // service running, so it never answers.
+    let link_a = NodeEngine::build_connection_link(addr_a, kp_a.public);
+    let link_b = NodeEngine::build_connection_link(addr_b, kp_b.public);
+    engine_b.launch_connection(&link_a).expect("B connects");
+    engine_a.launch_connection(&link_b).expect("A connects");
+    tokio::time::sleep(Duration::from_millis(400)).await;
+
+    let report = service(engine_b.clone(), &kp_b)
+        .query_report("plainweb")
+        .await;
+    assert_eq!(report.shards_expected, 1, "A is the only remote shard");
+    assert_eq!(report.shards_answered, 0, "A never answered");
+    assert!(
+        report.partial(),
+        "a timed-out shard must be reported as partial"
+    );
+    assert!(report.results.is_empty());
+
+    engine_a.stop().await;
+    engine_b.stop().await;
+}
+
+#[tokio::test]
+async fn test_retry_recovers_a_silent_first_attempt() {
+    use pwb_core::crypto::ContentId;
+    use pwb_core::net::{shard_response_sign_message, PostingWire};
+
+    let kp_a = Keypair::generate();
+    let kp_b = Keypair::generate();
+    let (engine_a, addr_a) = start_engine(kp_a.clone()).await;
+    let (engine_b, addr_b) = start_engine(kp_b.clone()).await;
+
+    // A fake shard on A ignores the first query and answers the retry. This
+    // proves the requester actually retries inside its deadline, rather than
+    // just reporting the timeout. B's service loop routes the reply back to
+    // the waiting query.
+    let service_b = service(engine_b.clone(), &kp_b);
+    tokio::spawn(service_b.clone().run());
+    let mut inbound = engine_a.subscribe();
+    let responder_key = kp_a.clone();
+    let responder_engine = engine_a.clone();
+    tokio::spawn(async move {
+        let mut seen = 0usize;
+        while let Some((from, message)) = inbound.recv().await {
+            let NetworkMessage::ShardQuery {
+                term,
+                query_id,
+                challenge,
+                ..
+            } = message
+            else {
+                continue;
+            };
+            if term != "retryable" {
+                continue;
+            }
+            seen += 1;
+            if seen == 1 {
+                continue;
+            }
+            let posting = PostingWire {
+                term: term.clone(),
+                content_id: ContentId([0x71; 32]),
+                title: "Retried result".to_string(),
+                term_frequency: 1,
+            };
+            let responder = responder_key.public;
+            let signature = responder_key.sign(&shard_response_sign_message(
+                query_id,
+                &term,
+                std::slice::from_ref(&posting),
+                &challenge,
+                &responder,
+            ));
+            let _ = responder_engine.send_to_addr(
+                from,
+                NetworkMessage::ShardResponse {
+                    query_id,
+                    term,
+                    postings: vec![posting],
+                    snippets: Vec::new(),
+                    snippets_signature: None,
+                    responder,
+                    signature,
+                    receipt: None,
+                },
+            );
+        }
+    });
+
+    let link_a = NodeEngine::build_connection_link(addr_a, kp_a.public);
+    let link_b = NodeEngine::build_connection_link(addr_b, kp_b.public);
+    engine_b.launch_connection(&link_a).expect("B connects");
+    engine_a.launch_connection(&link_b).expect("A connects");
+    tokio::time::sleep(Duration::from_millis(400)).await;
+
+    let report = service_b.query_report("retryable").await;
+    assert_eq!(report.shards_expected, 1);
+    assert_eq!(report.shards_answered, 1, "the retry must be answered");
+    assert!(!report.partial());
+    assert_eq!(report.results.len(), 1);
+    assert_eq!(report.results[0].title, "Retried result");
+
+    engine_a.stop().await;
+    engine_b.stop().await;
+}
+
 #[tokio::test]
 async fn test_unauthenticated_shard_responses_are_ignored() {
     use pwb_core::net::{shard_response_sign_message, PostingWire};
