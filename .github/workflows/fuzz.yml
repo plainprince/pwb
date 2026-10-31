@@ -36,7 +36,12 @@ jobs:
         uses: dtolnay/rust-toolchain@nightly
 
       - name: Install cargo-fuzz
-        uses: taiki-e/install-action@cargo-fuzz
+        # Name the tool explicitly: the `@cargo-fuzz` ref form relies on a
+        # branch default that dependabot rewrites, which silently installed
+        # nothing ("no tool specified") and left `cargo fuzz` missing.
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-fuzz
 
       - name: Cache cargo registry
         uses: actions/cache@v4

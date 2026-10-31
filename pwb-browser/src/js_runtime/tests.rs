@@ -1275,9 +1275,20 @@ fn test_fetch_resolves_promise() {
 
 #[test]
 fn test_fetch_rejects_on_connection_error() {
-    // A port with nothing listening → the background thread errors → reject.
+    // A listener that accepts and hangs up without answering is a transport
+    // error everywhere. Connecting to a closed port is not: Unix refuses it
+    // instantly, while Windows can leave the SYN unanswered for seconds,
+    // which outlasts this test's pump loop and was red on the Windows job.
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = listener.local_addr().unwrap().port();
+    std::thread::spawn(move || {
+        while let Ok((stream, _)) = listener.accept() {
+            drop(stream);
+        }
+    });
+
     let handle = test_handle();
-    let url = "http://127.0.0.1:1/nothing";
+    let url = format!("http://127.0.0.1:{}/nothing", port);
     let script = format!(
             "fetch('{}').then(function(r) {{ __pwb_setText('#main-btn', 'resolved'); }}).catch(function(e) {{ __pwb_setText('#main-btn', 'rejected'); }});",
             url
