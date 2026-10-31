@@ -42,6 +42,10 @@ const RESULTS_STYLES: &str = r#"
     font-size: 15px;
     padding: 0;
 }
+.result-warning {
+    color: #f9e2af;
+    font-size: 14px;
+}
 "#;
 
 /// Neutralize angle brackets in text interpolated into PML. The parser has no
@@ -58,6 +62,17 @@ fn escape_pml_text(text: &str) -> String {
 /// resolves from its artifact host (filling it from peers on a miss).
 /// Navigation is native — no script payload is needed.
 pub fn render_search_results_bundle(query: &str, results: &[SearchResult]) -> Bundle {
+    render_search_results_bundle_with_status(query, results, false)
+}
+
+/// Like [`render_search_results_bundle`], but warns when some term shards did
+/// not answer. Results are still shown; the note prevents a timed-out query
+/// from looking complete.
+pub fn render_search_results_bundle_with_status(
+    query: &str,
+    results: &[SearchResult],
+    partial: bool,
+) -> Bundle {
     let query_text = escape_pml_text(query);
     let title = format!("search.plain — Results for \"{}\"", query_text);
     let mut pml_markup = format!(
@@ -73,6 +88,12 @@ pub fn render_search_results_bundle(query: &str, results: &[SearchResult]) -> Bu
         query_text,
         results.len()
     );
+
+    if partial {
+        pml_markup.push_str(
+            r##"<text class="result-warning">Some shards did not answer; these results may be incomplete.</text>"##,
+        );
+    }
 
     if results.is_empty() {
         pml_markup.push_str(

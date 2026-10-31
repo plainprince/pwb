@@ -37,7 +37,7 @@ use pwb_node::privacy::PrivacyMode;
 use pwb_node::room::RoomService;
 use pwb_node::search::SearchEngine;
 use pwb_node::system::{
-    render_message_bundle, render_search_pending_bundle, render_search_results_bundle,
+    render_message_bundle, render_search_pending_bundle, render_search_results_bundle_with_status,
     NetworkSnapshot,
 };
 use std::num::NonZeroU32;
@@ -750,13 +750,18 @@ impl BrowserApp {
         );
         self.runtime.spawn(async move {
             let bytes = match privacy {
-                PrivacyMode::Onion => match federation.query_private(&query).await {
-                    Ok(results) => {
+                PrivacyMode::Onion => match federation.query_private_report(&query).await {
+                    Ok(report) => {
+                        let partial = report.partial();
+                        let answered = report.shards_answered;
+                        let expected = report.shards_expected;
+                        let results = report.results;
                         println!(
-                            "[Search] Merged {} result(s) through onion circuits.",
+                            "[Search] Merged {} result(s) through onion circuits ({answered}/{expected} shards answered).",
                             results.len()
                         );
-                        render_search_results_bundle(&query, &results).serialize()
+                        render_search_results_bundle_with_status(&query, &results, partial)
+                            .serialize()
                     }
                     Err(error) => render_message_bundle(
                         "private search unavailable",
@@ -767,15 +772,19 @@ impl BrowserApp {
                     .serialize(),
                 },
                 PrivacyMode::Direct => {
-                    let results = federation.query(&query).await;
+                    let report = federation.query_report(&query).await;
+                    let partial = report.partial();
+                    let answered = report.shards_answered;
+                    let expected = report.shards_expected;
+                    let results = report.results;
                     for result in results.iter().take(SEARCH_PREFETCH) {
                         let _ = federation.fetch(&result.content_id).await;
                     }
                     println!(
-                        "[Search] Merged {} result(s) from the sharded index.",
+                        "[Search] Merged {} result(s) from the sharded index ({answered}/{expected} shards answered).",
                         results.len()
                     );
-                    render_search_results_bundle(&query, &results).serialize()
+                    render_search_results_bundle_with_status(&query, &results, partial).serialize()
                 }
             };
             let _ = tx.send((format!("search.plain?q={query}"), bytes));

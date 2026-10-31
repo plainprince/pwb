@@ -436,20 +436,33 @@ What is not production-ready:
   handoff when a node leaves, no anti-entropy.
 - *(Fixed 2026-10-31)* Ranking is IDF-weighted and sublinear in term
   frequency, with a title-match boost and an untitled-page penalty. Exact
-  title+snippet clones are collapsed into one result slot, and results are
-  capped at 50. The requester still has no link/author signal, freshness
-  model, or defense against near-duplicate spam.
+  title+snippet clones are folded into one result slot, and longer excerpts
+  are clustered by SimHash so near-identical copies (a spam farm editing a
+  word or two) also share one slot. Results are capped at 50. The requester
+  still has no link/author signal or trustworthy freshness model; those need
+  a signed link graph or publication-time protocol, not a local ranking tweak.
 - *(Fixed 2026-10-31)* Results carry a real bounded body excerpt instead of
   `Content ID: ...`. The excerpt is extracted at index time, persisted with
   the index, replicated to responsible shards in a separately signed optional
   field, returned in `ShardResponse` under its own signature, and rendered as
   inert text on `search.plain` (angle brackets are neutralized so a hostile
   page cannot inject markup into the local results page).
-- Fixed 400 ms query deadline, no retries, no indication of partial results.
-- Queries are sent in plaintext; no onion or end-to-end protection.
+- *(Fixed 2026-10-31)* The 400 ms query deadline now has one retry for silent
+  shards at 150 ms, and `query_report`/`query_private_report` expose
+  `shards_expected`/`shards_answered`. `search.plain` shows a warning when a
+  shard set is incomplete instead of presenting a timed-out query as whole.
+  Re-sent challenges are kept claimed for their TTL, so a retry cannot mint a
+  second credit from one requester round-trip.
+- Direct (non-onion) shard queries reveal the requester's address to the
+  responder. The browser routes search over onion circuits by default and
+  only uses direct mode behind the explicit `--direct` opt-out;
+  `pwb-node --private-search` does the same for the CLI.
 - `index_and_publish` now mints index credits against an `IndexReceipt` over the bundle bytes (fixed; kept here as part of the original audit).
-- No re-index verification: `SubmitIndexWork`/`VerifyProof` are never sent or
-  handled.
+- *(Fixed)* Re-index verification exists as `CheckIndexProof`:
+  `attestation::verify_index_proof` re-hashes the bundle bytes, re-derives the
+  canonical term hash, verifies the miner's signature, and records the
+  earning only on success. The legacy `SubmitIndexWork`/`VerifyProof`
+  variants remain unused; the live protocol is `CheckIndexProof`/`ProofVerdict`.
 
 ### `pwb-node::credit` / `ledger` / `blind` / `verifier`
 
@@ -457,12 +470,15 @@ The cryptography and accounting logic is genuine and heavily tested:
 mint policy, challenge TTL, relay hash chain, blind Schnorr issuance, voucher
 spend log, attestor ledgers, quorum certificates.
 
-The *system* is not: nothing is exchanged over the network, no peer verifies
-another peer's balance, no spend is gossiped, and the local balance is a
-mutable JSON field. `PeerVerifier` only checks that a miner signed a tuple; it
-does not re-index the bundle or challenge the claim, and the production demo
-passes it the wrong message. The blind/attested claim paths
-(`register_attested`, `register_blind`) are not reachable from `DomainService`.
+The historical audit snapshot above is now obsolete for this subsystem:
+balances are derived from the signed `credits.json` chain, `AttestBalance` /
+`BalanceAttest` collect neighborhood certificates over the wire, and
+`DomainService::claim_attested` / `claim_blind` are operator-facing paths
+(`--attested-claim`, `--blind-claim`). Remote index verification is
+`attestation::verify_index_proof` via `CheckIndexProof`, not the local
+`PeerVerifier` tuple check (which remains a unit-test helper). Residual gaps
+are the well-known anchor set and an independent security review, both
+operational/external rather than missing code.
 
 ### `pwb-node::domain`
 
@@ -645,3 +661,32 @@ with a public UDP port, publish the resulting signed `deploy/join.json` (or
 mirror it), and publish the signer/anchor keys through a channel independent of
 that host. Large-swarm validation, sybil resistance in an open network, and an
 independent security review are still open, as the sections above describe.
+
+## Status after the 2026-10-31 search pass
+
+Closed in code:
+
+- Near-duplicate result suppression: exact title/excerpt clones and longer
+  SimHash-clustered copies share one result slot.
+- One retry for silent term shards inside the 400 ms query deadline, plus
+  `SearchReport` shard coverage and a visible `search.plain` partial warning.
+- Re-sent challenges stay claimed for their TTL, so a retry can receive the
+  same signed result without minting a second query credit.
+- Re-index verification is documented against the live `CheckIndexProof` /
+  `ProofVerdict` path (the old `SubmitIndexWork`/`VerifyProof` variants are
+  dead protocol remnants, not a missing feature).
+
+Not closed by this pass, and not to be mistaken for done:
+
+- Search link/author and freshness signals need a signed link graph or a
+  trustworthy publication-time protocol; local heuristics would be gameable.
+- Browser downloads, per-page JS isolation/ESM, and consistent in-UI error
+  surfacing remain separate features.
+- Bundle author signatures, `bundle.toml`, the line-based
+  `strip_esm_syntax` limitation, a site-directory fuzz target, a CI coverage
+  threshold, distributed tracing, and the remaining async `unwrap`/`expect`
+  cleanup remain engineering work outside this search pass.
+- Seed/anchor publication, real multi-node topology and large-swarm
+  validation, open-network sybil economics, and an independent security
+  review are operator/design/external work, not code that a local checkout can
+  complete honestly.

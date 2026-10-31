@@ -23,34 +23,58 @@ impl TrafficMeter {
     }
 }
 
-/// Outstanding requester challenges (nonce → issue time).
+/// Outstanding and already-claimed requester challenges. Keeping claimed
+/// nonces for their TTL is what makes a re-sent `ShardQuery` safe: a retry can
+/// receive a second signed response without letting the responder mint twice
+/// from the same challenge.
 #[derive(Debug, Clone)]
 pub(super) struct ChallengeLedger {
-    pub(super) outstanding: HashMap<[u8; 32], Instant>,
+    pub(super) states: HashMap<[u8; 32], ChallengeState>,
     pub(super) ttl: Duration,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub(super) enum ChallengeState {
+    Open(Instant),
+    Claimed(Instant),
+}
+
+impl ChallengeState {
+    fn at(&self) -> Instant {
+        match self {
+            ChallengeState::Open(at) | ChallengeState::Claimed(at) => *at,
+        }
+    }
 }
 
 impl ChallengeLedger {
     pub(super) fn check(&self, nonce: &[u8; 32], now: Instant) -> Result<(), MintError> {
-        let issued = self
-            .outstanding
-            .get(nonce)
-            .ok_or(MintError::UnknownChallenge)?;
-        if now.saturating_duration_since(*issued) >= self.ttl {
-            return Err(MintError::ChallengeExpired);
+        match self.states.get(nonce) {
+            Some(ChallengeState::Open(issued)) => {
+                if now.saturating_duration_since(*issued) >= self.ttl {
+                    return Err(MintError::ChallengeExpired);
+                }
+                Ok(())
+            }
+            // A claimed nonce is deliberately indistinguishable from an
+            // unknown one: replaying the receipt must never mint again.
+            Some(ChallengeState::Claimed(_)) | None => Err(MintError::UnknownChallenge),
         }
-        Ok(())
     }
 
-    pub(super) fn claim(&mut self, nonce: &[u8; 32]) {
-        self.outstanding.remove(nonce);
+    pub(super) fn claim(&mut self, nonce: &[u8; 32], now: Instant) {
+        self.states.insert(*nonce, ChallengeState::Claimed(now));
     }
 
     pub(super) fn issue(&mut self, nonce: [u8; 32], now: Instant) {
         let ttl = self.ttl;
-        self.outstanding
-            .retain(|_, issued| now.saturating_duration_since(*issued) < ttl);
-        self.outstanding.insert(nonce, now);
+        self.states
+            .retain(|_, state| now.saturating_duration_since(state.at()) < ttl);
+        // Do not reopen a claimed challenge or extend an open one's TTL. A
+        // retry is allowed to ask again, but not to buy a fresh mint window.
+        self.states
+            .entry(nonce)
+            .or_insert(ChallengeState::Open(now));
     }
 }
 

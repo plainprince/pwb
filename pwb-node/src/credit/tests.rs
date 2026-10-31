@@ -66,6 +66,15 @@ fn test_query_mint_happy_path_and_replay_rejection() {
         minter.mint_query(&receipt, t0),
         Err(MintError::UnknownChallenge)
     );
+
+    // A retried query re-sends the same signed challenge. Re-recording it
+    // must not reopen the mint window: the responder may answer again, but it
+    // cannot mint a second time from one requester round-trip.
+    minter.record_challenge(challenge, t0 + Duration::from_secs(1));
+    assert_eq!(
+        minter.mint_query(&receipt, t0 + Duration::from_secs(1)),
+        Err(MintError::UnknownChallenge)
+    );
 }
 
 #[test]

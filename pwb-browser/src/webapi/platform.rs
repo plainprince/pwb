@@ -19,7 +19,7 @@ pub fn show_alert(msg: &str) {
 pub fn show_confirm(msg: &str) -> bool {
     #[cfg(target_os = "macos")]
     {
-        return macos::confirm(msg);
+        macos::confirm(msg)
     }
     #[cfg(not(target_os = "macos"))]
     match native::confirm(msg) {
@@ -34,7 +34,7 @@ pub fn show_confirm(msg: &str) -> bool {
 pub fn show_prompt(msg: &str, default_val: &str) -> Option<String> {
     #[cfg(target_os = "macos")]
     {
-        return macos::prompt(msg, default_val);
+        macos::prompt(msg, default_val)
     }
     #[cfg(not(target_os = "macos"))]
     match native::prompt(msg, default_val) {

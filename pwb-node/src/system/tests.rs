@@ -2,7 +2,7 @@ use super::*;
 use crate::domain::DomainRegistry;
 use crate::host::ArtifactHost;
 use crate::identity::IdentityManager;
-use crate::search::SearchEngine;
+use crate::search::{SearchEngine, SearchResult};
 use pwb_core::crypto::PublicKey;
 use pwb_core::net::NetworkMessage;
 
@@ -311,6 +311,42 @@ fn test_search_page_renders_result_cards_when_hits_exist() {
     assert!(
         page.script_payload.is_none(),
         "native links must not need a script payload"
+    );
+}
+
+#[test]
+fn test_search_page_reports_partial_shard_coverage() {
+    let results = vec![SearchResult {
+        content_id: pwb_core::crypto::ContentId([0x61; 32]),
+        title: "A result".into(),
+        rank_score: 1.0,
+        snippet: "A body excerpt".into(),
+    }];
+
+    fn collect_text(n: &pwb_core::spec::PlainNode, out: &mut String) {
+        if let Some(text) = &n.text_content {
+            out.push_str(text);
+            out.push('\n');
+        }
+        for child in &n.children {
+            collect_text(child, out);
+        }
+    }
+
+    let partial = render_search_results_bundle_with_status("query", &results, true);
+    let mut text = String::new();
+    collect_text(&partial.root_node, &mut text);
+    assert!(
+        text.contains("Some shards did not answer"),
+        "a partial result must say so, got {text:?}"
+    );
+
+    let complete = render_search_results_bundle_with_status("query", &results, false);
+    let mut text = String::new();
+    collect_text(&complete.root_node, &mut text);
+    assert!(
+        !text.contains("Some shards did not answer"),
+        "a complete result must not carry the warning"
     );
 }
 
