@@ -62,7 +62,14 @@ jobs:
       - name: Fuzz ${{ matrix.target }}
         working-directory: fuzz
         run: |
-          cargo +nightly fuzz run "${{ matrix.target }}" -- \
+          # cargo-fuzz builds fuzz targets for the triple cargo-fuzz itself was
+          # compiled for, and the prebuilt binary install-action downloads is a
+          # musl build: that silently becomes --target x86_64-unknown-linux-musl,
+          # which ASAN rejects ("sanitizer is incompatible with statically linked
+          # libc"). Pin the runner's own host triple so the harness links against
+          # a dynamic libc.
+          host_target=$(rustc +nightly -vV | sed -n 's/^host: //p')
+          cargo +nightly fuzz run "${{ matrix.target }}" --target "$host_target" -- \
             -max_total_time="$FUZZ_SECONDS" \
             -rss_limit_mb=2048 \
             -print_final_stats=1
