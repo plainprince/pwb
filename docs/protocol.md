@@ -143,9 +143,12 @@ attributed to a peer are therefore signed separately and verified on receipt:
   unsigned or wrongly signed postings are never indexed.
 - `ShardResponse` — responder signature over
   `shard_response_sign_message(query_id, term, postings, challenge, responder)`.
-  The requester also requires the responder to be a responsible node for the
-  term, and when a `QueryReceiptWire` is supplied it checks it against the
-  challenge, term, and result set.
+  Optional document excerpts travel beside the postings under a separate
+  `PWBSHARDSNIP1` signature, so a requester that predates snippets still
+  verifies the postings; a requester that understands them ignores an
+  unsigned or foreign excerpt. The requester also requires the responder to be
+  a responsible node for the term, and when a `QueryReceiptWire` is supplied
+  it checks it against the challenge, term, and result set.
 - `DomainRecordWire` / `ClaimDomain` — owner signature over the canonical claim,
   which includes `credits_spent` and `registered_at_epoch`. Registry-sync and
   domain-resolution responses reject unsigned or forged records. Claim epochs
@@ -458,6 +461,14 @@ instead of one `StorePosting` per term, so a large document cannot exhaust the
 per-peer token bucket (128 msg/s, 256 burst) and lose the tail of its index or
 the follow-up `CheckIndexProof`. `StorePosting` remains accepted for
 compatibility and single-term updates.
+
+Since 2026-10-31 a batch may also carry one bounded document excerpt (`snippet`)
+under a separate `PWBPOSTSNIP1` publisher signature over the batch's `(term,
+content id)` pairs, the excerpt, and the publisher key. The original postings
+signature is unchanged, so a peer that predates excerpts accepts the postings
+and ignores the optional fields; a new peer stores the excerpt only when its
+signature verifies. `ShardResponse` follows the same rule under
+`PWBSHARDSNIP1`.
 
 ## 9. NAT traversal: hole punching and relay fallback (2026-10-22)
 

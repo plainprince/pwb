@@ -1073,10 +1073,17 @@ fn payload_signature_valid(message: &NetworkMessage) -> bool {
             postings,
             publisher,
             signature,
-        } => signature.verify(
-            publisher,
-            &crate::net::postings_sign_message(postings, publisher),
-        ),
+            ..
+        } => {
+            // The postings signature is the original protocol and gates the
+            // message. The optional excerpt is verified by the handler (and
+            // ignored when its own signature is missing or invalid), so an
+            // old or malformed excerpt cannot make valid postings disappear.
+            signature.verify(
+                publisher,
+                &crate::net::postings_sign_message(postings, publisher),
+            )
+        }
         NetworkMessage::CheckIndexProof { proof, .. } => proof.signature.verify(
             &proof.miner,
             &crate::net::index_proof_sign_message(&proof.content_id, &proof.term_hash),

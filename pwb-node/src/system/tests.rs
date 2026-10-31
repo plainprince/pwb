@@ -96,7 +96,10 @@ fn test_handle_message_search_query_and_fetch_artifact() {
             assert_eq!(query, "quantum");
             assert!(!results.is_empty(), "indexed bundle must surface");
             assert_eq!(results[0].title, "Quantum Site");
-            assert!(results[0].snippet.contains("Content ID:"));
+            assert_eq!(
+                results[0].snippet, "quantum tunneling explained",
+                "results carry the body excerpt, not a raw content id"
+            );
         }
         other => panic!("expected SearchResponse, got {other:?}"),
     }
@@ -284,8 +287,86 @@ fn test_search_page_renders_result_cards_when_hits_exist() {
         label.contains("Searchable"),
         "result link is labelled with the hit's title, got {label:?}"
     );
+
+    fn collect_text(n: &pwb_core::spec::PlainNode, out: &mut String) {
+        if let Some(text) = &n.text_content {
+            out.push_str(text);
+            out.push('\n');
+        }
+        for child in &n.children {
+            collect_text(child, out);
+        }
+    }
+    let mut text = String::new();
+    collect_text(&page.root_node, &mut text);
+    assert!(
+        text.contains("decentralized search engine"),
+        "the card shows the indexed body excerpt, got {text:?}"
+    );
+    assert!(
+        !text.contains("Content ID:"),
+        "a raw content id is not a search snippet"
+    );
+
     assert!(
         page.script_payload.is_none(),
         "native links must not need a script payload"
+    );
+}
+
+#[test]
+fn test_search_page_neutralizes_markup_from_remote_results() {
+    let search = SearchEngine::new();
+    let host = ArtifactHost::new();
+    let registry = DomainRegistry::new();
+    let identity = IdentityManager::new();
+
+    // A remote page can choose a hostile title and body. Neither may become
+    // live markup on the local results page.
+    let mut root = pwb_core::spec::PlainNode::new(0, pwb_core::spec::Tag::Document);
+    let mut body = pwb_core::spec::PlainNode::new(1, pwb_core::spec::Tag::Text);
+    body.text_content = Some("click <link href=\"https://evil.example\">more</link>".into());
+    root.children.push(body);
+    let bundle = pwb_web::bundle::create_bundle(
+        root,
+        "<text>hostile</text>".to_string(),
+        None,
+        None,
+        std::collections::HashMap::new(),
+        std::collections::HashMap::new(),
+    );
+    let cid = pwb_core::crypto::ContentId::compute(b"hostile-bytes");
+    search.index_bundle(cid, &bundle);
+
+    let handler = SystemDomainHandler::new(&search, &host, &registry, &identity, 100);
+    let page = handler.render_system_search_page("click");
+
+    fn find_foreign_link(n: &pwb_core::spec::PlainNode) -> bool {
+        if n.tag == pwb_core::spec::Tag::Link
+            && n.attributes.get("href").map(String::as_str) == Some("https://evil.example")
+        {
+            return true;
+        }
+        n.children.iter().any(find_foreign_link)
+    }
+    assert!(
+        !find_foreign_link(&page.root_node),
+        "a result title/body must not inject a link into the local page"
+    );
+
+    fn collect_text(n: &pwb_core::spec::PlainNode, out: &mut String) {
+        if let Some(text) = &n.text_content {
+            out.push_str(text);
+        }
+        for child in &n.children {
+            collect_text(child, out);
+        }
+    }
+    let mut text = String::new();
+    collect_text(&page.root_node, &mut text);
+    assert!(
+        text.contains("‹text›hostile‹/text›")
+            && text.contains("‹link href=\"https://evil.example\"›"),
+        "hostile markup is shown as inert text instead of being dropped silently: {text:?}"
     );
 }

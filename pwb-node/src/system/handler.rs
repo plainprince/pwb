@@ -102,7 +102,7 @@ impl<'a> SystemDomainHandler<'a> {
                         content_id: r.content_id,
                         title: r.title,
                         rank_score: r.rank_score,
-                        snippet: format!("Content ID: {}", r.content_id),
+                        snippet: r.snippet,
                     })
                     .collect();
 

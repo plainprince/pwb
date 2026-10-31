@@ -127,6 +127,10 @@ async fn test_term_sharded_index_is_queryable_across_nodes_with_receipt() {
     assert!(!results.is_empty(), "B must find A's sharded posting");
     assert_eq!(results[0].content_id, cid);
     assert_eq!(results[0].title, "Plain Web Demo");
+    assert_eq!(
+        results[0].snippet, "decentralized search over plainweb",
+        "the shard that indexed the bundle serves its excerpt"
+    );
 
     // A served the query: the receipt verifies against A's identity and the
     // work minted credits on A.
@@ -391,6 +395,60 @@ async fn test_unsigned_or_forged_postings_are_rejected() {
     engine_b.stop().await;
 }
 
+/// A batch's excerpt has its own publisher signature. An unsigned excerpt is
+/// dropped, but the validly signed postings in the same message still arrive.
+#[tokio::test]
+async fn test_unsigned_snippet_does_not_discard_valid_postings() {
+    use pwb_core::net::{postings_sign_message, PostingWire};
+
+    let kp_b = Keypair::generate();
+    let (engine_b, addr_b) = start_engine(kp_b.clone()).await;
+    let service_b = service(engine_b.clone(), &kp_b);
+    tokio::spawn(service_b.clone().run());
+
+    let kp_a = Keypair::generate();
+    let (engine_a, _) = start_engine(kp_a.clone()).await;
+    engine_a.connect_to(addr_b, kp_b.public).expect("A knows B");
+
+    let cid = pwb_core::crypto::ContentId([0x61; 32]);
+    let posting = PostingWire {
+        term: "snippetless".to_string(),
+        content_id: cid,
+        title: "Legit".to_string(),
+        term_frequency: 2,
+    };
+    let signature = kp_a.sign(&postings_sign_message(
+        std::slice::from_ref(&posting),
+        &kp_a.public,
+    ));
+    engine_a
+        .send_to(
+            &kp_b.public,
+            NetworkMessage::StorePostings {
+                postings: vec![posting],
+                snippet: "forged excerpt".to_string(),
+                snippet_signature: None,
+                publisher: kp_a.public,
+                signature,
+            },
+        )
+        .expect("send batch with unsigned snippet");
+    tokio::time::sleep(Duration::from_millis(200)).await;
+
+    assert_eq!(
+        service_b.index().postings_wire("snippetless").len(),
+        1,
+        "validly signed postings are indexed"
+    );
+    assert!(
+        service_b.index().snippet(&cid).is_none(),
+        "an unsigned excerpt is never stored"
+    );
+
+    engine_a.stop().await;
+    engine_b.stop().await;
+}
+
 /// Shard responses must carry a signature from a node responsible for the
 /// term; a malicious peer's answer is ignored.
 #[tokio::test]
@@ -445,6 +503,8 @@ async fn test_unauthenticated_shard_responses_are_ignored() {
                     query_id,
                     term,
                     postings: vec![posting],
+                    snippets: Vec::new(),
+                    snippets_signature: None,
                     responder,
                     signature,
                     receipt: None,
