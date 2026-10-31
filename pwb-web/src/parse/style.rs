@@ -448,7 +448,10 @@ pub(crate) fn parse_hex_color(hex: &str) -> Option<Color> {
     if clean == "black" {
         return Some(Color::BLACK);
     }
-    if clean.len() == 6 {
+    // Hex digits are ASCII, so require that before slicing: `len() == 6` counts
+    // bytes, and a multi-byte character (e.g. `x¥abc`) can straddle the 2-byte
+    // boundaries below, which panics on a non-char-boundary slice.
+    if clean.len() == 6 && clean.is_ascii() {
         let r = u8::from_str_radix(&clean[0..2], 16).ok()?;
         let g = u8::from_str_radix(&clean[2..4], 16).ok()?;
         let b = u8::from_str_radix(&clean[4..6], 16).ok()?;

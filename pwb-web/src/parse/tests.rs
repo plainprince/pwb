@@ -404,6 +404,15 @@ fn test_parse_hex_color_variants() {
 }
 
 #[test]
+fn test_parse_hex_color_multibyte_value_does_not_panic() {
+    // Found by the `pml` fuzz target: six *bytes* whose second character is
+    // multi-byte, so a byte-index slice splits it.
+    assert_eq!(parse_hex_color("x¥abc"), None, "split inside '¥'");
+    assert_eq!(parse_hex_color("#¥abcd"), None);
+    assert_eq!(parse_hex_color("¥¥¥"), None);
+}
+
+#[test]
 fn test_parse_tag_content_attributes() {
     let (tag, attrs) = parse_tag_content("view id=\"hero\" class='big wide' data-x=42");
     assert_eq!(tag, "view");
