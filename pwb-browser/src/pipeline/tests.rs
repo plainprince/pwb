@@ -733,3 +733,63 @@ fn chrome_actions_drive_tabs_history_bookmarks_and_pages() {
     assert_eq!(h.app.shell.current_url(), "welcome.plain");
     assert!(has_chrome(&h.app.dom_handle_render.dom.borrow()));
 }
+
+#[test]
+fn shipped_pages_take_the_theme_page_palette() {
+    fn find_class<'a>(
+        node: &'a crate::dom::DomNode,
+        class: &str,
+    ) -> Option<&'a crate::dom::DomNode> {
+        if node
+            .attributes
+            .get("class")
+            .map(|value| value.split_whitespace().any(|c| c == class))
+            .unwrap_or(false)
+        {
+            return Some(node);
+        }
+        node.children
+            .iter()
+            .find_map(|child| find_class(child, class))
+    }
+
+    let mut h = harness();
+    h.app.theme = crate::theme::Theme::default_light();
+    assert!(h.app.navigate_to("network.plain"));
+    let dom = h.app.dom_handle_render.dom.borrow();
+    let container = find_class(&dom.root, "net-container").expect("network page container");
+    assert_eq!(
+        container
+            .attributes
+            .get("background-color")
+            .map(String::as_str),
+        Some(crate::theme::color_hex(&h.app.theme.page.background).as_str()),
+        "the page background comes from the theme, not the page's hardcoded palette"
+    );
+    let title = find_class(container, "net-title").expect("network page title");
+    assert_eq!(
+        title.attributes.get("color").map(String::as_str),
+        Some(crate::theme::color_hex(&h.app.theme.page.link).as_str())
+    );
+
+    // Sites written by anyone else keep exactly the colors they authored.
+    let mut authored = crate::dom::DomNode {
+        id: 9,
+        tag: pwb_core::spec::Tag::View,
+        attributes: std::collections::HashMap::from([(
+            "background-color".to_string(),
+            "#1e1e2e".to_string(),
+        )]),
+        text: None,
+        children: Vec::new(),
+    };
+    crate::theme::recolor_shipped_page(&mut authored, &h.app.theme.page, "someone.pwb");
+    assert_eq!(
+        authored
+            .attributes
+            .get("background-color")
+            .map(String::as_str),
+        Some("#1e1e2e"),
+        "an authored page is only recolored when the browser ships it"
+    );
+}

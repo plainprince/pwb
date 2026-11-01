@@ -798,6 +798,11 @@ impl BrowserApp {
         // Theme page-PSS applies as fallbacks only (authored styles win), then
         // the chrome is mounted above the page.
         theme::apply_page_defaults(&mut new_dom.root, &self.theme);
+        // Pages the browser ships itself (the `*.plain` system pages and the
+        // builtin `webpages/`) are authored in the default palette; the theme
+        // recolors them so the whole window follows it. Sites written by anyone
+        // else keep exactly the colors they authored.
+        theme::recolor_shipped_page(&mut new_dom.root, &self.theme.page, &url);
         let (width, height) = self.window_size();
         shell::install_chrome(&mut new_dom, &self.shell, &self.theme, width, height);
         *self.dom_handle_render.dom.borrow_mut() = new_dom;
@@ -855,6 +860,10 @@ impl BrowserApp {
         if let Err(error) = self.install_bundle(&bytes) {
             eprintln!("[Browser] Could not render the error page: {error}");
         }
+        // The error page is the browser's own, not the failed site's: it takes
+        // the theme palette even though the tab still shows the site's URL.
+        let mut dom = self.dom_handle_render.dom.borrow_mut();
+        crate::theme::recolor_page(&mut dom.root, &self.theme.page);
     }
 
     /// Start a federated, swarm-wide search: show a transient "searching" page
@@ -987,6 +996,11 @@ impl ApplicationHandler for BrowserApp {
             if let Some(updated) = self.theme_store.reload_if_changed(&self.shell.theme) {
                 println!("[Theme] Reloaded {}", updated.name);
                 self.apply_theme(updated);
+                // A theme owns the page defaults, so the open page is rebuilt
+                // with the new palette (sizes, colors) instead of staying on
+                // the previous theme until the next navigation.
+                let url = self.shell.current_url().to_string();
+                self.load_url(&url);
                 if let Some(w) = self.window.as_ref() {
                     w.request_redraw();
                 }
@@ -1872,6 +1886,27 @@ impl ApplicationHandler for BrowserApp {
                             //     anchors a text selection at the character under the
                             //     cursor (layout only — frame rasterized on redraw).
                             *self.dom_handle_render.focused_input.borrow_mut() = None;
+                            // Chrome text (a tab label, the peer count) is UI, not
+                            // page content: clicking it must not start a text
+                            // selection or the click reads as a drag.
+                            let over_chrome = {
+                                let dom = self.dom_handle_render.dom.borrow();
+                                hit_test_layout_box_scrolled(
+                                    &layout_root,
+                                    mx,
+                                    my,
+                                    &self.element_scrolls,
+                                )
+                                .and_then(|target| {
+                                    shell::chrome_hover_suffix(&dom.root, target.node_id)
+                                })
+                                .is_some()
+                            };
+                            if over_chrome {
+                                self.selection = TextSelection::default();
+                                window.request_redraw();
+                                return;
+                            }
                             let hit = hit_test_text_char_scrolled(
                                 &layout_root,
                                 mx,

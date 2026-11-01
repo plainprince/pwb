@@ -134,6 +134,10 @@ pub struct PageColors {
     pub placeholder: Color,
     pub code_bg: Color,
     pub code_text: Color,
+    /// Warning text ("nothing here yet", offline notes).
+    pub warn: Color,
+    /// Error text (failed fetches, invalid input).
+    pub danger: Color,
     pub icon: Color,
     pub scrollbar_track: Color,
     pub scrollbar_thumb: Color,
@@ -304,6 +308,8 @@ impl Theme {
                 placeholder: hex("#80808e"),
                 code_bg: hex("#1e1e26"),
                 code_text: hex("#d7d7e2"),
+                warn: hex("#e8c07a"),
+                danger: hex("#ff8080"),
                 icon: hex("#a8d5b5"),
                 scrollbar_track: hex("#1b1b20"),
                 scrollbar_thumb: hex("#4a4a56"),
@@ -389,6 +395,8 @@ impl Theme {
             placeholder: hex("#8b8b98"),
             code_bg: hex("#f2f2f7"),
             code_text: hex("#24242c"),
+            warn: hex("#8a5a00"),
+            danger: hex("#b03030"),
             icon: hex("#2f6f4f"),
             scrollbar_track: hex("#ededf2"),
             scrollbar_thumb: hex("#b9b9c6"),
@@ -511,6 +519,8 @@ impl Theme {
             ("placeholder", &p.placeholder),
             ("code-bg", &p.code_bg),
             ("code-text", &p.code_text),
+            ("warn", &p.warn),
+            ("danger", &p.danger),
             ("icon", &p.icon),
             ("scrollbar-track", &p.scrollbar_track),
             ("scrollbar-thumb", &p.scrollbar_thumb),
@@ -741,12 +751,14 @@ impl Theme {
             color_hex(&c.address_text),
             color_hex(&c.border)
         ));
+        // The badge shares `.pwb-iconbtn` so it is a real button (hover,
+        // pointer cursor); only its width is intrinsic, since it holds a label
+        // next to the status dot.
         css.push_str(&format!(
-            ".pwb-status {{ flex-direction: row; height: {}px; align-items: center; \
-             justify-content: center; gap: 4px; padding: 5px; border-radius: {}px; \
-             background-color: transparent; cursor: pointer; }}\n",
-            (m.control * 0.8).round(),
-            m.radius
+            ".pwb-status {{ flex-direction: row; width: auto; height: {}px; \
+             align-items: center; justify-content: center; gap: 5px; padding: 6px; \
+             border-radius: {}px; background-color: transparent; cursor: pointer; }}\n",
+            m.control, m.radius
         ));
         css.push_str(&format!(
             ".pwb-status-dot {{ font-size: {}px; color: {}; padding: 0px; }}\n",
@@ -1004,6 +1016,91 @@ fn apply_defaults_to_node(
     }
     for child in &mut node.children {
         apply_defaults_to_node(child, rules);
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Browser-shipped pages
+// ---------------------------------------------------------------------------
+
+/// Whether `url` addresses a page the browser itself ships: a `*.plain` system
+/// page or a builtin page from `webpages/`. Those pages are authored against
+/// the conventional dark palette below and are recolored from the active theme;
+/// sites authored by anyone else are never touched.
+pub fn is_shipped_page(url: &str) -> bool {
+    let clean = url.trim().trim_start_matches("plain://");
+    let target = clean.split(['?', '#']).next().unwrap_or(clean);
+    if target.is_empty() {
+        return false;
+    }
+    // The devtools panel is chrome, not a page: it keeps its own dark look.
+    if target == "devtools" || target == "devtools.plain" {
+        return false;
+    }
+    crate::builtin_sites::is_builtin_site(target) || crate::resolver::is_system_target(target)
+}
+
+/// One authored palette literal and the page color it maps onto.
+type PaletteSlot = (&'static str, fn(&PageColors) -> Color);
+
+/// Palette literals the browser's own pages are written with. They come from
+/// the dark palette the default themes were designed against; a theme maps each
+/// onto one of its page colors.
+const SHIPPED_PALETTE: &[PaletteSlot] = &[
+    ("#1e1e2e", |p| p.background),
+    ("#181825", |p| p.background),
+    ("#11111b", |p| p.background),
+    ("#313244", |p| p.code_bg),
+    ("#45475a", |p| p.input_border),
+    ("#cdd6f4", |p| p.text),
+    ("#bac2de", |p| p.text),
+    ("#a6adc8", |p| p.text),
+    ("#6c7086", |p| p.muted),
+    ("#89b4fa", |p| p.link),
+    ("#fab387", |p| p.link),
+    ("#a6e3a1", |p| p.icon),
+    ("#f9e2af", |p| p.warn),
+    ("#f38ba8", |p| p.danger),
+];
+
+/// Rewrite the palette literals in a browser-shipped page onto the active
+/// theme's page colors.
+///
+/// A theme owns the default look of the browser's own pages (welcome, search,
+/// network, …), so switching to the light theme gives light pages instead of a
+/// light chrome around dark content. Everything outside the palette — layouts,
+/// sizes, and colors the page chose for itself — is left untouched.
+pub fn recolor_shipped_page(root: &mut crate::dom::DomNode, page: &PageColors, url: &str) {
+    if !is_shipped_page(url) {
+        return;
+    }
+    recolor_page(root, page);
+}
+
+/// Recolor a page the browser generated itself (an error page, a list page).
+pub fn recolor_page(root: &mut crate::dom::DomNode, page: &PageColors) {
+    recolor_node(root, page);
+}
+
+fn recolor_node(node: &mut crate::dom::DomNode, page: &PageColors) {
+    for (key, value) in node.attributes.iter_mut() {
+        // Only color-bearing properties are rewritten; sizes, classes and
+        // layout attributes are left exactly as the page authored them.
+        if !(key.contains("color") || key == "border" || key.starts_with("border-")) {
+            continue;
+        }
+        let mut next = value.clone();
+        for (literal, pick) in SHIPPED_PALETTE {
+            if next.contains(literal) {
+                next = next.replace(literal, &color_hex(&pick(page)));
+            }
+        }
+        if next != *value {
+            *value = next;
+        }
+    }
+    for child in &mut node.children {
+        recolor_node(child, page);
     }
 }
 
@@ -1540,6 +1637,8 @@ fn apply_page_colors(page: &mut PageColors, map: &[(String, Value)]) {
     assign_color(map, &["placeholder"], &mut page.placeholder);
     assign_color(map, &["code-bg"], &mut page.code_bg);
     assign_color(map, &["code-text"], &mut page.code_text);
+    assign_color(map, &["warn", "warning"], &mut page.warn);
+    assign_color(map, &["danger", "error"], &mut page.danger);
     assign_color(map, &["icon"], &mut page.icon);
     assign_color(map, &["scrollbar-track"], &mut page.scrollbar_track);
     assign_color(map, &["scrollbar-thumb"], &mut page.scrollbar_thumb);

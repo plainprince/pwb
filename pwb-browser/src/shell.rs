@@ -1059,12 +1059,14 @@ pub fn chrome_tree(
         ));
     }
 
-    // Connection badge: a red/green dot plus the live peer count.
+    // Connection badge: a red/green dot plus the live peer count. It carries
+    // the icon-button container class too, so it is a real control: same height,
+    // hover feedback and pointer cursor as the buttons beside it.
     let mut status = plain_node(
         base + 23,
         Tag::View,
         Some("__pwb_status"),
-        &classes("pwb-status", &[("hovered", hovered("status"))]),
+        &classes("pwb-iconbtn pwb-status", &[("hovered", hovered("status"))]),
     );
     status.attributes.insert(
         "title".to_string(),
@@ -1184,15 +1186,23 @@ pub fn settings_page(
     themes_dir: &std::path::Path,
 ) -> Vec<u8> {
     let mut body = String::new();
+    // Two short lines instead of one long one: text does not wrap, so a single
+    // long paragraph would run off the right edge of the page.
     body.push_str(&format!(
-        "<text class=\"hint\">Themes live in {}. Editing the active .ptheme file reloads it automatically. Missing or broken fields fall back to the hardcoded dark theme.</text>",
+        "<text class=\"hint\">Themes live in {}.</text>",
         escape(&themes_dir.display().to_string())
     ));
+    body.push_str(
+        "<text class=\"hint\">Editing the active .ptheme file reloads it automatically; missing or broken fields fall back to the hardcoded dark theme.</text>",
+    );
     body.push_str("<view class=\"themes\">");
     if themes.is_empty() {
         body.push_str("<text class=\"empty\">No themes found.</text>");
     }
+    // One row per theme: the name, then the "active" marker beside it. The
+    // rows sit in a column, so themes read as a list instead of one long line.
     for info in themes {
+        body.push_str("<view class=\"theme-row\">");
         body.push_str(&format!(
             "<link href=\"settings.plain?theme={}\">{}</link>",
             escape(&info.id),
@@ -1201,11 +1211,15 @@ pub fn settings_page(
         if info.id == shell.theme {
             body.push_str("<text class=\"active\">active</text>");
         }
+        body.push_str("</view>");
     }
     body.push_str("</view>");
+    body.push_str("<text class=\"section\">Theme file format</text>");
     body.push_str(
-        "<text class=\"section\">Theme file format</text>\
-         <text class=\"hint\">JSON-like: comments, bare keys, trailing commas, and triple-quoted raw PSS blocks are accepted. A theme can set the UI colors, the default colors and sizes sites inherit, the chrome layout, the icon set, and arbitrary PSS for the chrome.</text>",
+        "<text class=\"hint\">JSON-like: comments, bare keys, trailing commas, and triple-quoted raw PSS blocks are accepted.</text>",
+    );
+    body.push_str(
+        "<text class=\"hint\">A theme sets the UI colors, the default colors and sizes sites inherit, the chrome layout, the icon set, and PSS for the chrome.</text>",
     );
     body.push_str(
         "<code>{ name: \"Mine\", dark: true, colors: { accent: \"#ff00aa\" }, sizes: { \"ui-font\": 13 }, ui: \"\"\" .pwb-tab { border-radius: 3px; } \"\"\" }</code>",
@@ -1231,7 +1245,8 @@ fn build_system_page(markup: String, title: &str, theme: &Theme) -> Vec<u8> {
          .url {{ color: {}; font-size: {}px; padding: 0px; }} \
          .hint {{ color: {}; font-size: {}px; padding: 0px; }} \
          .active {{ color: {}; font-size: {}px; padding: 0px; }} \
-         .themes {{ flex-direction: row; gap: 16px; padding: 4px; }} \
+         .themes {{ flex-direction: column; gap: 2px; padding: 4px; }} \
+         .theme-row {{ flex-direction: row; align-items: center; gap: 8px; padding: 2px; }} \
          link {{ color: {}; font-size: {}px; padding: 2px; }} \
          code {{ color: {}; background-color: {}; font-size: {}px; padding: 10px; }} \
          .empty {{ color: {}; font-size: {}px; padding: 4px; }}",
@@ -1857,10 +1872,72 @@ mod tests {
                 .any(|href| href == "settings.plain?theme=midnight"),
             "{links:?}"
         );
+        // Each theme sits in its own row, so the picker reads as a list rather
+        // than one line of links.
+        fn count_class(node: &pwb_core::spec::PlainNode, class: &str) -> usize {
+            let mut count = usize::from(
+                node.attributes
+                    .get("class")
+                    .map(|value| value.split_whitespace().any(|c| c == class))
+                    .unwrap_or(false),
+            );
+            count += node
+                .children
+                .iter()
+                .map(|child| count_class(child, class))
+                .sum::<usize>();
+            count
+        }
+        assert_eq!(
+            count_class(&bundle.root_node, "theme-row"),
+            2,
+            "one row per installed theme"
+        );
         assert_eq!(
             settings_theme_of("settings.plain?theme=midnight").as_deref(),
             Some("midnight")
         );
         assert_eq!(settings_theme_of("settings.plain"), None);
+    }
+
+    #[test]
+    fn connection_badge_is_a_button_over_its_whole_area() {
+        for width in [640u32, 800, 1000, 1400] {
+            for peers in [0usize, 3, 128] {
+                let mut shell = shell();
+                shell.peers = peers;
+                let dom = chrome_dom(&shell, width, 900);
+                // The badge is a control, not a bare pair of labels: it shares
+                // the icon-button container (hover feedback, pointer cursor).
+                let class = node_by_id(&dom, "status")
+                    .attributes
+                    .get("class")
+                    .cloned()
+                    .unwrap_or_default();
+                assert!(class.contains("pwb-iconbtn"), "badge class: {class}");
+
+                let layout = crate::layout::build_layout_tree(&dom, width, 900, 0.0);
+                let status_id = find_chrome(&dom.root, "status").expect("badge");
+                let status = crate::layout::find_box_by_id(&layout, status_id).expect("laid out");
+                // Dot and peer count both open network.plain: the hit test can
+                // land on either child, and chrome_action walks to the badge.
+                for frac in [0.05, 0.25, 0.5, 0.75, 0.95] {
+                    let x = status.rect.left() + status.rect.width() * frac;
+                    let y = status.rect.top() + status.rect.height() / 2.0;
+                    let hit =
+                        crate::render::hit_test_layout_box_scrolled(&layout, x, y, &HashMap::new())
+                            .map(|b| b.node_id);
+                    assert_eq!(
+                        hit.and_then(|id| chrome_action(&dom.root, id)),
+                        Some(ChromeAction::OpenNetwork),
+                        "badge not clickable at {x},{y} (width {width}, peers {peers})"
+                    );
+                }
+                // It keeps the height of the other controls in the row.
+                let settings_id = find_chrome(&dom.root, "settings").expect("settings");
+                let settings = crate::layout::find_box_by_id(&layout, settings_id).expect("s");
+                assert!((status.rect.height() - settings.rect.height()).abs() < 1.0);
+            }
+        }
     }
 }

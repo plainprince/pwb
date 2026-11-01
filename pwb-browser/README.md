@@ -118,7 +118,7 @@ cargo run -p pwb-browser -- --help
 
 ## Themes
 
-Browser chrome and page defaults are themeable. Themes are JSON-like `.ptheme` files in `~/.pwb/themes`, which the browser creates and fills with `default-dark`/`default-light` whenever they are missing or the folder is empty; they can be switched from the toolbar's settings page and reload automatically when edited. See [docs/themes.md](docs/themes.md) for the format and every key.
+Browser chrome and page defaults are themeable. Themes are JSON-like `.ptheme` files in `~/.pwb/themes`, which the browser creates and fills with `default-dark`/`default-light` whenever they are missing or the folder is empty; they can be switched from the toolbar's settings page and reload automatically when edited. Pages the browser ships itself (`*.plain` system pages and the builtin `webpages/`) take the theme's page colors too, so they match the chrome instead of always rendering dark. See [docs/themes.md](docs/themes.md) for the format and every key.
 
 ## Documentation
 

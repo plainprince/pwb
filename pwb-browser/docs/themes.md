@@ -12,9 +12,8 @@ form once.
 
 Pick a theme in **Settings** (the gear in the toolbar), which writes the choice
 to the session so it survives a restart. Editing the active `.ptheme` reloads it
-while the browser runs: the chrome is rebuilt in place, and colors/sizes apply
-to the current page immediately (page-level `page-pss` defaults apply on the
-next navigation).
+while the browser runs: the chrome is rebuilt in place and the open page is
+rebuilt with the new palette and page defaults.
 
 Broken or partial files are safe: every missing field falls back to the
 hardcoded dark theme, and a file that fails to parse is reported and ignored.
@@ -60,6 +59,8 @@ work.
     input-text: "#f2f2f8",
     input-border: "#33333f",
     placeholder: "#7c7c8a",
+    warn: "#e8c07a",
+    danger: "#ff8080",
     scrollbar-track: "#111116",
     scrollbar-thumb: "#3d3d4a",
   },
@@ -128,7 +129,11 @@ work.
 1. **UI colors** — `colors.*` feed the generated chrome stylesheet.
 2. **Website default colors** — `page.*` are the colors `compute_style` starts
    from. Site PSS and markup attributes are applied afterwards, so a page can
-   always override them.
+   always override them. The pages the browser ships itself (`*.plain` system
+   pages such as `search.plain`/`network.plain`, and the builtin `webpages/`)
+   are authored in one conventional dark palette, and `page.*` replaces those
+   literals too — so a light theme gives light pages instead of a light chrome
+   around dark content. Sites authored by anyone else are never recolored.
 3. **UI layout** — `layout.*` for the structural knobs (tab sizes, address
    width, close-button policy), and `ui` for arbitrary PSS. PSS is applied to a
    chrome tree whose elements carry stable classes: `.pwb-chrome`,
