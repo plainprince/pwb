@@ -24,6 +24,10 @@ use crate::theme::{self, CloseButton, Metrics, Theme, ThemeInfo};
 /// Chrome element id prefix. Page elements cannot claim these names.
 pub const CHROME_PREFIX: &str = "__pwb_";
 
+/// Where a new tab (or a tab that replaces the last one) lands: the system
+/// search page, so an empty tab is one keystroke away from a query.
+pub const NEW_TAB_URL: &str = "search.plain";
+
 /// One open tab. `history`/`index` implement per-tab back/forward; navigating
 /// truncates the forward entries (standard browser behavior).
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -191,6 +195,19 @@ impl Shell {
         Some(url)
     }
 
+    /// Whether the active tab has an earlier history entry (the back button is
+    /// enabled).
+    pub fn can_go_back(&self) -> bool {
+        self.current().index > 0
+    }
+
+    /// Whether the active tab has a later history entry (the forward button is
+    /// enabled).
+    pub fn can_go_forward(&self) -> bool {
+        let tab = self.current();
+        tab.index + 1 < tab.history.len()
+    }
+
     pub fn new_tab(&mut self, url: &str) {
         self.tabs.push(Tab::new(url));
         self.active = self.tabs.len() - 1;
@@ -198,10 +215,10 @@ impl Shell {
     }
 
     /// Close the active tab, returning the URL to load next. Closing the last
-    /// tab replaces it with `welcome.plain` (a browser always has a page).
+    /// tab replaces it with a fresh new tab (a browser always has a page).
     pub fn close_active(&mut self) -> Option<String> {
         if self.tabs.len() <= 1 {
-            let url = "welcome.plain".to_string();
+            let url = NEW_TAB_URL.to_string();
             self.tabs[0] = Tab::new(&url);
             self.active = 0;
             self.save();
@@ -226,7 +243,7 @@ impl Shell {
     }
 
     /// Close a specific tab (its × button). Closing the active tab selects a
-    /// neighbor; closing the last tab replaces it with `welcome.plain`.
+    /// neighbor; closing the last tab opens a fresh new tab.
     pub fn close_tab(&mut self, index: usize) -> Option<String> {
         if index >= self.tabs.len() {
             return None;
@@ -742,6 +759,7 @@ fn classes(base: &str, extra: &[(&str, bool)]) -> String {
     out
 }
 
+#[allow(clippy::too_many_arguments)]
 fn icon_button(
     id: usize,
     suffix: &str,
@@ -749,20 +767,32 @@ fn icon_button(
     icon_class: &str,
     title: &str,
     hovered: bool,
+    disabled: bool,
     metrics: &Metrics,
 ) -> PlainNode {
     let mut node = plain_node(
         id,
         Tag::View,
         Some(&format!("{CHROME_PREFIX}{suffix}")),
-        &classes("pwb-iconbtn", &[("hovered", hovered)]),
+        &classes(
+            "pwb-iconbtn",
+            &[
+                ("hovered", hovered && !disabled),
+                ("pwb-disabled", disabled),
+            ],
+        ),
     );
     node.attributes
         .insert("title".to_string(), title.to_string());
     // A fixed glyph size keeps every control on the same pixel grid even
-    // before the PSS class is applied.
-    let glyph = icon_node(id + 500, icon, icon_class);
-    let mut glyph = glyph;
+    // before the PSS class is applied. Disabled controls get the dimmed glyph
+    // class, and never a hover highlight.
+    let glyph_class = if disabled {
+        "pwb-icon-disabled"
+    } else {
+        icon_class
+    };
+    let mut glyph = icon_node(id + 500, icon, glyph_class);
     glyph
         .attributes
         .insert("width".to_string(), format!("{}px", metrics.icon));
@@ -802,6 +832,7 @@ pub fn chrome_tree(
             "pwb-icon-muted",
             "Scroll tabs left",
             hovered("tabscroll_left"),
+            false,
             metrics,
         ));
     }
@@ -850,9 +881,14 @@ pub fn chrome_tree(
         } else {
             "pwb-tab-label"
         };
-        tab_node
-            .children
-            .push(text_node(base + 200 + index, &label, label_class));
+        // The label owns everything left of the ×, so `space-between` pins the
+        // close button to the tab's right edge and the truncated text cannot
+        // run underneath it.
+        let mut label_node = text_node(base + 200 + index, &label, label_class);
+        label_node
+            .attributes
+            .insert("width".to_string(), format!("{label_width}px"));
+        tab_node.children.push(label_node);
         if show_close {
             let mut close = plain_node(
                 base + 400 + index,
@@ -896,6 +932,7 @@ pub fn chrome_tree(
             "pwb-icon-muted",
             "Scroll tabs right",
             hovered("tabscroll_right"),
+            false,
             metrics,
         ));
     }
@@ -910,10 +947,26 @@ pub fn chrome_tree(
     );
 
     let mut nav = plain_node(base + 7, Tag::View, Some("__pwb_nav"), "pwb-nav");
-    for (suffix, offset, icon, title) in [
-        ("back", 10_usize, &theme.icons.back, "Back (Alt+Left)"),
-        ("forward", 11, &theme.icons.forward, "Forward (Alt+Right)"),
-        ("reload", 12, &theme.icons.reload, "Reload (Ctrl+R)"),
+    // Back/forward are drawn disabled (and lose their hover highlight) when
+    // the tab has no history in that direction.
+    let can_back = shell.can_go_back();
+    let can_forward = shell.can_go_forward();
+    for (suffix, offset, icon, title, enabled) in [
+        (
+            "back",
+            10_usize,
+            &theme.icons.back,
+            "Back (Alt+Left)",
+            can_back,
+        ),
+        (
+            "forward",
+            11,
+            &theme.icons.forward,
+            "Forward (Alt+Right)",
+            can_forward,
+        ),
+        ("reload", 12, &theme.icons.reload, "Reload (Ctrl+R)", true),
     ] {
         nav.children.push(icon_button(
             base + offset,
@@ -922,6 +975,7 @@ pub fn chrome_tree(
             "pwb-icon-nav",
             title,
             hovered(suffix),
+            !enabled,
             metrics,
         ));
     }
@@ -981,6 +1035,7 @@ pub fn chrome_tree(
             "Bookmark this page (Ctrl+D)"
         },
         hovered("bookmark"),
+        false,
         metrics,
     ));
     for (suffix, offset, icon, title) in [
@@ -999,6 +1054,7 @@ pub fn chrome_tree(
             "pwb-icon-nav",
             title,
             hovered(suffix),
+            false,
             metrics,
         ));
     }
@@ -1037,6 +1093,7 @@ pub fn chrome_tree(
         "pwb-icon-nav",
         "Theme settings",
         hovered("settings"),
+        false,
         metrics,
     ));
     toolbar.children.push(actions);
@@ -1303,9 +1360,62 @@ mod tests {
         assert_eq!(shell.close_tab(0).as_deref(), Some("third.plain"));
         assert_eq!(shell.tabs.len(), 1);
         assert_eq!(shell.current_url(), "third.plain");
-        // The last tab is replaced rather than closing the window.
-        assert_eq!(shell.close_tab(0).as_deref(), Some("welcome.plain"));
-        assert_eq!(shell.current_url(), "welcome.plain");
+        // The last tab is replaced by a fresh new tab rather than closing the
+        // window.
+        assert_eq!(shell.close_tab(0).as_deref(), Some(NEW_TAB_URL));
+        assert_eq!(shell.current_url(), NEW_TAB_URL);
+    }
+
+    #[test]
+    fn back_and_forward_buttons_are_disabled_at_the_history_ends() {
+        let mut tab = shell();
+        assert!(!tab.can_go_back(), "a fresh tab has no history");
+        assert!(!tab.can_go_forward());
+
+        tab.navigate("a.plain");
+        tab.navigate("b.plain");
+        assert!(tab.can_go_back());
+        assert!(!tab.can_go_forward());
+
+        tab.back();
+        assert!(tab.can_go_back());
+        assert!(tab.can_go_forward());
+
+        tab.back();
+        assert!(!tab.can_go_back());
+        assert!(tab.can_go_forward());
+    }
+
+    #[test]
+    fn chrome_marks_back_and_forward_disabled_at_the_history_ends() {
+        fn is_disabled(dom: &Dom, suffix: &str) -> bool {
+            node_by_id(dom, suffix)
+                .attributes
+                .get("class")
+                .is_some_and(|class| class.contains("pwb-disabled"))
+        }
+
+        // A fresh tab can go nowhere in either direction.
+        let fresh = chrome_dom(&shell(), 1000, 700);
+        assert!(is_disabled(&fresh, "back"));
+        assert!(is_disabled(&fresh, "forward"));
+        assert!(!is_disabled(&fresh, "reload"));
+        assert_eq!(
+            node_by_id(&fresh, "forward").children[0]
+                .attributes
+                .get("class")
+                .map(String::as_str),
+            Some("pwb-icon-disabled")
+        );
+
+        // After going forward and back, both arrows are live.
+        let mut live = shell();
+        live.navigate("a.plain");
+        live.navigate("b.plain");
+        live.back();
+        let dom = chrome_dom(&live, 1000, 700);
+        assert!(!is_disabled(&dom, "back"));
+        assert!(!is_disabled(&dom, "forward"));
     }
 
     #[test]

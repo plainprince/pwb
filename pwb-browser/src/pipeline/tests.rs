@@ -702,10 +702,10 @@ fn chrome_actions_drive_tabs_history_bookmarks_and_pages() {
     assert!(h.app.handle_chrome_action(ChromeAction::ToggleBookmark));
     assert!(!h.app.shell.is_bookmarked("welcome.plain"));
 
-    // New tab: a second tab opens on the start page.
+    // New tab: a second tab opens on the system search page.
     assert!(h.app.handle_chrome_action(ChromeAction::NewTab));
     assert_eq!(h.app.shell.tabs.len(), 2);
-    assert_eq!(h.app.shell.current_url(), "welcome.plain");
+    assert_eq!(h.app.shell.current_url(), crate::shell::NEW_TAB_URL);
 
     // Back/Forward with no per-tab history are no-ops.
     let before = h.app.shell.current_url().to_string();

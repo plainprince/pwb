@@ -2,9 +2,13 @@
 
 A theme changes the browser chrome **and** the default styling that pages
 inherit when their own PSS says nothing. Themes live in `$PWB_DATA/themes`
-(default `~/.pwb/themes`) as one `.ptheme` file each; the browser writes
-`default-dark.ptheme` and `default-light.ptheme` there on first start and
-never overwrites an existing file.
+(default `~/.pwb/themes`) as one `.ptheme` file each. The two shipped themes are
+not in the repository: the browser creates the folder and writes
+`default-dark.ptheme` and `default-light.ptheme` there — line by line, ready to
+edit — whenever they are missing, including when the folder exists but is empty.
+Multi-line files are never overwritten, so local edits survive upgrades. A
+builtin file left as a single line by an old build is rewritten in the readable
+form once.
 
 Pick a theme in **Settings** (the gear in the toolbar), which writes the choice
 to the session so it survives a restart. Editing the active `.ptheme` reloads it

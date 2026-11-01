@@ -572,10 +572,10 @@ impl BrowserApp {
                 self.load_url(&url);
             }
             ChromeAction::NewTab => {
-                self.shell.new_tab("welcome.plain");
+                self.shell.new_tab(shell::NEW_TAB_URL);
                 self.reveal_active_tab();
                 self.refresh_chrome();
-                self.load_url("welcome.plain");
+                self.load_url(shell::NEW_TAB_URL);
             }
             ChromeAction::CloseTab(index) => {
                 if let Some(url) = self.shell.close_tab(index) {
@@ -1258,9 +1258,10 @@ impl ApplicationHandler for BrowserApp {
                                 return;
                             }
                             KeyCode::KeyT => {
-                                self.shell.new_tab("welcome.plain");
+                                self.shell.new_tab(shell::NEW_TAB_URL);
+                                self.reveal_active_tab();
                                 self.refresh_chrome();
-                                self.load_url("welcome.plain");
+                                self.load_url(shell::NEW_TAB_URL);
                                 window.request_redraw();
                                 return;
                             }

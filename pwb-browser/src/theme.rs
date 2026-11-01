@@ -628,10 +628,13 @@ impl Theme {
             color_hex(&c.chrome)
         ));
         let tab_h = m.tab_height - 10.0;
+        // `space-between` pins the close button to the tab's right edge no
+        // matter how short the label is; the label itself is truncated to the
+        // width that is left over, so text never runs under the ×.
         css.push_str(&format!(
             ".pwb-tab {{ flex-direction: row; height: {}px; padding: 6px; align-items: center; \
-             gap: {}px; border-radius: {}px; background-color: {}; overflow: hidden; \
-             cursor: pointer; }}\n",
+             justify-content: space-between; gap: {}px; border-radius: {}px; \
+             background-color: {}; overflow: hidden; cursor: pointer; }}\n",
             tab_h,
             m.gap.min(6.0),
             m.radius,
@@ -658,7 +661,7 @@ impl Theme {
             color_hex(&c.text)
         ));
         css.push_str(&format!(
-            ".pwb-tab-close {{ width: {}px; height: {}px; padding: 0px; \
+            ".pwb-tab-close {{ flex-direction: row; width: {}px; height: {}px; padding: 0px; \
              align-items: center; justify-content: center; border-radius: 6px; \
              background-color: transparent; cursor: pointer; }}\n",
             (m.control * 0.55).max(14.0),
@@ -688,12 +691,23 @@ impl Theme {
             m.icon,
             color_hex(&c.accent)
         ));
+        // `flex-direction: row` is what makes the glyph sit in the middle: a
+        // column container would put it in the top-left corner.
         css.push_str(&format!(
-            ".pwb-iconbtn {{ width: {}px; height: {}px; padding: 0px; \
+            ".pwb-iconbtn {{ flex-direction: row; width: {}px; height: {}px; padding: 0px; \
              align-items: center; justify-content: center; border-radius: {}px; \
              background-color: transparent; cursor: pointer; }}\n",
             m.control, m.control, m.radius
         ));
+        // A control with nothing to do (back/forward at the end of the tab's
+        // history) is drawn in a dimmed color and gets no hover highlight.
+        css.push_str(&format!(
+            ".pwb-icon-disabled {{ width: {}px; height: {}px; padding: 0px; color: {}; }}\n",
+            m.icon,
+            m.icon,
+            color_hex(&dim(&c.text_muted, &c.chrome, 0.45))
+        ));
+        css.push_str(".pwb-iconbtn.pwb-disabled { cursor: default; }\n");
         css.push_str(&format!(
             ".pwb-toolbar {{ flex-direction: row; width: 100%; height: {}px; \
              align-items: center; gap: 0px; padding: 0px; background-color: {}; }}\n",
@@ -761,9 +775,9 @@ impl Theme {
             color_hex(&c.surface_hover)
         ));
         css.push_str(&format!(
-            ".pwb-newtab {{ width: {}px; height: {}px; padding: 0px; align-items: center; \
-             justify-content: center; border-radius: {}px; background-color: transparent; \
-             cursor: pointer; margin-left: 2px; }}\n",
+            ".pwb-newtab {{ flex-direction: row; width: {}px; height: {}px; padding: 0px; \
+             align-items: center; justify-content: center; border-radius: {}px; \
+             background-color: transparent; cursor: pointer; margin-left: 2px; }}\n",
             m.control, m.control, m.radius
         ));
         css.push_str(&format!(
@@ -782,6 +796,19 @@ impl Theme {
 
 fn hex(value: &str) -> Color {
     parse_color(value).unwrap_or(Color::WHITE)
+}
+
+/// Mix `color` toward `towards` by `amount` (0 = unchanged, 1 = fully
+/// `towards`). Used for derived colors such as disabled controls.
+fn dim(color: &Color, towards: &Color, amount: f32) -> Color {
+    let t = amount.clamp(0.0, 1.0);
+    let mix = |a: u8, b: u8| (a as f32 + (b as f32 - a as f32) * t).round() as u8;
+    Color {
+        r: mix(color.r, towards.r),
+        g: mix(color.g, towards.g),
+        b: mix(color.b, towards.b),
+        a: color.a,
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -1025,8 +1052,10 @@ impl ThemeStore {
     }
 
     /// Create the themes directory and write the two builtin themes there when
-    /// they are missing. Existing files are never overwritten, so local edits
-    /// survive upgrades.
+    /// they are missing (a fresh install, or a folder the user emptied). The
+    /// files are written line by line. An existing file is left untouched —
+    /// local edits survive upgrades — unless it is a single-line file written by
+    /// an older build, which is rewritten in the readable form.
     pub fn ensure_builtin_files(&self) {
         if std::fs::create_dir_all(&self.dir).is_err() {
             eprintln!(
@@ -1037,13 +1066,23 @@ impl ThemeStore {
         }
         for theme in [Theme::default_dark(), Theme::default_light()] {
             let path = self.dir.join(format!("{}.ptheme", theme.id));
-            if path.exists() {
+            if std::fs::read_to_string(&path)
+                .map(|source| !Self::needs_pretty_rewrite(&source))
+                .unwrap_or(false)
+            {
                 continue;
             }
             if let Err(error) = std::fs::write(&path, theme.to_ptheme()) {
                 eprintln!("[Theme] Could not write {}: {error}", path.display());
             }
         }
+    }
+
+    /// A builtin file needs rewriting when it is empty or was written as one
+    /// long line. Multi-line files are left alone: they are the user's edits.
+    fn needs_pretty_rewrite(source: &str) -> bool {
+        let trimmed = source.trim();
+        trimmed.is_empty() || !trimmed.contains('\n')
     }
 
     /// Installed themes: every parseable `.ptheme` in the directory, plus the
@@ -1765,8 +1804,29 @@ mod tests {
         ));
         let mut store = ThemeStore::new(dir.clone());
         store.ensure_builtin_files();
-        assert!(dir.join("default-dark.ptheme").exists());
+        let dark_path = dir.join("default-dark.ptheme");
+        assert!(dark_path.exists());
         assert!(dir.join("default-light.ptheme").exists());
+        // Seeded themes are written line by line, not as one long line.
+        let seeded = std::fs::read_to_string(&dark_path).unwrap();
+        assert!(seeded.lines().count() > 40, "theme is formatted");
+        assert!(seeded.contains("\n  colors: {\n"));
+
+        // A single-line file from an older build is rewritten in the readable
+        // form; a multi-line file with local edits is left alone.
+        std::fs::write(&dark_path, "{ name: 'One Liner', dark: true }").unwrap();
+        store.ensure_builtin_files();
+        let normalized = std::fs::read_to_string(&dark_path).unwrap();
+        assert!(normalized.lines().count() > 40);
+        assert!(normalized.contains("Default Dark"));
+        std::fs::write(&dark_path, "{\n  name: 'Mine',\n  dark: true,\n}\n").unwrap();
+        store.ensure_builtin_files();
+        assert!(std::fs::read_to_string(&dark_path)
+            .unwrap()
+            .contains("Mine"));
+        // Restore the builtin so the reload assertions below read real fields.
+        std::fs::write(&dark_path, Theme::default_dark().to_ptheme()).unwrap();
+
         let list = store.list();
         assert!(list.iter().any(|t| t.id == "default-light"));
 
@@ -1789,7 +1849,15 @@ mod tests {
         // produce attributes the layout engine understands.
         let theme = Theme::default_dark();
         let metrics = Metrics::for_window(&theme, 900, 650);
-        let rules = pwb_web::parse::parse_pss_stylesheet(&theme.chrome_css(&metrics));
+        let css = theme.chrome_css(&metrics);
+        // Icon-only buttons must lay their glyph out in a row so the centered
+        // alignment actually applies (a column stacks it into the top-left).
+        assert!(css.contains(".pwb-iconbtn { flex-direction: row;"));
+        assert!(css.contains(".pwb-tab-close { flex-direction: row;"));
+        assert!(css.contains(".pwb-newtab { flex-direction: row;"));
+        // The tab pins its close button to the right edge.
+        assert!(css.contains("justify-content: space-between;"));
+        let rules = pwb_web::parse::parse_pss_stylesheet(&css);
         let mut node = PlainNode::new(1, pwb_core::spec::Tag::View);
         node.attributes
             .insert("class".to_string(), "pwb-chrome".to_string());
