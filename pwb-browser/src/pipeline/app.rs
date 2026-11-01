@@ -27,6 +27,7 @@ use crate::resolver::{
     register_claim_of, resolve_url_or_file_with_context, room_of, search_query_of,
 };
 use crate::shell::{self, ChromeAction, Shell};
+use crate::theme::{self, Theme, ThemeStore};
 use arboard::Clipboard;
 use pwb_core::spec::Tag;
 use pwb_node::chat::{ChatRoute, ChatService};
@@ -132,6 +133,13 @@ pub struct BrowserApp {
     /// Tabs, per-tab history, and bookmarks. The fixed chrome at the top of
     /// every page is rebuilt from this state.
     pub(super) shell: Shell,
+    /// Active theme (colors, layout, icons, sizes) used to build the chrome and
+    /// as the fallback style for pages.
+    pub(super) theme: Theme,
+    /// Themes discovered on disk; polled so editing the active `.ptheme` file
+    /// hot-reloads it.
+    pub(super) theme_store: ThemeStore,
+    pub(super) last_theme_check: std::time::Instant,
     /// Whether remote lookups use onion circuits or the direct transport.
     pub(super) privacy: PrivacyMode,
 }
@@ -396,18 +404,67 @@ impl BrowserApp {
         } else {
             self.shell.navigate(url);
         }
+        self.reveal_active_tab();
         self.refresh_chrome();
     }
 
     /// Rebuild the fixed chrome from the current shell state. Returns `false` when the DOM is
     /// borrowed by a running script, so callers can retry on the next tick.
-    fn refresh_chrome(&mut self) -> bool {
+    pub(super) fn refresh_chrome(&mut self) -> bool {
+        let (width, height) = self.window_size();
+        // Preserve text typed into the address bar: a chrome rebuild (hover,
+        // peer count, theme reload) must not wipe an in-progress URL.
+        let editing_address = {
+            let focused = *self.dom_handle_render.focused_input.borrow();
+            focused.and_then(|(node_id, caret)| {
+                let dom = self.dom_handle_render.dom.borrow();
+                let node = crate::dom::find_node_by_id_ref(&dom.root, &node_id.to_string())?;
+                let is_address =
+                    node.attributes.get("id").map(String::as_str) == Some("__pwb_address");
+                is_address.then(|| {
+                    (
+                        node.attributes.get("value").cloned().unwrap_or_default(),
+                        caret,
+                    )
+                })
+            })
+        };
         if let Ok(mut dom) = self.dom_handle_render.dom.try_borrow_mut() {
-            shell::install_chrome(&mut dom, &self.shell);
+            shell::install_chrome(&mut dom, &self.shell, &self.theme, width, height);
+            if let Some((value, caret)) = editing_address {
+                if let Some(id) = shell::address_node_id(&dom.root) {
+                    if let Some(node) = find_node_by_id(&mut dom.root, &id.to_string()) {
+                        if value.is_empty() {
+                            node.attributes.remove("value");
+                        } else {
+                            node.attributes.insert("value".to_string(), value);
+                        }
+                    }
+                    *self.dom_handle_render.focused_input.borrow_mut() = Some((id, caret));
+                }
+            }
             true
         } else {
             false
         }
+    }
+
+    /// Keep the active tab inside the visible tab window after it changes.
+    fn reveal_active_tab(&mut self) {
+        let (width, height) = self.window_size();
+        let count = shell::visible_tab_count(&self.shell, &self.theme, width as f32, height as f32);
+        self.shell.reveal_active(count);
+    }
+
+    /// Apply `theme` to the running browser: install it as the layout/render
+    /// fallback, rebuild the chrome, and persist the choice with the session.
+    fn apply_theme(&mut self, theme: Theme) {
+        println!("[Theme] Active theme: {} ({})", theme.name, theme.id);
+        theme::set_active(theme.clone());
+        self.theme = theme;
+        self.shell.theme = self.theme.id.clone();
+        self.shell.save();
+        self.refresh_chrome();
     }
 
     /// Navigate to `url` and commit it to the active tab's history.
@@ -425,6 +482,7 @@ impl BrowserApp {
             format!("search.plain?q={}", url)
         };
         self.shell.navigate(&canonical);
+        self.reveal_active_tab();
         self.refresh_chrome();
         self.load_url(&canonical);
     }
@@ -438,13 +496,33 @@ impl BrowserApp {
                 } else {
                     "bookmarks"
                 };
-                let bytes = shell::list_page(&self.shell, kind);
+                let bytes = shell::list_page(&self.shell, &self.theme, kind);
                 if let Err(error) = self.install_bundle(&bytes) {
                     self.show_error_page("cannot open page", &error);
                 }
                 return;
             }
             _ => {}
+        }
+        // Settings: `settings.plain` lists installed themes and
+        // `settings.plain?theme=<id>` switches to one.
+        if url == "settings.plain" || url.starts_with("settings.plain?") {
+            if let Some(id) = shell::settings_theme_of(url) {
+                if id != self.shell.theme {
+                    let theme = self.theme_store.load(&id);
+                    self.apply_theme(theme);
+                }
+            }
+            let bytes = shell::settings_page(
+                &self.shell,
+                &self.theme,
+                &self.theme_store.list(),
+                self.theme_store.dir(),
+            );
+            if let Err(error) = self.install_bundle(&bytes) {
+                self.show_error_page("cannot open settings", &error);
+            }
+            return;
         }
         if let Some(query) = search_query_of(url) {
             self.start_federated_search(&query);
@@ -477,12 +555,14 @@ impl BrowserApp {
         match action {
             ChromeAction::Back => {
                 if let Some(url) = self.shell.back() {
+                    self.reveal_active_tab();
                     self.refresh_chrome();
                     self.load_url(&url);
                 }
             }
             ChromeAction::Forward => {
                 if let Some(url) = self.shell.forward() {
+                    self.reveal_active_tab();
                     self.refresh_chrome();
                     self.load_url(&url);
                 }
@@ -493,14 +573,27 @@ impl BrowserApp {
             }
             ChromeAction::NewTab => {
                 self.shell.new_tab("welcome.plain");
+                self.reveal_active_tab();
                 self.refresh_chrome();
                 self.load_url("welcome.plain");
             }
-            ChromeAction::SelectTab(index) => {
-                if let Some(url) = self.shell.select(index) {
+            ChromeAction::CloseTab(index) => {
+                if let Some(url) = self.shell.close_tab(index) {
+                    self.reveal_active_tab();
                     self.refresh_chrome();
                     self.load_url(&url);
                 }
+            }
+            ChromeAction::SelectTab(index) => {
+                if let Some(url) = self.shell.select(index) {
+                    self.reveal_active_tab();
+                    self.refresh_chrome();
+                    self.load_url(&url);
+                }
+            }
+            ChromeAction::ScrollTabs(delta) => {
+                self.shell.scroll_tabs(delta);
+                self.refresh_chrome();
             }
             ChromeAction::ToggleBookmark => {
                 let bookmarked = self.shell.toggle_bookmark();
@@ -519,6 +612,7 @@ impl BrowserApp {
             ChromeAction::OpenBookmarks => self.go("bookmarks.plain"),
             ChromeAction::OpenHistory => self.go("history.plain"),
             ChromeAction::OpenNetwork => self.go("network.plain"),
+            ChromeAction::OpenSettings => self.go("settings.plain"),
         }
         true
     }
@@ -701,7 +795,11 @@ impl BrowserApp {
         let url = self.shell.current_url().to_string();
         self.shell.set_title(&url, &bundle.title);
         let mut new_dom = Dom::from_bundle(&bundle);
-        shell::install_chrome(&mut new_dom, &self.shell);
+        // Theme page-PSS applies as fallbacks only (authored styles win), then
+        // the chrome is mounted above the page.
+        theme::apply_page_defaults(&mut new_dom.root, &self.theme);
+        let (width, height) = self.window_size();
+        shell::install_chrome(&mut new_dom, &self.shell, &self.theme, width, height);
         *self.dom_handle_render.dom.borrow_mut() = new_dom;
 
         // Re-mount devtools in the fresh context. The panel is browser chrome,
@@ -882,6 +980,19 @@ impl ApplicationHandler for BrowserApp {
     /// tree (their handlers may have mutated the DOM) and redraw. Also wakes the
     /// loop at the next timer deadline instead of sleeping forever.
     fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
+        // Theme auto-reload: poll (cheaply, a few times a second) whether the
+        // active .ptheme file changed on disk and re-apply it in place.
+        if self.last_theme_check.elapsed() >= std::time::Duration::from_millis(400) {
+            self.last_theme_check = std::time::Instant::now();
+            if let Some(updated) = self.theme_store.reload_if_changed(&self.shell.theme) {
+                println!("[Theme] Reloaded {}", updated.name);
+                self.apply_theme(updated);
+                if let Some(w) = self.window.as_ref() {
+                    w.request_redraw();
+                }
+            }
+        }
+
         // Connection badge: the chrome is a static tree, so mirror the live
         // peer count into it (and the window title) when it changes. Waking
         // once a second keeps an idle window honest; later branches below can
@@ -1516,6 +1627,21 @@ impl ApplicationHandler for BrowserApp {
                     build_layout_tree(&dom, size.width.max(1), size.height.max(1), self.scroll_y)
                 };
 
+                // Chrome hover state: tabs show their ×, and controls get a
+                // hover background. Rebuild only when the hovered control
+                // changes (ids are stable across rebuilds).
+                let hovered = {
+                    let dom = self.dom_handle_render.dom.borrow();
+                    hit_test_layout_box_scrolled(&layout_root, mx, my, &self.element_scrolls)
+                        .and_then(|hit| shell::chrome_hover_suffix(&dom.root, hit.node_id))
+                };
+                if hovered != self.shell.chrome_hover {
+                    self.shell.chrome_hover = hovered;
+                    if self.refresh_chrome() {
+                        window.request_redraw();
+                    }
+                }
+
                 if let Some(drag) = &mut self.resize_state {
                     // Drag-resize: update the element's width/height attributes from the
                     // mouse delta; layout (and the redraw) follows. The attribute stores
@@ -1718,11 +1844,21 @@ impl ApplicationHandler for BrowserApp {
                                 })
                                 .unwrap_or(0.012 * height as f32);
                             let value = input_box.value.as_deref().unwrap_or("");
-                            let caret = caret_index_at_x(
-                                value,
-                                font_size,
-                                mx - (input_box.rect.left() + pad + 1.0),
-                            );
+                            // The unfocused address bar shows a shortened URL;
+                            // clicking it expands to the full one with the caret
+                            // at the end (select-all-like), so the caret index
+                            // never points into the wrong string.
+                            let is_address =
+                                input_box.element_id.as_deref() == Some("__pwb_address");
+                            let caret = if is_address {
+                                value.chars().count()
+                            } else {
+                                caret_index_at_x(
+                                    value,
+                                    font_size,
+                                    mx - (input_box.rect.left() + pad + 1.0),
+                                )
+                            };
                             *self.dom_handle_render.focused_input.borrow_mut() =
                                 Some((input_box.node_id, caret));
                             self.selection = TextSelection::default();
@@ -2080,6 +2216,10 @@ impl ApplicationHandler for BrowserApp {
             }
             WindowEvent::MouseWheel { delta, .. } => {
                 self.inline_menu = None;
+                let (delta_x, delta_y) = match delta {
+                    MouseScrollDelta::LineDelta(x, y) => (x, y),
+                    MouseScrollDelta::PixelDelta(pos) => (pos.x as f32, pos.y as f32),
+                };
                 let scroll_amount = match delta {
                     MouseScrollDelta::LineDelta(_, y) => y * 25.0,
                     MouseScrollDelta::PixelDelta(pos) => pos.y as f32,
@@ -2089,6 +2229,48 @@ impl ApplicationHandler for BrowserApp {
                 let height = size.height.max(1);
                 let dom_snapshot = self.dom_handle_render.dom.borrow();
                 let layout_root = build_layout_tree(&dom_snapshot, width, height, 0.0);
+
+                // The wheel over the tab strip scrolls the tabs horizontally
+                // (vertical wheel or horizontal trackpad pan), not the page.
+                let over_tabs = hit_test_layout_box_scrolled(
+                    &layout_root,
+                    self.current_mouse_pos.x,
+                    self.current_mouse_pos.y,
+                    &self.element_scrolls,
+                )
+                .and_then(|hit| shell::chrome_hover_suffix(&dom_snapshot.root, hit.node_id))
+                .map(|suffix| {
+                    suffix == "tabs_row"
+                        || suffix == "tabs"
+                        || suffix == "new_tab"
+                        || suffix == "tabscroll_left"
+                        || suffix == "tabscroll_right"
+                        || suffix.starts_with("tab_")
+                        || suffix.starts_with("close_")
+                })
+                .unwrap_or(false);
+                if over_tabs {
+                    let step = if delta_y.abs() >= delta_x.abs() {
+                        if delta_y > 0.0 {
+                            1
+                        } else if delta_y < 0.0 {
+                            -1
+                        } else {
+                            0
+                        }
+                    } else if delta_x > 0.0 {
+                        1
+                    } else {
+                        -1
+                    };
+                    drop(dom_snapshot);
+                    if step != 0 {
+                        self.shell.scroll_tabs(step);
+                        self.refresh_chrome();
+                    }
+                    window.request_redraw();
+                    return;
+                }
 
                 // Over a scroll container (e.g. the devtools tree/console), scroll
                 // that element instead of the page.
@@ -2296,6 +2478,9 @@ impl ApplicationHandler for BrowserApp {
                 }
             }
             WindowEvent::Resized(_) => {
+                // Chrome metrics and the visible tab window depend on the
+                // window size, so rebuild the bar instead of only repainting.
+                self.refresh_chrome();
                 window.request_redraw();
             }
             _ => {}

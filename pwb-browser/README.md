@@ -6,8 +6,8 @@
 
 - **tiny_skia 2D surface**: Software-rasterized 2D canvas drawing powered by `tiny-skia` (not GPU-accelerated Skia).
 - **Crisp TTF text rasterization**: Powered by `ab_glyph` to outline and render system TTF fonts (Arial/Helvetica/DejaVu) with Porter-Duff alpha blending.
-- **Viewport-relative font scaling**: Base font heights and paddings scale dynamically relative to window height (`viewport_scale = window_height / 600.0`).
-- **Dynamic content sizing**: Buttons and text views compute bounding boxes from text metrics and padding rather than fixed wide blocks.
+- **Theme system (`.ptheme`)**: UI colors, site default colors, chrome layout, icon set, and pixel sizes in `~/.pwb/themes`, hot-reloaded while the browser runs. See [docs/themes.md](docs/themes.md).
+- **Gently scaled pixel sizing**: Buttons, text, and spacing use theme pixel sizes scaled by window size instead of viewport-height fractions, so controls are neither tiny nor oversized.
 - **PlainJS runtime (`.pjs`)**: QuickJS-NG embedded engine executing `.pjs` scripts with custom `document` DOM manipulation APIs.
 - **Content-bound scrolling**: Scroll position capped to content height with a visual scrollbar.
 - **Text selection & clipboard**: Text selection with `Ctrl+C`/`Cmd+C` copy, `Ctrl+X`/`Cmd+X` cut, and `Ctrl+V`/`Cmd+V` paste into focused inputs via one long-lived `arboard` handle (so X11/Wayland clipboard managers keep the contents).
@@ -115,6 +115,10 @@ cargo run -p pwb-browser -- search.plain?q=plainweb
 # Show help
 cargo run -p pwb-browser -- --help
 ```
+
+## Themes
+
+Browser chrome and page defaults are themeable. Themes are JSON-like `.ptheme` files in `~/.pwb/themes` (two builtins are written there on first start), can be switched from the toolbar's settings page, and reload automatically when edited. See [docs/themes.md](docs/themes.md) for the format and every key.
 
 ## Documentation
 

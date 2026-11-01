@@ -56,12 +56,14 @@ pub(super) fn build_box(
     let start_y = *y;
     let is_view = node.tag == Tag::View;
 
-    // Defaults are viewport-relative (3.33vh ≈ 20px at a 600px-tall window) so
-    // views keep their previous proportions on any display.
+    // Defaults come from the active theme's page metrics (pixel-based, scaled
+    // gently with the window) rather than a viewport-height fraction. A view
+    // with no `padding` therefore gets the same comfortable inset on every
+    // window shape, and `padding: 0` still means zero.
     let padding = if is_view {
         resolve_len(
             style.padding,
-            UnitValue::Vh(0.0333),
+            UnitValue::Px(ctx.page.view_padding),
             containing.width(),
             ctx.viewport_w,
             ctx.viewport_h,
@@ -252,7 +254,7 @@ pub(super) fn build_box(
             }
             let column_gap = resolve_len(
                 style.gap,
-                UnitValue::Vh(0.02),
+                UnitValue::Px(ctx.page.gap),
                 containing.width(),
                 ctx.viewport_w,
                 ctx.viewport_h,
@@ -386,7 +388,7 @@ pub(super) fn build_box(
         Tag::Text => {
             let font_size = resolve_len(
                 style.font_size,
-                UnitValue::Vh(0.03),
+                UnitValue::Px(ctx.page.font),
                 containing.width(),
                 ctx.viewport_w,
                 ctx.viewport_h,
@@ -406,7 +408,11 @@ pub(super) fn build_box(
             // underline.
             let font_size = resolve_len(
                 style.font_size,
-                UnitValue::Vh(0.025),
+                UnitValue::Px(if node.tag == Tag::Link {
+                    ctx.page.font
+                } else {
+                    ctx.page.button_font
+                }),
                 containing.width(),
                 ctx.viewport_w,
                 ctx.viewport_h,
@@ -416,7 +422,7 @@ pub(super) fn build_box(
             } else if node.tag == Tag::Code {
                 UnitValue::Px(4.0)
             } else {
-                UnitValue::Vh(0.0333)
+                UnitValue::Px(ctx.page.button_padding)
             };
             let pad = resolve_len(
                 style.padding,
@@ -441,7 +447,7 @@ pub(super) fn build_box(
             // Text centering is handled by the renderer.
             let rect = Rect::from_xywh(flow_x, start_y, btn_width, btn_height)
                 .unwrap_or_else(|| Rect::from_xywh(flow_x, start_y, btn_width, 40.0).unwrap());
-            *y += btn_height + 12.0;
+            *y += btn_height + ctx.page.spacing;
             rect
         }
         Tag::Input => {
@@ -451,7 +457,7 @@ pub(super) fn build_box(
             // so empty inputs stay clickable.
             let pad = resolve_len(
                 style.padding,
-                UnitValue::Vh(0.012),
+                UnitValue::Px(ctx.page.input_padding),
                 containing.width(),
                 ctx.viewport_w,
                 ctx.viewport_h,
@@ -459,7 +465,7 @@ pub(super) fn build_box(
             let value = node.attributes.get("value").cloned().unwrap_or_default();
             let font_size = resolve_len(
                 style.font_size,
-                UnitValue::Vh(0.025),
+                UnitValue::Px(ctx.page.input_font),
                 containing.width(),
                 ctx.viewport_w,
                 ctx.viewport_h,
@@ -483,10 +489,17 @@ pub(super) fn build_box(
             let input_width = explicit
                 .unwrap_or_else(|| (text_w + pad * 2.0 + 8.0).max(140.0))
                 .min(max_width);
-            let input_height = font_size + pad * 2.0;
+            // An explicit height (the chrome address field) wins over the
+            // content-sized one.
+            let input_height = style
+                .height
+                .and_then(|uv| {
+                    resolve_unit(uv, containing.height(), ctx.viewport_w, ctx.viewport_h)
+                })
+                .unwrap_or(font_size + pad * 2.0);
             let rect = Rect::from_xywh(flow_x, *y, input_width, input_height)
                 .unwrap_or_else(|| Rect::from_xywh(flow_x, *y, 140.0, 30.0).unwrap());
-            *y += input_height + 8.0;
+            *y += input_height + ctx.page.spacing;
             rect
         }
         Tag::Image => {
@@ -517,7 +530,7 @@ pub(super) fn build_box(
                 .max(1.0);
             let rect = Rect::from_xywh(flow_x, *y, w, h)
                 .unwrap_or_else(|| Rect::from_xywh(flow_x, *y, w, 1.0).unwrap());
-            *y += h + 8.0;
+            *y += h + ctx.page.spacing;
             rect
         }
         Tag::Icon => {
@@ -526,7 +539,7 @@ pub(super) fn build_box(
             // inline icons fit inside their tab/button boxes.
             let font_size = resolve_len(
                 style.font_size,
-                UnitValue::Vh(0.035),
+                UnitValue::Px(ctx.page.icon_size),
                 containing.width(),
                 ctx.viewport_w,
                 ctx.viewport_h,
@@ -543,7 +556,7 @@ pub(super) fn build_box(
                 .unwrap_or(font_size);
             let rect = Rect::from_xywh(flow_x, *y, w, h)
                 .unwrap_or_else(|| Rect::from_xywh(flow_x, *y, 24.0, 24.0).unwrap());
-            *y += h + 4.0;
+            *y += h + ctx.page.spacing * 0.5;
             rect
         }
     };
@@ -571,6 +584,7 @@ pub(super) fn build_box(
         style: style.clone(),
         text: node.text.clone(),
         value: node.attributes.get("value").cloned(),
+        display_value: node.attributes.get("data-short-url").cloned(),
         placeholder: node.attributes.get("placeholder").cloned(),
         icon: node.attributes.get("icon").cloned(),
         image_src: node.attributes.get("src").cloned(),

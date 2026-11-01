@@ -285,7 +285,7 @@ fn apply_style_properties(node: &mut PlainNode, props: &[StyleProperty]) {
     }
 }
 
-fn style_property_to_attr(prop: &StyleProperty) -> Option<(String, String)> {
+pub fn style_property_to_attr(prop: &StyleProperty) -> Option<(String, String)> {
     use pwb_core::spec::PositionStyle;
     let (k, v): (&str, String) = match prop {
         StyleProperty::BackgroundColor(c) => (

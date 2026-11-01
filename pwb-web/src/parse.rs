@@ -12,4 +12,4 @@ mod tests;
 pub use error::ParseError;
 pub use pml::parse_pml_markup;
 pub use site::{parse_site_directory, ParsedSite};
-pub use style::{apply_stylesheet, parse_pss_stylesheet};
+pub use style::{apply_stylesheet, parse_pss_stylesheet, style_property_to_attr};

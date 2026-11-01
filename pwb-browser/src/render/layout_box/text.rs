@@ -2,13 +2,17 @@
 
 use crate::layout::LayoutBox;
 use crate::render::text::draw_text_ab_glyph;
-use pwb_core::spec::{Color, UnitValue};
+use pwb_core::spec::UnitValue;
 
 use super::render::RenderCtx;
 
 pub(super) fn render_text(ctx: &RenderCtx, box_node: &LayoutBox, pixmap: &mut tiny_skia::Pixmap) {
     if let Some(txt) = &box_node.text {
-        let font_size = ctx.resolve(box_node, box_node.style.font_size, UnitValue::Vh(0.03));
+        let font_size = ctx.resolve(
+            box_node,
+            box_node.style.font_size,
+            UnitValue::Px(crate::theme::with_active(|theme| theme.sizes.page_font)),
+        );
         draw_text_ab_glyph(
             pixmap,
             txt,
@@ -31,17 +35,14 @@ pub(super) fn render_code(ctx: &RenderCtx, box_node: &LayoutBox, pixmap: &mut ti
     // color for identifiers/operators — e.g. red error lines in the
     // devtools console stay red while their tokens are highlighted.
     if let Some(txt) = &box_node.text {
-        let font_size = ctx.resolve(box_node, box_node.style.font_size, UnitValue::Vh(0.03));
-        let base = if box_node.style.text_color != Color::WHITE {
-            box_node.style.text_color
-        } else {
-            Color {
-                r: 212,
-                g: 212,
-                b: 212,
-                a: 255,
-            }
-        };
+        let font_size = ctx.resolve(
+            box_node,
+            box_node.style.font_size,
+            UnitValue::Px(crate::theme::with_active(|theme| theme.sizes.page_font)),
+        );
+        // Base color for identifiers/operators comes from the theme's code text
+        // color unless the page overrides it.
+        let base = box_node.style.text_color;
         let mut x = box_node.rect.left();
         let y = box_node.rect.top();
         for (token, color) in crate::render::text::js_tokenize(txt, base) {

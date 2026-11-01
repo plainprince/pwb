@@ -7,6 +7,7 @@ use crate::layout::{measure_text, LayoutBox};
 use crate::render::color::input_auto_text_color;
 use crate::render::core::intersect_opt;
 use crate::render::icons::cached_icon_path;
+use crate::render::rounded::fill_rounded_rect;
 use crate::render::text::{caret_text_width, draw_text_ab_glyph, to_skia_color};
 use base64::{engine::general_purpose::STANDARD as BASE64, Engine as _};
 use pwb_core::spec::{Color, UnitValue};
@@ -97,19 +98,11 @@ pub(super) fn render_link(ctx: &RenderCtx, box_node: &LayoutBox, pixmap: &mut Pi
     let Some(label) = box_node.text.as_deref().filter(|t| !t.is_empty()) else {
         return;
     };
-    let font_size = ctx.resolve(box_node, box_node.style.font_size, UnitValue::Vh(0.025));
+    let font_size = ctx.resolve(box_node, box_node.style.font_size, UnitValue::Px(17.0));
     // Links are inline text: no box padding unless the page sets one.
     let pad = ctx.resolve(box_node, box_node.style.padding, UnitValue::Px(0.0));
-    let color = if box_node.style.text_color == Color::WHITE {
-        Color {
-            r: 122,
-            g: 162,
-            b: 247,
-            a: 255,
-        }
-    } else {
-        box_node.style.text_color
-    };
+    // The page default comes from the theme; authored colors override it.
+    let color = box_node.style.text_color;
     let x = box_node.rect.left() + pad + ctx.sx;
     let y = box_node.rect.top() + ctx.sy;
     let text_width = measure_text(label, font_size);
@@ -136,38 +129,20 @@ pub(super) fn render_button(ctx: &RenderCtx, box_node: &LayoutBox, pixmap: &mut 
     // Empty when the button has no label: never invent a placeholder word.
     let btn_txt = box_node.text.as_deref().unwrap_or("");
     // Mirror the layout: buttons size from `font-size`/`padding`.
-    let font_size = ctx.resolve(box_node, box_node.style.font_size, UnitValue::Vh(0.025));
-    let _pad = ctx.resolve(box_node, box_node.style.padding, UnitValue::Vh(0.0333));
+    let font_size = ctx.resolve(box_node, box_node.style.font_size, UnitValue::Px(16.0));
 
-    let mut paint = Paint::default();
-    let bg = if box_node.style.background_color != Color::TRANSPARENT {
-        box_node.style.background_color
-    } else {
-        Color {
-            r: 166,
-            g: 227,
-            b: 161,
-            a: 255,
-        }
-    };
-    paint.set_color(to_skia_color(bg));
-
+    // Background is always set by the theme defaults unless the page overrides
+    // it, so there is no "invent a green button" fallback anymore.
     if let Some(r) = ctx.shifted(box_node.rect) {
-        let path = PathBuilder::from_rect(r);
-        pixmap.fill_path(
-            &path,
-            &paint,
-            tiny_skia::FillRule::Winding,
-            Transform::identity(),
-            None,
+        fill_rounded_rect(
+            pixmap,
+            r,
+            box_node.style.border_radius,
+            box_node.style.background_color,
         );
     }
 
-    let label_color = if box_node.style.text_color != Color::WHITE {
-        box_node.style.text_color
-    } else {
-        Color::BLACK
-    };
+    let label_color = box_node.style.text_color;
 
     // Center text both horizontally and vertically within the button rect.
     // Clip to the rect so a label wider than its (explicit-width) button is cut
@@ -221,16 +196,9 @@ pub(super) fn render_icon(ctx: &RenderCtx, box_node: &LayoutBox, pixmap: &mut ti
         line_join: tiny_skia::LineJoin::Round,
         dash: None,
     };
-    let color = if box_node.style.text_color != Color::WHITE {
-        box_node.style.text_color
-    } else {
-        Color {
-            r: 166,
-            g: 227,
-            b: 161,
-            a: 255,
-        }
-    };
+    // Chrome icons are colored by their PSS class; page icons use the theme's
+    // default icon color.
+    let color = box_node.style.text_color;
     if let Some(stroked) = path.stroke(&stroke, 1.0) {
         if let Some(moved) = stroked.transform(ts) {
             let mut paint = Paint::default();
@@ -278,102 +246,115 @@ pub(super) fn render_icon(ctx: &RenderCtx, box_node: &LayoutBox, pixmap: &mut ti
 }
 
 pub(super) fn render_input(ctx: &RenderCtx, box_node: &LayoutBox, pixmap: &mut tiny_skia::Pixmap) {
-    if let Some(r) = ctx.shifted(box_node.rect) {
-        // A soft outline: the old 120,120,130 read as a bright focus ring on
-        // dark fields even when the input was not focused.
-        let border_color = SkiaColor::from_rgba8(78, 78, 92, 255);
-        let bg = if box_node.style.background_color != Color::TRANSPARENT {
-            to_skia_color(box_node.style.background_color)
-        } else {
-            SkiaColor::from_rgba8(250, 250, 252, 255)
-        };
-        let mut paint = Paint::default();
-        paint.set_color(border_color);
-        pixmap.fill_rect(r, &paint, Transform::identity(), None);
-        // Inner fill inset by 1px = the border.
-        let inner = Rect::from_xywh(
-            r.left() + 1.0,
-            r.top() + 1.0,
-            (r.width() - 2.0).max(1.0),
-            (r.height() - 2.0).max(1.0),
-        )
-        .unwrap();
-        paint.set_color(bg);
-        pixmap.fill_rect(inner, &paint, Transform::identity(), None);
-
-        // Value (or gray placeholder) drawn inside, clipped to the box so
-        // long values scroll visually instead of overflowing the field.
-        let font_size = ctx.resolve(box_node, box_node.style.font_size, UnitValue::Vh(0.025));
-        let pad = ctx.resolve(box_node, box_node.style.padding, UnitValue::Vh(0.012));
-        let value = box_node.value.as_deref().unwrap_or("");
-        let placeholder = box_node.placeholder.as_deref().unwrap_or("");
-        let is_focused = ctx
-            .input_focus
-            .map(|(id, _)| id == box_node.node_id)
-            .unwrap_or(false);
-
-        let mut text_state = ctx.state;
-        text_state.clip = intersect_opt(text_state.clip, inner);
-        let (text, color) = if !value.is_empty() {
-            let bg_color = Color {
-                r: (bg.red() * 255.0) as u8,
-                g: (bg.green() * 255.0) as u8,
-                b: (bg.blue() * 255.0) as u8,
-                a: 255,
-            };
-            let c = if box_node.style.text_color != Color::WHITE {
-                box_node.style.text_color
-            } else {
-                input_auto_text_color(&bg_color)
-            };
-            (value, c)
-        } else if !placeholder.is_empty() {
+    let Some(r) = ctx.shifted(box_node.rect) else {
+        return;
+    };
+    let (placeholder_color, fallback_border, default_bg, default_text) =
+        crate::theme::with_active(|theme| {
             (
-                placeholder,
-                Color {
-                    r: 130,
-                    g: 130,
-                    b: 140,
-                    a: 255,
-                },
+                theme.page.placeholder,
+                theme.page.input_border,
+                theme.page.input_bg,
+                theme.page.input_text,
             )
-        } else {
-            ("", box_node.style.text_color)
-        };
-        let text_left = r.left() + pad + 1.0;
-        let text_top = r.top() + pad;
-        if !text.is_empty() {
-            draw_text_ab_glyph(
-                pixmap,
-                text,
-                text_left,
-                text_top,
-                font_size,
-                color,
-                box_node.node_id,
-                ctx.selection,
-                text_state,
-            );
-        }
-        // Caret: a 2px bar at the caret index (blinking is skipped to
-        // avoid a per-frame timer waking the app).
-        if is_focused {
-            let caret = ctx.input_focus.map(|(_, c)| c).unwrap_or(0);
-            let caret_x = text_left + caret_text_width(value, font_size, caret);
-            let caret_h = (font_size * 1.2).max(8.0);
-            let caret_top = r.top() + ((r.height() - caret_h) / 2.0).max(0.0);
-            let caret_rect = Rect::from_xywh(caret_x, caret_top, 2.0, caret_h).unwrap();
+        });
+    // A page that themes the field background but not its text gets automatic
+    // contrast instead of light-on-light (or dark-on-dark).
+    let text_color = if box_node.style.text_color == default_text
+        && box_node.style.background_color != default_bg
+        && box_node.style.background_color != Color::TRANSPARENT
+    {
+        input_auto_text_color(&box_node.style.background_color)
+    } else {
+        box_node.style.text_color
+    };
+    // 1px border + rounded fill, both themed. The old hardcoded purple-grey
+    // outline looked like a focus ring on every field.
+    let border_color = if box_node.style.border_color != Color::TRANSPARENT {
+        box_node.style.border_color
+    } else {
+        fallback_border
+    };
+    let radius = box_node.style.border_radius;
+    fill_rounded_rect(pixmap, r, radius, border_color);
+    let inner = Rect::from_xywh(
+        r.left() + 1.0,
+        r.top() + 1.0,
+        (r.width() - 2.0).max(1.0),
+        (r.height() - 2.0).max(1.0),
+    )
+    .unwrap();
+    fill_rounded_rect(
+        pixmap,
+        inner,
+        (radius - 1.0).max(0.0),
+        box_node.style.background_color,
+    );
+
+    // Value (or gray placeholder) drawn inside, clipped to the box so long
+    // values scroll visually instead of overflowing the field. An unfocused
+    // chrome address field shows its shortened URL; focusing it reveals the
+    // full one (`value`).
+    let font_size = ctx.resolve(box_node, box_node.style.font_size, UnitValue::Px(15.0));
+    let pad = ctx.resolve(box_node, box_node.style.padding, UnitValue::Px(7.0));
+    let value = box_node.value.as_deref().unwrap_or("");
+    let short = box_node.display_value.as_deref().unwrap_or("");
+    let placeholder = box_node.placeholder.as_deref().unwrap_or("");
+    let is_focused = ctx
+        .input_focus
+        .map(|(id, _)| id == box_node.node_id)
+        .unwrap_or(false);
+    let shown = if !is_focused && !short.is_empty() {
+        short
+    } else {
+        value
+    };
+
+    let mut text_state = ctx.state;
+    text_state.clip = intersect_opt(text_state.clip, inner);
+    let (text, color) = if !shown.is_empty() {
+        (shown, text_color)
+    } else if !placeholder.is_empty() {
+        (placeholder, placeholder_color)
+    } else {
+        ("", text_color)
+    };
+    // The chrome address bar centers its shortened host while unfocused (like
+    // Chrome); focusing it left-aligns the full URL so the caret has room.
+    let is_chrome_address = box_node.element_id.as_deref() == Some("__pwb_address");
+    let text_left = if is_chrome_address && !is_focused && !text.is_empty() {
+        (r.left() + (r.width() - measure_text(text, font_size)) / 2.0).max(r.left() + pad + 1.0)
+    } else {
+        r.left() + pad + 1.0
+    };
+    // Vertically center single-line text; with an explicit height (the address
+    // field) padding-from-the-top left the text riding high.
+    let text_top = r.top() + ((r.height() - font_size) / 2.0).max(0.0);
+    if !text.is_empty() {
+        draw_text_ab_glyph(
+            pixmap,
+            text,
+            text_left,
+            text_top,
+            font_size,
+            color,
+            box_node.node_id,
+            ctx.selection,
+            text_state,
+        );
+    }
+    // Caret: a 2px bar at the caret index (blinking is skipped to avoid a
+    // per-frame timer waking the app).
+    if is_focused {
+        let caret = ctx.input_focus.map(|(_, c)| c).unwrap_or(0);
+        let caret_x = text_left + caret_text_width(value, font_size, caret);
+        let caret_h = (font_size * 1.2).max(8.0);
+        let caret_top = r.top() + ((r.height() - caret_h) / 2.0).max(0.0);
+        let caret_rect = Rect::from_xywh(caret_x, caret_top, 2.0, caret_h).unwrap();
+        if let Some(visible) = intersect_opt(text_state.clip, caret_rect) {
             let mut paint = Paint::default();
-            let bg_color = Color {
-                r: (bg.red() * 255.0) as u8,
-                g: (bg.green() * 255.0) as u8,
-                b: (bg.blue() * 255.0) as u8,
-                a: 255,
-            };
-            paint.set_color(to_skia_color(input_auto_text_color(&bg_color)));
-            if let Some(visible) = intersect_opt(text_state.clip, caret_rect) {
-                pixmap.fill_rect(visible, &paint, Transform::identity(), None);
-            }
+            paint.set_color(to_skia_color(text_color));
+            pixmap.fill_rect(visible, &paint, Transform::identity(), None);
         }
     }
 }

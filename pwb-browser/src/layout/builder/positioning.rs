@@ -33,6 +33,7 @@ pub(super) fn layout_node(
             style,
             text: node.text.clone(),
             value: node.attributes.get("value").cloned(),
+            display_value: node.attributes.get("data-short-url").cloned(),
             placeholder: node.attributes.get("placeholder").cloned(),
             icon: node.attributes.get("icon").cloned(),
             image_src: None,

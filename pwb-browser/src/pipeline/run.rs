@@ -70,7 +70,15 @@ pub fn build_browser_app(
     let mut shell = crate::shell::Shell::new("welcome.plain");
     // Start the badge from the live peer table so the first frame is truthful.
     shell.peers = domain.peers().len();
-    crate::shell::install_chrome(&mut initial_dom, &shell);
+
+    // Themes live in `$PWB_DATA/themes` (default `~/.pwb/themes`). Seed the two
+    // builtin files when they are missing, then install the selected theme for
+    // layout/render defaults before the first chrome build.
+    let theme_store = crate::theme::ThemeStore::discover();
+    theme_store.ensure_builtin_files();
+    let theme = theme_store.load(&shell.theme);
+    crate::theme::set_active(theme.clone());
+    crate::shell::install_chrome(&mut initial_dom, &shell, &theme, 900, 650);
     let dom_handle = DomHandle::new(initial_dom);
 
     // `localStorage` persists per bundle to `~/.pwb/<bundle-hash>.json`, keyed
@@ -185,6 +193,9 @@ pub fn build_browser_app(
         runtime,
         pending_page: None,
         shell,
+        theme,
+        theme_store,
+        last_theme_check: std::time::Instant::now(),
     })
 }
 

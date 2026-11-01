@@ -2,6 +2,7 @@
 
 use crate::layout::LayoutBox;
 use crate::render::core::intersect_opt;
+use crate::render::rounded::fill_rounded_rect;
 use crate::render::text::to_skia_color;
 use pwb_core::spec::Color;
 use tiny_skia::{Paint, PathBuilder, Rect, Transform};
@@ -11,15 +12,13 @@ use super::render::RenderCtx;
 pub(super) fn render_view(ctx: &RenderCtx, box_node: &LayoutBox, pixmap: &mut tiny_skia::Pixmap) {
     if box_node.style.background_color != Color::TRANSPARENT {
         if let Some(r) = ctx.shifted(box_node.rect) {
-            let mut paint = Paint::default();
-            paint.set_color(to_skia_color(box_node.style.background_color));
-            let path = PathBuilder::from_rect(r);
-            pixmap.fill_path(
-                &path,
-                &paint,
-                tiny_skia::FillRule::Winding,
-                Transform::identity(),
-                None,
+            // Themed surfaces (tabs, cards, buttons) use their `border-radius`;
+            // plain page views stay square.
+            fill_rounded_rect(
+                pixmap,
+                r,
+                box_node.style.border_radius,
+                box_node.style.background_color,
             );
         }
     }

@@ -82,10 +82,13 @@ fn flex_row_children_start_in_content_area_not_top() {
     let layout = build_layout_tree(&dom_with(root), 900, 600, 0.0);
     let row = find(&layout, 2).expect("row in tree");
     let home = find(&layout, 3).expect("home icon in tree");
-    let default_pad = 600.0 * 0.0333; // 3.33vh ≈ 20px
-                                      // The icon's absolute y is the row's flow position plus the row's top
-                                      // padding — it must sit inside the row below the top padding, not glued
-                                      // to the top edge of the screen (it used to be left in local coordinates).
+    // Views get the theme's page padding (pixel-based, not a vh fraction).
+    let default_pad =
+        crate::theme::PageDefaults::for_window(&crate::theme::Theme::default_dark(), 900, 600)
+            .view_padding;
+    // The icon's absolute y is the row's flow position plus the row's top
+    // padding — it must sit inside the row below the top padding, not glued
+    // to the top edge of the screen (it used to be left in local coordinates).
     assert!(
         (home.rect.top() - (row.rect.top() + default_pad)).abs() < 2.0,
         "row child sits in the row's content area, got top={} row.top={} padding={:.1}",
@@ -566,6 +569,11 @@ fn layout_node_display_none_collapses_to_a_zero_rect() {
     let ctx = LayoutCtx {
         viewport_w: 800.0,
         viewport_h: 600.0,
+        page: crate::theme::PageDefaults::for_window(
+            &crate::theme::Theme::default_dark(),
+            800,
+            600,
+        ),
     };
     let hidden = node(
         2,
@@ -603,6 +611,11 @@ fn layout_node_fixed_anchors_to_the_viewport_and_translates_its_subtree() {
     let ctx = LayoutCtx {
         viewport_w: 800.0,
         viewport_h: 600.0,
+        page: crate::theme::PageDefaults::for_window(
+            &crate::theme::Theme::default_dark(),
+            800,
+            600,
+        ),
     };
     let panel = node(
         2,
@@ -661,6 +674,11 @@ fn layout_node_absolute_resolves_bottom_anchor_against_the_containing_block() {
     let ctx = LayoutCtx {
         viewport_w: 800.0,
         viewport_h: 600.0,
+        page: crate::theme::PageDefaults::for_window(
+            &crate::theme::Theme::default_dark(),
+            800,
+            600,
+        ),
     };
     let containing = Rect::from_xywh(50.0, 40.0, 300.0, 200.0).unwrap();
     let panel = node(
@@ -755,6 +773,7 @@ fn translate_box_moves_the_whole_subtree_and_ignores_zero_offsets() {
             style: ComputedStyle::default(),
             text: None,
             value: None,
+            display_value: None,
             placeholder: None,
             icon: None,
             image_src: None,

@@ -69,17 +69,19 @@ This enables:
 
 ## Rendering Pipeline
 
-### Viewport-Relative Scaling
+### Theme-Scaled Pixel Sizing
 
-**Design Decision**: Dynamic viewport scaling ensures consistent rendering across window sizes.
+**Design Decision**: Default sizes are pixels from the active theme
+(`src/theme.rs`), scaled gently by both window dimensions so controls do not
+become tiny on short windows or huge on tall ones.
 
 ```rust
-let viewport_scale = (viewport_height as f32 / 600.0).clamp(0.75, 2.5);
+let scale = ((width / 1200.0) * (height / 800.0)).sqrt().clamp(0.9, 1.15);
 ```
 
-- **Base font size**: 18px at 600px viewport height
-- **Scaling range**: 0.75x to 2.5x
-- **Responsive**: Adapts to window resizing
+- **Base page font**: the theme's `sizes.page-font` (18px default)
+- **Chrome**: its own clamp (0.92–1.2) for tabs, toolbar, and icons
+- **Explicit PSS**: `px`, `%`, `vw`, and `vh` still behave as written
 
 ### Text Measurement & Layout
 

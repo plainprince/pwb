@@ -19,9 +19,16 @@ pub(crate) fn draw_scrollbar(
     let track_w = 8.0;
     let track_x = rect.right() - track_w;
     let track = Rect::from_xywh(track_x, rect.top(), track_w, inner_h).unwrap();
+    let (track_color, thumb_color) =
+        crate::theme::with_active(|theme| (theme.page.scrollbar_track, theme.page.scrollbar_thumb));
 
     let mut track_paint = Paint::default();
-    track_paint.set_color(SkiaColor::from_rgba8(38, 38, 40, 255));
+    track_paint.set_color(SkiaColor::from_rgba8(
+        track_color.r,
+        track_color.g,
+        track_color.b,
+        255,
+    ));
     let track_path = PathBuilder::from_rect(track);
     pixmap.fill_path(
         &track_path,
@@ -42,8 +49,13 @@ pub(crate) fn draw_scrollbar(
     let thumb = Rect::from_xywh(track_x, thumb_y, track_w, thumb_h).unwrap();
 
     let mut thumb_paint = Paint::default();
-    thumb_paint.set_color(SkiaColor::from_rgba8(90, 90, 95, 255));
-    let thumb_path = PathBuilder::from_rect(thumb);
+    thumb_paint.set_color(SkiaColor::from_rgba8(
+        thumb_color.r,
+        thumb_color.g,
+        thumb_color.b,
+        255,
+    ));
+    let thumb_path = crate::render::rounded::rounded_rect_path(thumb, track_w / 2.0);
     pixmap.fill_path(
         &thumb_path,
         &thumb_paint,

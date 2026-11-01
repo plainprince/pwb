@@ -54,6 +54,12 @@ pub fn find_node_by_id_ref<'a>(node: &'a DomNode, id: &str) -> Option<&'a DomNod
     }
     None
 }
+/// Convert a compiled PML node into a runtime DOM node (used by the browser
+/// chrome, which is generated as PML so PSS can style it).
+pub fn dom_node_from_plain(node: &PlainNode) -> DomNode {
+    convert_node(node)
+}
+
 fn convert_node(node: &PlainNode) -> DomNode {
     DomNode {
         id: node.id,

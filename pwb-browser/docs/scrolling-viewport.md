@@ -83,21 +83,18 @@ When `content_height <= viewport_height`, `scrollbar_info` is `None`.
 No track, no thumb, no wasted fill calls. This avoids visual clutter on
 short pages.
 
-## Viewport-Relative Scaling
+## Theme-Scaled Pixel Sizing
 
-All layout metrics — font size, padding, margin — are multiplied by a
-viewport scale factor:
+Layout defaults — font size, padding, gap — are the active theme's pixel
+values scaled gently by the window size:
 
 ```rust
-let viewport_scale = (viewport_height as f32 / 600.0).clamp(0.75, 2.5);
+let scale = ((width / 1200.0) * (height / 800.0)).sqrt().clamp(0.9, 1.15);
 ```
 
-| Window height | Scale factor |
-|---------------|-------------|
-| ≤ 450 px | 0.75 (floor) |
-| 600 px | 1.0 (baseline) |
-| 1200 px | 2.0 |
-| ≥ 1500 px | 2.5 (ceiling) |
+Unlike the old `vh`-only scale, a short window no longer shrinks text to
+unreadability and a tall one does not inflate every control. Pages can still
+opt into `px`, `%`, `vw`, or `vh` explicitly. See [themes.md](themes.md).
 
 This ensures readable typography on both small laptop screens and large
 monitors without requiring an explicit zoom control.

@@ -14,9 +14,14 @@ pub fn build_layout_tree(
     viewport_height: u32,
     scroll_y: f32,
 ) -> LayoutBox {
-    // Page margins are viewport-relative (5vh ≈ 30px at a 600px-tall window,
-    // ~65px at 1300px) so pages keep their proportions at any window size.
-    let margin_x = viewport_height as f32 * 0.05;
+    // Theme page defaults: pixel-based fonts and spacing scaled gently with
+    // the window (instead of `vh`, which made text tiny on short windows).
+    let page = crate::theme::PageDefaults::for_window(
+        &crate::theme::active_theme(),
+        viewport_width,
+        viewport_height,
+    );
+    let margin_x = page.margin;
 
     // The browser chrome is a fixed overlay painted above the page. Reserve its
     // height in the page's top flow, or the first lines of every page render
@@ -38,7 +43,7 @@ pub fn build_layout_tree(
         })
         .unwrap_or(0.0);
     let mut current_y = if chrome_height > 0.0 {
-        chrome_height + 12.0
+        chrome_height + page.top_gap
     } else {
         margin_x
     } - scroll_y;
@@ -53,6 +58,7 @@ pub fn build_layout_tree(
     let ctx = LayoutCtx {
         viewport_w: viewport_width as f32,
         viewport_h: viewport_height as f32,
+        page,
     };
     let viewport = ctx.viewport_rect();
     let mut root = layout_node(

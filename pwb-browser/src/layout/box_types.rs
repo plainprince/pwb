@@ -1,6 +1,7 @@
 //! Core layout box types and context.
 
 use crate::style::ComputedStyle;
+use crate::theme::PageDefaults;
 use pwb_core::spec::{OverflowStyle, Tag};
 use std::sync::OnceLock;
 use tiny_skia::Rect;
@@ -51,6 +52,10 @@ pub struct LayoutBox {
     pub text: Option<String>,
     /// Live `<input>` value (the `value` attribute) — rendered inside the box.
     pub value: Option<String>,
+    /// Alternative text shown while the input is *not* focused (the chrome
+    /// address bar uses it to show the shortened host/CID, expanding to the
+    /// full URL on focus).
+    pub display_value: Option<String>,
     /// `<input placeholder="...">` shown in gray while the value is empty.
     pub placeholder: Option<String>,
     /// Builtin feather icon name (`icon="home"`) for `<icon-...>` elements.
@@ -85,6 +90,10 @@ pub enum ResizeEdge {
 pub(crate) struct LayoutCtx {
     pub(crate) viewport_w: f32,
     pub(crate) viewport_h: f32,
+    /// Theme-provided page defaults (font sizes, padding, gap). Pixel-based for
+    /// the current window instead of viewport-height percentages, so content
+    /// neither shrinks to nothing nor balloons with the window.
+    pub(crate) page: PageDefaults,
 }
 
 impl LayoutCtx {

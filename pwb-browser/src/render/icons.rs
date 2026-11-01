@@ -13,6 +13,17 @@ pub(crate) fn cached_icon_path(name: &str) -> Option<Path> {
         if let Some(p) = cache.get(name) {
             return Some(p.clone());
         }
+        // A theme can add (or shadow) glyphs from raw path data; it wins over
+        // the builtin feather set so an "icon set" can be fully replaced.
+        if let Some(data) =
+            crate::theme::with_active(|theme| theme.custom_icon(name).map(str::to_string))
+        {
+            let p = parse_icon_path(&data);
+            if !p.is_empty() {
+                cache.insert(name.to_string(), p.clone());
+                return Some(p);
+            }
+        }
         if let Some(d) = feather::feather_path(name) {
             let p = parse_icon_path(d);
             if !p.is_empty() {

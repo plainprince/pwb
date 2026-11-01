@@ -217,6 +217,7 @@ pub(crate) fn draw_text_ab_glyph(
         }
     };
 
+    let selection_color = crate::theme::with_active(|theme| theme.page.selection);
     if let Some(font) = super::icons::get_font() {
         let scale = PxScale::from(size);
         let mut x_offset = start_x;
@@ -239,7 +240,12 @@ pub(crate) fn draw_text_ab_glyph(
                     Rect::from_xywh(x_offset + sx, start_y + sy, advance, size * 1.1).unwrap(),
                 ) {
                     let mut sel_paint = Paint::default();
-                    sel_paint.set_color(SkiaColor::from_rgba8(74, 118, 168, 200));
+                    sel_paint.set_color(SkiaColor::from_rgba8(
+                        selection_color.r,
+                        selection_color.g,
+                        selection_color.b,
+                        200,
+                    ));
                     let sel_path = PathBuilder::from_rect(sel_rect);
                     pixmap.fill_path(
                         &sel_path,
@@ -252,7 +258,9 @@ pub(crate) fn draw_text_ab_glyph(
             }
 
             let draw_color = if is_char_selected {
-                Color::WHITE
+                // Contrast against the theme's selection color instead of always
+                // forcing white (unreadable on a light selection tint).
+                crate::render::color::input_auto_text_color(&selection_color)
             } else {
                 color
             };

@@ -34,7 +34,11 @@ pub fn render_dom_into_pixmap(
             *pixmap = new_pixmap;
         }
     }
-    pixmap.fill(SkiaColor::from_rgba8(17, 17, 27, 255));
+    // The window/backing surface uses the theme's page background, so there is
+    // no flash of a hardcoded color behind translucent or short pages.
+    let page = crate::theme::active_theme();
+    let bg = page.page.background;
+    pixmap.fill(SkiaColor::from_rgba8(bg.r, bg.g, bg.b, 255));
 
     let layout_root = build_layout_tree(dom, width, height, scroll_y);
     render_layout_box(
@@ -53,7 +57,7 @@ pub fn render_dom_into_pixmap(
     let viewport_height = height as f32;
 
     let scrollbar_info = if content_height > viewport_height {
-        let scrollbar_width = 12.0;
+        let scrollbar_width = 11.0;
         let track_height = viewport_height;
         let thumb_height = (viewport_height / content_height * viewport_height).max(30.0);
         let max_scroll = content_height - viewport_height;
@@ -83,14 +87,25 @@ pub fn render_dom_into_pixmap(
             .unwrap(),
         };
 
-        // Render Scrollbar track
+        // Render Scrollbar track and thumb in the theme's page colors.
+        let track_color = page.page.scrollbar_track;
+        let thumb_color = page.page.scrollbar_thumb;
         let mut track_paint = Paint::default();
-        track_paint.set_color(SkiaColor::from_rgba8(40, 40, 55, 255));
+        track_paint.set_color(SkiaColor::from_rgba8(
+            track_color.r,
+            track_color.g,
+            track_color.b,
+            255,
+        ));
         pixmap.fill_rect(info.track_rect, &track_paint, Transform::identity(), None);
 
-        // Render Scrollbar thumb
         let mut thumb_paint = Paint::default();
-        thumb_paint.set_color(SkiaColor::from_rgba8(120, 120, 140, 255));
+        thumb_paint.set_color(SkiaColor::from_rgba8(
+            thumb_color.r,
+            thumb_color.g,
+            thumb_color.b,
+            255,
+        ));
         pixmap.fill_rect(info.thumb_rect, &thumb_paint, Transform::identity(), None);
 
         Some(info)

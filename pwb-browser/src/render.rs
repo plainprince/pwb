@@ -7,6 +7,7 @@ mod highlight;
 mod hit;
 pub(crate) mod icons;
 mod layout_box;
+mod rounded;
 mod scrollbar;
 mod text;
 mod tooltip;

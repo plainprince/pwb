@@ -13,20 +13,49 @@ use pwb_core::spec::{
 pub fn compute_style(node: &DomNode) -> ComputedStyle {
     let mut style = ComputedStyle::default();
 
+    // Website default colors come from the active theme. They are only
+    // fallbacks: authored PSS/markup attributes are applied below and win.
+    let page = crate::theme::with_active(|theme| theme.page.clone());
+    style.text_color = page.text;
+
     // Tag defaults
     match node.tag {
         Tag::View | Tag::Document | Tag::Head | Tag::Title => {
             // View containers and document structure elements are flex by default
             style.display = DisplayStyle::Flex;
         }
-        Tag::Button | Tag::Link | Tag::Input | Tag::Text | Tag::Icon | Tag::Image | Tag::Code => {
-            // Buttons, links, inputs, text, icons, images, and code flow inline (Block layout but inline flow)
-            if matches!(node.tag, Tag::Button | Tag::Link) {
-                style.cursor = Some(CursorStyle::Pointer);
-            } else if matches!(node.tag, Tag::Input | Tag::Text) {
+        Tag::Button => {
+            style.display = DisplayStyle::Block;
+            style.cursor = Some(CursorStyle::Pointer);
+            style.background_color = page.button_bg;
+            style.text_color = page.button_text;
+        }
+        Tag::Link => {
+            style.display = DisplayStyle::Block;
+            style.cursor = Some(CursorStyle::Pointer);
+            style.text_color = page.link;
+        }
+        Tag::Input => {
+            style.display = DisplayStyle::Block;
+            style.cursor = Some(CursorStyle::Text);
+            style.background_color = page.input_bg;
+            style.text_color = page.input_text;
+            style.border_color = page.input_border;
+        }
+        Tag::Icon => {
+            style.display = DisplayStyle::Block;
+            style.text_color = page.icon;
+        }
+        Tag::Code => {
+            style.display = DisplayStyle::Block;
+            style.background_color = page.code_bg;
+            style.text_color = page.code_text;
+        }
+        Tag::Text | Tag::Image => {
+            style.display = DisplayStyle::Block;
+            if node.tag == Tag::Text {
                 style.cursor = Some(CursorStyle::Text);
             }
-            style.display = DisplayStyle::Block;
         }
         _ => {}
     }

@@ -507,6 +507,12 @@ fn harness() -> Harness {
     });
     app.shell.active = 0;
     app.shell.bookmarks.clear();
+    // The session also remembers the theme; pin it so a developer's local
+    // `.ptheme` choice cannot change chrome/page defaults under the tests.
+    app.shell.theme = "default-dark".to_string();
+    app.theme = crate::theme::Theme::default_dark();
+    crate::theme::set_active(app.theme.clone());
+    app.refresh_chrome();
     Harness {
         app,
         _runtime: runtime,

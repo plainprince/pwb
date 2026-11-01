@@ -23,6 +23,7 @@ fn test_draw_hover_highlight_paints() {
         style: Default::default(),
         text: None,
         value: None,
+        display_value: None,
         placeholder: None,
         icon: None,
         image_src: None,
@@ -34,6 +35,7 @@ fn test_draw_hover_highlight_paints() {
             style: Default::default(),
             text: None,
             value: None,
+            display_value: None,
             placeholder: None,
             icon: None,
             image_src: None,
@@ -78,6 +80,7 @@ fn test_draw_selected_highlight_by_node_id() {
         style: Default::default(),
         text: None,
         value: None,
+        display_value: None,
         placeholder: None,
         icon: None,
         image_src: None,
@@ -89,6 +92,7 @@ fn test_draw_selected_highlight_by_node_id() {
             style: Default::default(),
             text: None,
             value: None,
+            display_value: None,
             placeholder: None,
             icon: None,
             image_src: None,
@@ -132,6 +136,7 @@ fn test_scroll_container_hit_test_and_finder() {
         style: Default::default(),
         text: None,
         value: None,
+        display_value: None,
         placeholder: None,
         icon: None,
         image_src: None,
@@ -147,6 +152,7 @@ fn test_scroll_container_hit_test_and_finder() {
         style: Default::default(),
         text: None,
         value: None,
+        display_value: None,
         placeholder: None,
         icon: None,
         image_src: None,
@@ -167,6 +173,7 @@ fn test_scroll_container_hit_test_and_finder() {
         style: Default::default(),
         text: None,
         value: None,
+        display_value: None,
         placeholder: None,
         icon: None,
         image_src: None,
@@ -236,6 +243,7 @@ fn test_scroll_container_renders_scrollbar_and_clips() {
         style: child_style,
         text: None,
         value: None,
+        display_value: None,
         placeholder: None,
         icon: None,
         image_src: None,
@@ -251,6 +259,7 @@ fn test_scroll_container_renders_scrollbar_and_clips() {
         style: ComputedStyle::default(),
         text: None,
         value: None,
+        display_value: None,
         placeholder: None,
         icon: None,
         image_src: None,
@@ -349,6 +358,7 @@ fn test_icon_renders_stroked_pixels() {
         style,
         text: None,
         value: None,
+        display_value: None,
         placeholder: None,
         icon: Some("home".to_string()),
         image_src: None,
@@ -432,6 +442,7 @@ fn test_icon_centered_in_rectangular_box() {
         style,
         text: None,
         value: None,
+        display_value: None,
         placeholder: None,
         icon: Some("home".to_string()),
         image_src: None,
@@ -520,14 +531,22 @@ fn test_icon_centered_in_rectangular_box() {
 fn test_input_renders_border_value_and_caret() {
     use crate::style::ComputedStyle;
     use pwb_core::spec::Tag;
+    // Explicit light-field colors: the renderer must paint what the computed
+    // style says (theme defaults live in `compute_style`, not the renderer).
+    let style = ComputedStyle {
+        background_color: pwb_core::spec::Color::WHITE,
+        text_color: pwb_core::spec::Color::BLACK,
+        ..ComputedStyle::default()
+    };
     let input = crate::layout::LayoutBox {
         node_id: 5,
         tag: Tag::Input,
         element_id: None,
         rect: Rect::from_xywh(10.0, 10.0, 200.0, 30.0).unwrap(),
-        style: ComputedStyle::default(),
+        style,
         text: None,
         value: Some("Hi".to_string()),
+        display_value: None,
         placeholder: None,
         icon: None,
         image_src: None,
@@ -574,7 +593,7 @@ fn test_input_renders_border_value_and_caret() {
 
     // The caret at index 1 sits right after the 'H' glyph (text starts at
     // left + padding + 1px border).
-    let text_left = 10.0 + 7.2 + 1.0;
+    let text_left = 10.0 + 7.0 + 1.0;
     let caret_xf = text_left + crate::layout::measure_text("H", 15.0);
     let caret_x = caret_xf as u32;
     // The 2px bar may straddle two columns; check both.
@@ -754,6 +773,7 @@ fn test_border_draws_lines_on_view_edges() {
         style,
         text: None,
         value: None,
+        display_value: None,
         placeholder: None,
         icon: None,
         image_src: None,
@@ -813,6 +833,7 @@ fn test_border_draws_lines_on_view_edges() {
         style,
         text: None,
         value: None,
+        display_value: None,
         placeholder: None,
         icon: None,
         image_src: None,
@@ -898,6 +919,7 @@ fn test_code_box_paints_highlighted_tokens() {
         style: crate::style::ComputedStyle::default(),
         text: Some("var k = 'q';".to_string()),
         value: None,
+        display_value: None,
         placeholder: None,
         icon: None,
         image_src: None,
@@ -970,6 +992,7 @@ fn test_code_tokens_advance_by_real_width_not_font_size() {
         style: crate::style::ComputedStyle::default(),
         text: Some(text.to_string()),
         value: None,
+        display_value: None,
         placeholder: None,
         icon: None,
         image_src: None,
@@ -1358,6 +1381,7 @@ fn test_image_paints_a_scaled_png_inside_its_box() {
         style: Default::default(),
         text: None,
         value: None,
+        display_value: None,
         placeholder: None,
         icon: None,
         image_src: Some(path.to_string_lossy().into_owned()),
@@ -1407,6 +1431,7 @@ fn test_image_with_missing_source_paints_a_placeholder() {
         style: Default::default(),
         text: None,
         value: None,
+        display_value: None,
         placeholder: None,
         icon: None,
         image_src: Some("/definitely/not/a/real/image.png".to_string()),
@@ -1440,6 +1465,8 @@ fn test_link_paints_its_label_and_underline() {
     // the label paints in the accent color and a 1px underline sits below it.
     let style = crate::style::ComputedStyle {
         padding: Some(pwb_core::spec::UnitValue::Px(0.0)),
+        font_size: Some(pwb_core::spec::UnitValue::Px(15.0)),
+        text_color: crate::theme::Theme::default_dark().page.link,
         ..Default::default()
     };
     let link = crate::layout::LayoutBox {
@@ -1450,6 +1477,7 @@ fn test_link_paints_its_label_and_underline() {
         style,
         text: Some("Visit Site →".to_string()),
         value: None,
+        display_value: None,
         placeholder: None,
         icon: None,
         image_src: None,
