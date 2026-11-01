@@ -106,9 +106,9 @@ See the layer READMEs above for usage; each links into the protocol and design d
 ## Contributors
 
 PlainWeb is built by the people on this list.
-1. **[plainprince](https://plainprince.github.io)
+1. **[plainprince](https://plainprince.github.io)**
 - project lead
-2. **[developmental-suffering](https://github.com/developmental-suffering)
+2. **[developmental-suffering](https://github.com/developmental-suffering)**
 - first contributor
 
 Want to be on it? Read [CONTRIBUTING.md](CONTRIBUTING.md) and open a PR — or
