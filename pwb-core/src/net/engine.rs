@@ -701,9 +701,7 @@ impl NodeEngine {
         // never retransmit liveness probes themselves (dial retries those).
         let track = !matches!(
             message,
-            NetworkMessage::Ack { .. }
-                | NetworkMessage::Ping { .. }
-                | NetworkMessage::Pong { .. }
+            NetworkMessage::Ack { .. } | NetworkMessage::Ping { .. } | NetworkMessage::Pong { .. }
         );
         let (seq, datagrams) = self.encode_message_for_tracked(peer, &message)?;
         if track {
@@ -732,10 +730,7 @@ impl NodeEngine {
         let default = super::reliability::RTO_BASE;
         if let Some(stats) = self.reliability.lock().unwrap().stats(peer).cloned() {
             let rtt = stats.rtt.max(std::time::Duration::from_millis(50));
-            (rtt * 2).clamp(
-                super::reliability::RTO_BASE,
-                super::reliability::RTO_MAX,
-            )
+            (rtt * 2).clamp(super::reliability::RTO_BASE, super::reliability::RTO_MAX)
         } else {
             default
         }
@@ -759,8 +754,7 @@ impl NodeEngine {
         }
         let keys: Vec<PublicKey> = peers.iter().map(|(k, _)| *k).collect();
         let ranked = self.reliability.lock().unwrap().ranked(&keys);
-        let by_key: std::collections::HashMap<PublicKey, DhPublicKey> =
-            peers.into_iter().collect();
+        let by_key: std::collections::HashMap<PublicKey, DhPublicKey> = peers.into_iter().collect();
         Some(
             ranked
                 .into_iter()
@@ -886,11 +880,7 @@ impl NodeEngine {
     /// iterating the whole table: with dedup + hop budget the message still
     /// reaches the swarm in O(log N) rounds at O(fanout) cost per node
     /// instead of O(degree) per node.
-    pub fn gossip_targets(
-        &self,
-        exclude: Option<SocketAddr>,
-        fanout: usize,
-    ) -> Vec<PublicKey> {
+    pub fn gossip_targets(&self, exclude: Option<SocketAddr>, fanout: usize) -> Vec<PublicKey> {
         use rand::seq::SliceRandom;
         // Single lock acquisition: resolve the excluded sender (by address,
         // the only identity flood handlers have) and snapshot the keys
@@ -935,7 +925,10 @@ impl NodeEngine {
     ) -> usize {
         let mut sent = 0;
         for public_key in targets {
-            if self.send_to_with(public_key, message.clone(), flags).is_ok() {
+            if self
+                .send_to_with(public_key, message.clone(), flags)
+                .is_ok()
+            {
                 sent += 1;
             }
         }
@@ -958,13 +951,19 @@ impl NodeEngine {
         if sent == 0 {
             // Every send failed identically (e.g. the message does not fit
             // the size cap): surface it instead of pretending it went out.
-            return Err(NetworkError::PeerNotFound("no gossip target reachable".to_string()));
+            return Err(NetworkError::PeerNotFound(
+                "no gossip target reachable".to_string(),
+            ));
         }
         Ok(())
     }
 
     /// [`Self::broadcast_gossip_with`] with default flags.
-    pub fn broadcast_gossip(&self, message: NetworkMessage, fanout: usize) -> Result<(), NetworkError> {
+    pub fn broadcast_gossip(
+        &self,
+        message: NetworkMessage,
+        fanout: usize,
+    ) -> Result<(), NetworkError> {
         self.broadcast_gossip_with(message, SendFlags::EMPTY, fanout)
     }
 
@@ -1153,11 +1152,13 @@ impl NodeEngine {
 
         let start = tokio::time::Instant::now();
         let deadline = start + timeout;
-        // Hedged retries: the first attempt uses the caller's path; a slow
-        // or lossy entry relay stalls the whole circuit (TCP/Tor's core
-        // failure), so the second attempt races the same request over the
-        // best-ranked alternate entry while the first is still in flight.
-        // Same request_id, so the first reply wins and the loser is dropped.
+        // Sequential failover: the first attempt uses the caller's path; a
+        // slow or lossy entry relay stalls the whole circuit (TCP/Tor's core
+        // failure), so a stalled attempt fails over to the best-ranked
+        // alternate entry. Strictly one request is ever in flight: concurrent
+        // duplicates would each earn a full (possibly bulk) reply and
+        // collapse the per-source cell budget under load. Same request_id,
+        // so a late reply to an earlier attempt still resolves the wait.
         let mut attempt = 0u32;
         let mut active_path = path.to_vec();
         let mut active_return = self.build_return_path(&active_path)?;
@@ -1174,31 +1175,38 @@ impl NodeEngine {
                 Some(&active_return),
                 message,
             )?;
-            // Short first wait (fast path answers quickly), then hedge.
-            let wait = if attempt == 0 {
-                (timeout / 4).clamp(Duration::from_millis(150), Duration::from_millis(500))
-            } else {
-                (timeout / 3).max(Duration::from_millis(200))
-            };
+            // Fast paths answer far inside the budget, so the first attempt
+            // gets half (bounded to 2-5s) and the failover rides out the
+            // remainder. Shorter than that and loaded-but-healthy circuits
+            // duplicate their bulk replies into a congestion spiral.
             let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
             if remaining.is_zero() {
+                self.record_onion_failure(&active_path);
                 break Err(NetworkError::Timeout);
             }
-            match tokio::time::timeout(remaining.min(wait), rx.recv()).await {
+            let wait = if attempt == 0 {
+                remaining.min((timeout / 2).clamp(Duration::from_secs(2), Duration::from_secs(5)))
+            } else {
+                remaining
+            };
+            match tokio::time::timeout(wait, rx.recv()).await {
                 Ok(Some(reply)) => {
                     self.record_onion_success(&active_path, start.elapsed());
-                    self.metrics.record_onion_hedged();
+                    if attempt > 0 {
+                        self.metrics.record_onion_hedged();
+                    }
                     break Ok(reply);
                 }
                 Ok(None) => break Err(NetworkError::Timeout),
                 Err(_) => {
                     if tokio::time::Instant::now() >= deadline {
+                        self.record_onion_failure(&active_path);
                         break Err(NetworkError::Timeout);
                     }
-                    // Mark this entry suspect and hedge over a better one.
+                    // Mark this entry suspect and fail over to a better one.
                     self.record_onion_failure(&active_path);
                     attempt += 1;
-                    if let Some(alt) = self.hedged_path(path) {
+                    if let Some(alt) = self.failover_path(path) {
                         active_path = alt;
                         if let Ok(ret) = self.build_return_path(&active_path) {
                             if let Some(addr) = self.onion_address(&active_path[0]) {
@@ -1210,9 +1218,6 @@ impl NodeEngine {
                 }
             }
         };
-        if result.is_err() {
-            self.record_onion_failure(&active_path);
-        }
         self.pending_onion_replies
             .lock()
             .unwrap()
@@ -1220,9 +1225,9 @@ impl NodeEngine {
         result
     }
 
-    /// Alternate path for a hedged retry: keep the caller's exit/middle but
+    /// Alternate path for a failover retry: keep the caller's exit/middle but
     /// swap a failing entry for the best-ranked spare relay.
-    fn hedged_path(&self, original: &[DhPublicKey]) -> Option<Vec<DhPublicKey>> {
+    fn failover_path(&self, original: &[DhPublicKey]) -> Option<Vec<DhPublicKey>> {
         let spare = self.select_onion_path(original.len())?;
         // Prefer a path whose entry differs (the slow hop is usually first).
         if spare[0] != original[0] {
@@ -1940,10 +1945,8 @@ pub async fn peer_exchange_loop(engine: NodeEngine, sender_pubkey: PublicKey, in
             use rand::seq::SliceRandom;
             let table = engine.peer_table();
             let guard = table.lock().unwrap();
-            let mut all: Vec<(SocketAddr, PublicKey)> = guard
-                .values()
-                .map(|p| (p.address, p.public_key))
-                .collect();
+            let mut all: Vec<(SocketAddr, PublicKey)> =
+                guard.values().map(|p| (p.address, p.public_key)).collect();
             if all.len() > PEER_EXCHANGE_ADVERTISED_MAX {
                 all.shuffle(&mut rand::rngs::OsRng);
                 all.truncate(PEER_EXCHANGE_ADVERTISED_MAX);

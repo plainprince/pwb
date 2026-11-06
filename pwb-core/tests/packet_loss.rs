@@ -121,7 +121,9 @@ async fn reliable_delivery_survives_fragment_loss() {
     // that dial still succeeds: Pings retry, acks pass).
     // Fall back to direct dial if the shim dance races; the loss test below
     // still exercises retransmit because the shim drops forward traffic.
-    let _ = engine_a.dial(shim2, kp_b.public, Duration::from_secs(3)).await;
+    let _ = engine_a
+        .dial(shim2, kp_b.public, Duration::from_secs(3))
+        .await;
     tokio::time::sleep(Duration::from_millis(200)).await;
 
     let mut sub_b = engine_b.subscribe();
@@ -194,7 +196,10 @@ async fn unreliable_relays_are_deprioritized() {
     }
     let path = engine.select_onion_path(3).expect("path selects");
     let bad = DhPublicKey::from_ed25519(&keys[0]).unwrap();
-    assert!(!path.contains(&bad), "lossy relay should be avoided, got {path:?}");
+    assert!(
+        !path.contains(&bad),
+        "lossy relay should be avoided, got {path:?}"
+    );
 }
 
 #[tokio::test]

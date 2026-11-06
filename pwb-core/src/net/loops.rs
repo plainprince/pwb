@@ -400,8 +400,7 @@ pub(super) async fn peer_maintenance_loop(
             let mut candidates: Vec<(PublicKey, SocketAddr, bool)> = peer_table
                 .values()
                 .map(|peer| {
-                    let quiet =
-                        now.saturating_duration_since(peer.last_seen) >= quiet_after;
+                    let quiet = now.saturating_duration_since(peer.last_seen) >= quiet_after;
                     (peer.public_key, peer.address, quiet)
                 })
                 .collect();

@@ -5,9 +5,7 @@ use std::net::SocketAddr;
 use std::time::Duration;
 
 use pwb_core::crypto::Keypair;
-use pwb_core::net::{
-    GOSSIP_FANOUT, NodeConfig, NodeEngine, PEER_EXCHANGE_ADVERTISED_MAX,
-};
+use pwb_core::net::{NodeConfig, NodeEngine, GOSSIP_FANOUT, PEER_EXCHANGE_ADVERTISED_MAX};
 
 fn test_engine(max_peers: usize) -> NodeEngine {
     NodeEngine::new(NodeConfig {
@@ -35,10 +33,7 @@ fn peer_table_stays_bounded_under_mass_advertisement() {
             .unwrap();
     }
     let len = engine.peer_table().lock().unwrap().len();
-    assert!(
-        len <= 16,
-        "peer table must respect max_peers, got {len}"
-    );
+    assert!(len <= 16, "peer table must respect max_peers, got {len}");
 }
 
 #[test]

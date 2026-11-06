@@ -120,10 +120,7 @@ impl ReliabilityTracker {
     }
 
     pub fn record_success(&mut self, peer: &PublicKey, rtt: Option<Duration>) {
-        self.peers
-            .entry(*peer)
-            .or_default()
-            .record_success(rtt);
+        self.peers.entry(*peer).or_default().record_success(rtt);
     }
 
     pub fn record_failure(&mut self, peer: &PublicKey) {
@@ -166,10 +163,8 @@ impl ReliabilityTracker {
     /// Rank candidates best-first, filtering peers in cooldown unless
     /// everything is in cooldown (then return the least-bad).
     pub fn ranked(&self, candidates: &[PublicKey]) -> Vec<PublicKey> {
-        let mut scored: Vec<(PublicKey, f64)> = candidates
-            .iter()
-            .map(|k| (*k, self.score(k)))
-            .collect();
+        let mut scored: Vec<(PublicKey, f64)> =
+            candidates.iter().map(|k| (*k, self.score(k))).collect();
         scored.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
         let usable: Vec<PublicKey> = scored
             .iter()
@@ -219,7 +214,11 @@ impl PendingSend {
     /// Current retransmit deadline with exponential backoff.
     pub fn deadline(&self) -> Instant {
         let shift = self.attempts.min(4) as u32;
-        let backoff = self.rto.checked_mul(1 << shift).unwrap_or(RTO_MAX).min(RTO_MAX);
+        let backoff = self
+            .rto
+            .checked_mul(1 << shift)
+            .unwrap_or(RTO_MAX)
+            .min(RTO_MAX);
         self.last_send + backoff
     }
 
