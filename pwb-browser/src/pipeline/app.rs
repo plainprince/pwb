@@ -23,13 +23,14 @@ use crate::render::{
     render_dom_into_pixmap, SelectionPoint, TextSelection,
 };
 use crate::resolver::{
-    content_id_of, is_chat_target, is_register_target, is_system_target, pwb_name_of,
-    register_claim_of, resolve_url_or_file_with_context, room_of, search_query_of,
+    content_id_of, is_blog_target, is_chat_target, is_register_target, is_system_target,
+    pwb_name_of, register_claim_of, resolve_url_or_file_with_context, room_of, search_query_of,
 };
 use crate::shell::{self, ChromeAction, Shell};
 use crate::theme::{self, Theme, ThemeStore};
 use arboard::Clipboard;
 use pwb_core::spec::Tag;
+use pwb_node::blog::BlogService;
 use pwb_node::chat::{ChatRoute, ChatService};
 use pwb_node::domain::{DomainRegistry, DomainService};
 use pwb_node::federation::DistributedSearch;
@@ -124,6 +125,13 @@ pub struct BrowserApp {
     /// The room version seen at the last render; a bump means a post echo, a
     /// membership change, or an inbound post — re-render the room page.
     pub(super) last_room_version: u64,
+    /// Global-feed service backing `blog.plain`: entries are signed as this
+    /// identity and flooded to the network, and the feed is kept while the
+    /// page is open.
+    pub(super) blog: Arc<BlogService>,
+    /// The feed version seen at the last render; a bump means a post echo, a
+    /// reader announcement, or an inbound entry — re-render `blog.plain`.
+    pub(super) last_blog_version: u64,
     /// Tokio runtime handle used to spawn background shard-query tasks.
     pub(super) runtime: tokio::runtime::Handle,
     /// In-flight async page load (federated search results or remote `.pwb`
@@ -350,6 +358,14 @@ impl BrowserApp {
             }
         }
 
+        // Opening the feed is a subscription: subscribe before resolving so
+        // the page renders with its entries and the sync request goes out.
+        if is_blog_target(url) {
+            if let Err(error) = self.blog.subscribe() {
+                eprintln!("[Blog] Cannot subscribe: {error}");
+            }
+        }
+
         let bytes: Vec<u8> = {
             let registry = self.registry.lock().unwrap();
             let peers = self.domain.peers();
@@ -370,6 +386,7 @@ impl BrowserApp {
                 network,
                 self.chat.snapshot(),
                 self.room.snapshot(),
+                self.blog.snapshot(),
             ) {
                 Ok(b) => b,
                 Err(e) => {
@@ -1138,7 +1155,25 @@ impl ApplicationHandler for BrowserApp {
             room_refresh = true;
         }
 
-        if (chat_refresh || room_refresh) && is_chat_target(self.shell.current_url()) {
+        // `blog.plain` composer action: sign the entry as this identity and
+        // flood it to every peer, which relays it on.
+        let pending_blog = self.dom_handle_render.pending_blog.borrow_mut().take();
+        let mut blog_refresh = pending_blog.is_some();
+        if let Some((title, text)) = pending_blog {
+            if let Err(error) = self.blog.post(&title, &text) {
+                println!("[Blog] post failed: {error}");
+            }
+        }
+        let blog_version = self.blog.version();
+        if blog_version != self.last_blog_version {
+            self.last_blog_version = blog_version;
+            blog_refresh = true;
+        }
+
+        let chat_page_refresh =
+            (chat_refresh || room_refresh) && is_chat_target(self.shell.current_url());
+        let blog_page_refresh = blog_refresh && is_blog_target(self.shell.current_url());
+        if chat_page_refresh || blog_page_refresh {
             let url = self.shell.current_url().to_string();
             self.navigate_to(&url);
             if let Some(w) = self.window.as_ref() {

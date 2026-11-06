@@ -10,7 +10,9 @@
 //! - `help.plain`: System-domain index with namespace, hosting, and credit rules.
 //! - `chat.plain`: Direct end-to-end-encrypted peer chat, plus the public
 //!   rooms at `chat.plain?room=<name>`.
+//! - `blog.plain`: The global feed of signed entries, received live.
 
+mod blog_page;
 mod chat_page;
 mod devtools;
 mod handler;
@@ -22,6 +24,7 @@ mod search_page;
 #[cfg(test)]
 mod tests;
 
+pub use crate::blog::BlogSnapshot;
 pub use crate::chat::ChatSnapshot;
 pub use crate::room::RoomSnapshot;
 pub use handler::{NetworkSnapshot, SystemDomainHandler};

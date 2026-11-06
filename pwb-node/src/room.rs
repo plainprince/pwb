@@ -83,9 +83,11 @@ const MAX_TRACKED_AUTHORS: usize = 512;
 /// key — the case a per-author limit exists for — cannot reset its own
 /// counter without a new key. A key-cycling attacker is still bounded by the
 /// engine's per-peer token bucket and by the dedup set.
-#[derive(Debug, Default)]
+#[derive(Debug)]
 pub(crate) struct AuthorFloodControl {
     windows: HashMap<PublicKey, AuthorWindow>,
+    limit: u32,
+    window_secs: u64,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -94,14 +96,31 @@ struct AuthorWindow {
     count: u32,
 }
 
+impl Default for AuthorFloodControl {
+    fn default() -> Self {
+        Self::with_limit(AUTHOR_POST_LIMIT, AUTHOR_WINDOW_SECS)
+    }
+}
+
 impl AuthorFloodControl {
+    /// A budget of `limit` messages per `window_secs` per author. The room
+    /// uses the defaults above; the blog feed, whose entries are larger,
+    /// supplies its own.
+    pub(crate) fn with_limit(limit: u32, window_secs: u64) -> Self {
+        Self {
+            windows: HashMap::new(),
+            limit,
+            window_secs,
+        }
+    }
+
     /// Record one post by `author` at `now`; `false` means over the limit
     /// (and the post must be dropped rather than stored or relayed).
     pub(crate) fn allow(&mut self, author: &PublicKey, now: u64) -> bool {
         if !self.windows.contains_key(author) && self.windows.len() >= MAX_TRACKED_AUTHORS {
             // Reclaim finished windows first, then the one running longest.
             self.windows
-                .retain(|_, window| now.saturating_sub(window.started) < AUTHOR_WINDOW_SECS);
+                .retain(|_, window| now.saturating_sub(window.started) < self.window_secs);
             if self.windows.len() >= MAX_TRACKED_AUTHORS {
                 let oldest = self
                     .windows
@@ -117,11 +136,11 @@ impl AuthorFloodControl {
             started: now,
             count: 0,
         });
-        if now.saturating_sub(window.started) >= AUTHOR_WINDOW_SECS {
+        if now.saturating_sub(window.started) >= self.window_secs {
             window.started = now;
             window.count = 0;
         }
-        if window.count >= AUTHOR_POST_LIMIT {
+        if window.count >= self.limit {
             return false;
         }
         window.count += 1;

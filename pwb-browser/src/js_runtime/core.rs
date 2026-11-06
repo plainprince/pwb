@@ -61,6 +61,11 @@ pub struct DomHandle {
     /// The pipeline hands it to the room service, which signs it as this
     /// identity and floods it, then re-renders the page.
     pub pending_room: Rc<RefCell<Option<(String, String)>>>,
+    /// A blog entry the page wants to post (set by
+    /// `__pwb_blog_post(title, text)` from the `blog.plain` composer). The
+    /// pipeline hands it to the blog service, which signs it as this identity
+    /// and floods it, then re-renders the page.
+    pub pending_blog: Rc<RefCell<Option<(String, String)>>>,
     /// Web API state: `localStorage`/`sessionStorage` maps and detached DOM
     /// nodes (`document.createElement` before they are appended).
     pub web: WebApiState,
@@ -85,6 +90,7 @@ impl DomHandle {
         *self.pending_connect.borrow_mut() = None;
         *self.pending_chat.borrow_mut() = None;
         *self.pending_room.borrow_mut() = None;
+        *self.pending_blog.borrow_mut() = None;
         self.scroll_to_bottom.borrow_mut().clear();
         // A new WebApiState drops the old async queue, WebSocket outbound
         // queues, session storage, and detached nodes. Background threads that
@@ -105,6 +111,7 @@ impl DomHandle {
             pending_connect: Rc::new(RefCell::new(None)),
             pending_chat: Rc::new(RefCell::new(None)),
             pending_room: Rc::new(RefCell::new(None)),
+            pending_blog: Rc::new(RefCell::new(None)),
             web: WebApiState::new(),
             scroll_to_bottom: Rc::new(RefCell::new(Vec::new())),
         }

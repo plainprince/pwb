@@ -467,7 +467,8 @@ fn build_app(bytes: &[u8]) -> Result<(BrowserApp, tokio::runtime::Runtime), Pipe
         kp.clone(),
     ));
     let chat = pwb_node::chat::ChatService::new(engine.clone());
-    let room = pwb_node::room::RoomService::new(engine, kp);
+    let room = pwb_node::room::RoomService::new(engine.clone(), kp.clone());
+    let blog = pwb_node::blog::BlogService::new(engine, kp);
     let app = build_browser_app(
         bytes,
         Arc::new(SearchEngine::new()),
@@ -478,6 +479,7 @@ fn build_app(bytes: &[u8]) -> Result<(BrowserApp, tokio::runtime::Runtime), Pipe
         domain,
         chat,
         room,
+        blog,
         PrivacyMode::Direct,
         runtime.handle().clone(),
     )?;

@@ -541,6 +541,16 @@ async fn main() {
     if let Err(error) = room.join(pwb_node::room::DEFAULT_ROOM) {
         eprintln!("[Room] {error}");
     }
+
+    // The global feed (`blog.plain`): entries are signed as this identity and
+    // flooded, and this node keeps and serves them while subscribed. The
+    // browser subscribes when the page opens; the feed persists beside rooms.
+    let blog = pwb_node::blog::BlogService::with_data_dir(
+        engine.clone(),
+        identity.keypair.clone(),
+        &data_dir,
+    );
+    let blog_handle = tokio::spawn(Arc::clone(&blog).run());
     match domain.trust_quorum() {
         Some((required, total)) => {
             println!("  Funding Trust            : {required}-of-{total} pinned attestor(s)")
@@ -709,6 +719,7 @@ async fn main() {
                 network,
                 chat.snapshot(),
                 room.snapshot(),
+                blog.snapshot(),
             )
         };
         match local {
@@ -797,6 +808,7 @@ async fn main() {
         Arc::clone(&domain),
         Arc::clone(&chat),
         Arc::clone(&room),
+        Arc::clone(&blog),
         privacy,
         tokio::runtime::Handle::current(),
     )
@@ -816,6 +828,7 @@ async fn main() {
     domain_handle.abort();
     chat_handle.abort();
     room_handle.abort();
+    blog_handle.abort();
     px_handle.abort();
     engine.stop().await;
     println!("[Network] Node stopped.");

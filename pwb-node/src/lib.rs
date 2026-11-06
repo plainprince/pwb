@@ -6,6 +6,7 @@
 
 pub mod attestation;
 pub mod blind;
+pub mod blog;
 pub mod chat;
 pub mod credit;
 pub mod domain;

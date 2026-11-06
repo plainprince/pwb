@@ -196,6 +196,8 @@ pub fn render_help_page_bundle() -> Bundle {
                 <link class="help-link" href="gossip.plain">gossip.plain — hosted artifacts and registry size</link>
                 <link class="help-link" href="network.plain">network.plain — this node's addresses and services</link>
                 <link class="help-link" href="chat.plain">chat.plain — private peer chat and public rooms</link>
+                <link class="help-link" href="blog.plain">blog.plain — the global feed of signed entries</link>
+                <link class="help-link" href="settings.plain">settings.plain — installed themes and appearance</link>
                 <link class="help-link" href="devtools">devtools — inspect the current page's DOM and layout</link>
             </view>
 
@@ -365,6 +367,9 @@ mod tests {
             "nodes.plain",
             "gossip.plain",
             "network.plain",
+            "chat.plain",
+            "blog.plain",
+            "settings.plain",
             "devtools",
         ] {
             assert!(text.contains(href), "help page must link {href}");

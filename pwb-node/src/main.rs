@@ -1207,6 +1207,17 @@ async fn main() {
     if let Err(error) = rooms.join(pwb_node::room::DEFAULT_ROOM) {
         eprintln!("[Room] {error}");
     }
+
+    // The global feed (`blog.plain`): every node relays entries so the feed
+    // reaches readers through intermediaries, and a subscribed node keeps and
+    // serves them. A headless node does not open the page itself, so it relays
+    // without storing unless a persisted `blog.json` says it is subscribed.
+    let blogs = pwb_node::blog::BlogService::with_data_dir(
+        engine.clone(),
+        identity.keypair.clone(),
+        &data_dir,
+    );
+    let _blog_handle = tokio::spawn(Arc::clone(&blogs).run());
     if let Some(room) = room_arg.as_deref() {
         if let Err(error) = rooms.join(room) {
             eprintln!("[Room] {error}");

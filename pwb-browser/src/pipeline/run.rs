@@ -13,6 +13,7 @@ use crate::dom::Dom;
 use crate::js_runtime::{execute_script, DomHandle};
 use crate::render::{SelectionPoint, TextSelection};
 use pwb_core::wire::Bundle;
+use pwb_node::blog::BlogService;
 use pwb_node::chat::ChatService;
 use pwb_node::domain::{DomainRegistry, DomainService};
 use pwb_node::federation::DistributedSearch;
@@ -49,6 +50,7 @@ pub fn build_browser_app(
     domain: Arc<DomainService>,
     chat: Arc<ChatService>,
     room: Arc<RoomService>,
+    blog: Arc<BlogService>,
     privacy: PrivacyMode,
     runtime: tokio::runtime::Handle,
 ) -> Result<BrowserApp, PipelineError> {
@@ -189,6 +191,8 @@ pub fn build_browser_app(
         last_chat_version: 0,
         room,
         last_room_version: 0,
+        blog,
+        last_blog_version: 0,
         privacy,
         runtime,
         pending_page: None,

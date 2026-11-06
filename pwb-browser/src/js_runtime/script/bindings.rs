@@ -313,6 +313,21 @@ pub(super) fn install<'js>(dom_handle: &DomHandle, ctx: &Ctx<'js>, global: &Obje
         )
         .unwrap();
 
+    // `__pwb_blog_post(title, text)`: ask the pipeline to publish an entry to
+    // the global feed. The pipeline hands it to the blog service, which signs
+    // it with this identity and floods it; failures are stored for the page to
+    // render.
+    let blog = dom_handle.clone();
+    global
+        .set(
+            "__pwb_blog_post",
+            Function::new(ctx.clone(), move |title: String, text: String| {
+                *blog.pending_blog.borrow_mut() = Some((title, text));
+            })
+            .unwrap(),
+        )
+        .unwrap();
+
     // DevTools management APIs
     let dom_c8 = dom_handle.clone();
     global

@@ -2,6 +2,7 @@
 
 use std::net::SocketAddr;
 
+use crate::blog::BlogSnapshot;
 use crate::chat::ChatSnapshot;
 use crate::domain::DomainRegistry;
 use crate::host::ArtifactHost;
@@ -43,6 +44,9 @@ pub struct SystemDomainHandler<'a> {
     pub chat: ChatSnapshot,
     /// Public-room state for `chat.plain?room=`; defaults to no rooms.
     pub room: RoomSnapshot,
+    /// Global-feed state for `blog.plain`; defaults to this identity with an
+    /// unsubscribed, empty feed.
+    pub blog: BlogSnapshot,
 }
 
 impl<'a> SystemDomainHandler<'a> {
@@ -68,6 +72,10 @@ impl<'a> SystemDomainHandler<'a> {
                 local: identity.public_key(),
                 ..RoomSnapshot::default()
             },
+            blog: BlogSnapshot {
+                local: identity.public_key(),
+                ..BlogSnapshot::default()
+            },
         }
     }
 
@@ -88,6 +96,13 @@ impl<'a> SystemDomainHandler<'a> {
     /// [`Self::with_chat`]).
     pub fn with_room(mut self, room: RoomSnapshot) -> Self {
         self.room = room;
+        self
+    }
+
+    /// Attach global-feed state (builder form, mirroring
+    /// [`Self::with_room`]).
+    pub fn with_blog(mut self, blog: BlogSnapshot) -> Self {
+        self.blog = blog;
         self
     }
 

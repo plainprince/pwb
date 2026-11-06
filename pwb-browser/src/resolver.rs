@@ -3,7 +3,7 @@
 /// Naming rule: `.plain` is the **official** namespace. The `.plain` TLD is
 /// strictly reserved — it holds the built-in system protocols (`search.plain`,
 /// `register.plain`, `gossip.plain`, `nodes.plain`, `network.plain`,
-/// `help.plain`, `chat.plain`, `devtools.plain`) and the
+/// `help.plain`, `chat.plain`, `blog.plain`, `devtools.plain`) and the
 /// browser-shipped content pages (`welcome.plain`, `demo.plain`). The
 /// **unofficial** namespace is the [`pwb_core::system::UNOFFICIAL_TLDS`] list
 /// (one entry per claimable TLD — see `docs/tlds.md`): user/network sites
@@ -19,7 +19,9 @@ use pwb_node::domain::DomainRegistry;
 use pwb_node::host::ArtifactHost;
 use pwb_node::identity::IdentityManager;
 use pwb_node::search::SearchEngine;
-use pwb_node::system::{ChatSnapshot, NetworkSnapshot, RoomSnapshot, SystemDomainHandler};
+use pwb_node::system::{
+    BlogSnapshot, ChatSnapshot, NetworkSnapshot, RoomSnapshot, SystemDomainHandler,
+};
 use std::fs;
 
 #[derive(Debug)]
@@ -54,6 +56,13 @@ pub fn is_system_target(target: &str) -> bool {
 pub fn is_register_target(target: &str) -> bool {
     SystemUrl::parse(target)
         .map(|url| url.domain() == SystemDomain::Register)
+        .unwrap_or(false)
+}
+
+/// Whether `target` addresses `blog.plain` (the global feed).
+pub fn is_blog_target(target: &str) -> bool {
+    SystemUrl::parse(target)
+        .map(|url| url.domain() == SystemDomain::Blog)
         .unwrap_or(false)
 }
 
@@ -126,6 +135,7 @@ pub fn resolve_url_or_file(
         NetworkSnapshot::default(),
         ChatSnapshot::default(),
         RoomSnapshot::default(),
+        BlogSnapshot::default(),
     )
 }
 
@@ -154,6 +164,7 @@ pub fn resolve_url_or_file_with_peers(
         },
         ChatSnapshot::default(),
         RoomSnapshot::default(),
+        BlogSnapshot::default(),
     )
 }
 
@@ -162,7 +173,8 @@ pub fn resolve_url_or_file_with_peers(
 /// `network` feeds `network.plain`; its `peers` field is replaced with
 /// `peers` so the two views cannot disagree. `chat` feeds `chat.plain`
 /// (transcripts plus the last send error); `room` feeds
-/// `chat.plain?room=<name>` (the public room transcript and roster).
+/// `chat.plain?room=<name>` (the public room transcript and roster); `blog`
+/// feeds `blog.plain` (the global feed and its readers).
 #[allow(clippy::too_many_arguments)]
 pub fn resolve_url_or_file_with_context(
     target: &str,
@@ -175,6 +187,7 @@ pub fn resolve_url_or_file_with_context(
     network: NetworkSnapshot,
     chat: ChatSnapshot,
     room: RoomSnapshot,
+    blog: BlogSnapshot,
 ) -> Result<Vec<u8>, ResolverError> {
     let clean = target.trim().trim_start_matches("plain://");
 
@@ -188,7 +201,8 @@ pub fn resolve_url_or_file_with_context(
     if let Some(system_url) = SystemUrl::parse(clean) {
         let handler = SystemDomainHandler::new(search, host, registry, identity, balance)
             .with_chat(chat)
-            .with_room(room);
+            .with_room(room)
+            .with_blog(blog);
         let bundle = match system_url.domain() {
             SystemDomain::Search => {
                 let query = system_url.search_query().unwrap_or_default();
@@ -221,13 +235,10 @@ pub fn resolve_url_or_file_with_context(
                 Some(room) => handler.render_system_room_page(&room, peers),
                 None => handler.render_system_chat_page(system_url.chat_peer(), peers),
             },
-            // `blog.plain` is reserved by the protocol before its feed page
-            // exists; say so plainly instead of rendering an empty feed that
-            // would look like a blog with no posts.
-            SystemDomain::Blog => pwb_node::system::render_message_bundle(
-                SystemDomain::Blog.as_str(),
-                "The global feed is part of the protocol; this page is not wired up yet.",
-            ),
+            // `blog.plain` is the single global feed: signed entries flood to
+            // every subscriber, and the page shows the entries plus whoever is
+            // reading.
+            SystemDomain::Blog => handler.render_system_blog_page(peers),
         };
         // Native system pages ship in the same compressed container as
         // authored sites; `Bundle::deserialize` accepts both forms.
@@ -343,6 +354,7 @@ mod tests {
             "nodes.plain",
             "network.plain",
             "help.plain",
+            "blog.plain",
             "devtools.plain",
             // bare aliases and the nodes.plain connection-link form
             "search?q=plainweb",
@@ -366,10 +378,11 @@ mod tests {
         let registry = DomainRegistry::new();
         let identity = IdentityManager::new();
 
-        // Both reserved domains that used to error now render native pages.
+        // Reserved domains that once errored now render native pages.
         for (target, expected_title) in [
             ("network.plain", "network.plain — Network Status"),
             ("help.plain", "help.plain — PlainWeb Help"),
+            ("blog.plain", "blog.plain — The Global Feed"),
         ] {
             let bytes = resolve_url_or_file(target, &search, &host, &registry, &identity, 0)
                 .unwrap_or_else(|e| panic!("{target} should resolve: {e:?}"));
