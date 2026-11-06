@@ -84,7 +84,7 @@ async fn asymmetric_loss_shim(
             let toward_b = from != b;
             if toward_b {
                 toward_b_count += 1;
-                if drop_every > 0 && toward_b_count % drop_every == 0 {
+                if drop_every > 0 && toward_b_count.is_multiple_of(drop_every) {
                     continue;
                 }
             }

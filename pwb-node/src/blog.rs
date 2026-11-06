@@ -515,25 +515,20 @@ impl BlogService {
             }
         }
 
-        // Spend one hop and hand it to every peer but the one it came from.
+        // Spend one hop and gossip it to a random fanout (same scaling
+        // reason as room posts: full flooding is degree^hops).
         if entry.hops <= 1 {
             return;
         }
         let mut next = entry;
         next.hops -= 1;
-        let addresses: Vec<SocketAddr> = self
+        for peer in self
             .engine
-            .peer_table()
-            .lock()
-            .unwrap()
-            .values()
-            .map(|info| info.address)
-            .filter(|address| *address != from)
-            .collect();
-        for address in addresses {
+            .gossip_targets(Some(from), pwb_core::net::GOSSIP_FANOUT)
+        {
             let _ = self
                 .engine
-                .send_to_addr(address, NetworkMessage::BlogEntry(next.clone()));
+                .send_to(&peer, NetworkMessage::BlogEntry(next.clone()));
         }
     }
 

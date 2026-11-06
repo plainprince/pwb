@@ -374,22 +374,52 @@ pub(super) async fn peer_maintenance_loop(
     seq: Arc<AtomicU64>,
 ) {
     let mut interval = interval(config.heartbeat_interval.max(Duration::from_secs(1)));
+    // Monotonic tick counter driving slice rotation below. (Wall-clock
+    // arithmetic on a fresh `Instant` would always yield ~0 and pin every
+    // tick to the same slice.)
+    let mut tick: u64 = 0;
 
     loop {
         interval.tick().await;
         if !*running.lock().unwrap() {
             break;
         }
+        tick = tick.wrapping_add(1);
 
         let now = Instant::now();
+        // Rotate through the table instead of pinging everyone at once: a
+        // 1000-node table pinged in one tick is a self-inflicted UDP burst
+        // and a CPU spike. Quiet peers (no traffic for half an interval)
+        // are probed first; each tick covers at most MAINTENANCE_PINGS.
         let live: Vec<(PublicKey, SocketAddr)> = {
             let mut peer_table = peer_table.lock().unwrap();
             peer_table.retain(|_, peer_info| {
                 now.saturating_duration_since(peer_info.last_seen) < PEER_TIMEOUT
             });
-            peer_table
+            let quiet_after = config.heartbeat_interval / 2;
+            let mut candidates: Vec<(PublicKey, SocketAddr, bool)> = peer_table
                 .values()
-                .map(|peer| (peer.public_key, peer.address))
+                .map(|peer| {
+                    let quiet =
+                        now.saturating_duration_since(peer.last_seen) >= quiet_after;
+                    (peer.public_key, peer.address, quiet)
+                })
+                .collect();
+            // Quiet peers first, then rotate the rest by time so successive
+            // ticks cover different slices.
+            // Rotate first, then stable-sort quiet-first: within each group
+            // the rotated order survives, so successive ticks probe different
+            // slices while quiet peers (the ones actually needing a probe)
+            // always take priority in the head.
+            let len = candidates.len();
+            if len > 0 {
+                candidates.rotate_left((tick as usize) % len);
+            }
+            candidates.sort_by_key(|(_, _, quiet)| !*quiet);
+            candidates
+                .into_iter()
+                .take(crate::net::engine::MAINTENANCE_PINGS_PER_TICK)
+                .map(|(key, addr, _)| (key, addr))
                 .collect()
         };
 
@@ -1652,16 +1682,39 @@ fn merge_peers(
     let now = Instant::now();
     let mut pt = peer_table.lock().unwrap();
     let mut rt = routing.lock().unwrap();
-    for (addr, pubkey) in peers {
+    // Cap the advertised batch itself: a malicious 10k-entry PeerExchange
+    // must not cost 10k inserts in one handler turn.
+    let cap = peers.len().min(64);
+    for (addr, pubkey) in peers.into_iter().take(cap) {
         if pubkey == local_key || addr.port() == 0 || addr.ip().is_unspecified() {
             continue;
         }
-        pt.entry(pubkey).or_insert_with(|| PeerInfo {
-            public_key: pubkey,
-            last_seen: now,
-            address: addr,
-            reputation: 0,
-        });
+        if pt.contains_key(&pubkey) {
+            continue; // never overwrite live dialable state with gossip
+        }
+        // Respect max_peers: evict the stalest entry to make room instead
+        // of growing without bound on a large swarm.
+        if pt.len() >= config.max_peers {
+            let oldest = pt
+                .iter()
+                .min_by_key(|(_, info)| info.last_seen)
+                .map(|(key, _)| *key);
+            match oldest {
+                Some(key) => {
+                    pt.remove(&key);
+                }
+                None => continue,
+            }
+        }
+        pt.insert(
+            pubkey,
+            PeerInfo {
+                public_key: pubkey,
+                last_seen: now,
+                address: addr,
+                reputation: 0,
+            },
+        );
         let contact = Contact::new(pubkey, addr);
         if let UpdateOutcome::PingLeastRecent { least_recent } = rt.update(contact, now) {
             let _ = rt.mark_alive(&least_recent.node_id, None, now);

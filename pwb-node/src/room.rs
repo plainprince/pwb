@@ -677,25 +677,21 @@ impl RoomService {
             }
         }
 
-        // Spend one hop and hand it to every peer but the one it came from.
+        // Spend one hop and gossip it to a random fanout (not every peer:
+        // full flooding is degree^hops amplification and collapses past a
+        // few dozen nodes; gossip converges in O(log N) rounds instead).
         if post.hops <= 1 {
             return;
         }
         let mut next = post;
         next.hops -= 1;
-        let addresses: Vec<SocketAddr> = self
+        for peer in self
             .engine
-            .peer_table()
-            .lock()
-            .unwrap()
-            .values()
-            .map(|info| info.address)
-            .filter(|address| *address != from)
-            .collect();
-        for address in addresses {
+            .gossip_targets(Some(from), pwb_core::net::GOSSIP_FANOUT)
+        {
             let _ = self
                 .engine
-                .send_to_addr(address, NetworkMessage::RoomPost(next.clone()));
+                .send_to(&peer, NetworkMessage::RoomPost(next.clone()));
         }
     }
 

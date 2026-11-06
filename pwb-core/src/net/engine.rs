@@ -184,6 +184,21 @@ pub struct NodeConfig {
     pub heartbeat_interval: Duration,
 }
 
+/// Gossip fanout for flood-style dissemination (room posts, blog entries,
+/// peer-exchange). Classic gossip reaches the whole swarm in O(log N) rounds
+/// with a small constant fanout; forwarding to *every* peer instead turns one
+/// post into degree^hops datagrams and melts down past a few dozen nodes.
+/// Six is the standard compromise between rounds-to-cover and per-node cost.
+pub const GOSSIP_FANOUT: usize = 6;
+/// Maximum peers advertised in one `PeerExchange`. The full table is O(N)
+/// bytes; a random subset gossips to convergence without a 50KB message that
+/// fragments into dozens of datagrams on a 1000-node swarm.
+pub const PEER_EXCHANGE_ADVERTISED_MAX: usize = 16;
+/// Maximum liveness pings emitted in one maintenance tick. Pinging the whole
+/// table at once is a self-inflicted burst (N pings in the same millisecond);
+/// the loop rotates through the table so every peer is still probed regularly.
+pub const MAINTENANCE_PINGS_PER_TICK: usize = 32;
+
 /// The core network engine that handles peer-to-peer communication.
 pub struct NodeEngine {
     config: NodeConfig,
@@ -864,6 +879,95 @@ impl NodeEngine {
         Ok(())
     }
 
+    /// Random subset of known peers for gossip-style dissemination.
+    ///
+    /// Returns up to `fanout` keys, excluding `exclude` (the peer the message
+    /// came from, when any). Flood handlers should use this instead of
+    /// iterating the whole table: with dedup + hop budget the message still
+    /// reaches the swarm in O(log N) rounds at O(fanout) cost per node
+    /// instead of O(degree) per node.
+    pub fn gossip_targets(
+        &self,
+        exclude: Option<SocketAddr>,
+        fanout: usize,
+    ) -> Vec<PublicKey> {
+        use rand::seq::SliceRandom;
+        // Single lock acquisition: resolve the excluded sender (by address,
+        // the only identity flood handlers have) and snapshot the keys
+        // together, so the exclusion cannot race a concurrent table update.
+        let mut peers: Vec<PublicKey> = {
+            let table = self.peer_table.lock().unwrap();
+            let excluded_key = exclude.and_then(|addr| {
+                table
+                    .values()
+                    .find(|info| info.address == addr)
+                    .map(|info| info.public_key)
+            });
+            table
+                .keys()
+                .copied()
+                .filter(|k| Some(*k) != excluded_key)
+                .collect()
+        };
+        if peers.len() <= fanout {
+            return peers;
+        }
+        peers.shuffle(&mut rand::rngs::OsRng);
+        peers.truncate(fanout);
+        peers
+    }
+
+    /// Flood `message` to a random subset of peers (gossip dissemination).
+    ///
+    /// Same per-recipient ciphertext semantics as [`Self::broadcast`], but
+    /// only `fanout` peers are contacted. Use for anything that every holder
+    /// re-forwards (room posts, blog entries, peer tables): full broadcast
+    /// there is degree^hops amplification, gossip is O(fanout) per hop with
+    /// the same eventual coverage.
+    /// Best-effort send of one message to an explicit peer list: one stale
+    /// entry (removed between sampling and sending) never cancels delivery
+    /// to the rest. Returns how many sends were queued.
+    pub fn send_to_each(
+        &self,
+        targets: &[PublicKey],
+        message: NetworkMessage,
+        flags: SendFlags,
+    ) -> usize {
+        let mut sent = 0;
+        for public_key in targets {
+            if self.send_to_with(public_key, message.clone(), flags).is_ok() {
+                sent += 1;
+            }
+        }
+        sent
+    }
+
+    pub fn broadcast_gossip_with(
+        &self,
+        message: NetworkMessage,
+        flags: SendFlags,
+        fanout: usize,
+    ) -> Result<(), NetworkError> {
+        // Best-effort by design: gossip that aborts on the first stale peer
+        // would silently shrink every flood round on a churning swarm.
+        let targets = self.gossip_targets(None, fanout);
+        if targets.is_empty() {
+            return Ok(());
+        }
+        let sent = self.send_to_each(&targets, message, flags);
+        if sent == 0 {
+            // Every send failed identically (e.g. the message does not fit
+            // the size cap): surface it instead of pretending it went out.
+            return Err(NetworkError::PeerNotFound("no gossip target reachable".to_string()));
+        }
+        Ok(())
+    }
+
+    /// [`Self::broadcast_gossip_with`] with default flags.
+    pub fn broadcast_gossip(&self, message: NetworkMessage, fanout: usize) -> Result<(), NetworkError> {
+        self.broadcast_gossip_with(message, SendFlags::EMPTY, fanout)
+    }
+
     /// Send a message straight to a UDP address, bypassing the peer table.
     ///
     /// Used by application handlers that receive an inbound datagram (and thus
@@ -1130,7 +1234,7 @@ impl NodeEngine {
             table
                 .keys()
                 .filter(|k| **k != self.config.keypair.public)
-                .filter_map(|k| DhPublicKey::from_ed25519(k))
+                .filter_map(DhPublicKey::from_ed25519)
                 .filter(|dh| !original.contains(dh))
                 .collect()
         };
@@ -1480,6 +1584,19 @@ impl NodeEngine {
                 e.last_seen = Instant::now();
             });
         } else {
+            // Explicit dials also respect the cap: evict the stalest entry
+            // so a large swarm (or a peer-list scan) cannot grow the table
+            // without bound. The dialed peer is explicitly wanted, so it
+            // takes the freed slot.
+            if peer_table.len() >= self.config.max_peers {
+                let oldest = peer_table
+                    .iter()
+                    .min_by_key(|(_, info)| info.last_seen)
+                    .map(|(key, _)| *key);
+                if let Some(key) = oldest {
+                    peer_table.remove(&key);
+                }
+            }
             peer_table.insert(pubkey, peer_info.clone());
         }
         let final_peer = peer_table
@@ -1815,10 +1932,23 @@ pub async fn peer_exchange_loop(engine: NodeEngine, sender_pubkey: PublicKey, in
     let mut ticker = tokio::time::interval(interval);
     loop {
         ticker.tick().await;
+        // Advertise a random subset, gossiped to a random subset. The full
+        // table is O(N) bytes per message and broadcast-to-all is O(N)
+        // messages per node per tick; both are O(N^2) network-wide and fall
+        // over past a few dozen nodes. Subset gossip converges over rounds.
         let peers: Vec<(SocketAddr, PublicKey)> = {
+            use rand::seq::SliceRandom;
             let table = engine.peer_table();
             let guard = table.lock().unwrap();
-            guard.values().map(|p| (p.address, p.public_key)).collect()
+            let mut all: Vec<(SocketAddr, PublicKey)> = guard
+                .values()
+                .map(|p| (p.address, p.public_key))
+                .collect();
+            if all.len() > PEER_EXCHANGE_ADVERTISED_MAX {
+                all.shuffle(&mut rand::rngs::OsRng);
+                all.truncate(PEER_EXCHANGE_ADVERTISED_MAX);
+            }
+            all
         };
         if !peers.is_empty() {
             let advertised = peers.len() as u64;
@@ -1828,15 +1958,17 @@ pub async fn peer_exchange_loop(engine: NodeEngine, sender_pubkey: PublicKey, in
             };
             // Handing out the table is rendezvous work: meter the table itself
             // (not the per-recipient ciphertext), once per peer it reaches.
+            // Sample the recipients once so metering and sending agree;
+            // two independent samples would bill for peers never contacted.
+            let targets = engine.gossip_targets(None, GOSSIP_FANOUT);
             let table_bytes = serde_json::to_vec(&message).map_or(0, |bytes| bytes.len() as u64);
-            let recipients = engine.peer_table().lock().unwrap().len() as u64;
-            if table_bytes > 0 && recipients > 0 {
+            if table_bytes > 0 && !targets.is_empty() {
                 engine.report_rendezvous(RendezvousEvent::PeerTableServed {
                     peers: advertised,
-                    bytes: table_bytes.saturating_mul(recipients),
+                    bytes: table_bytes.saturating_mul(targets.len() as u64),
                 });
             }
-            let _ = engine.broadcast(message);
+            engine.send_to_each(&targets, message, SendFlags::EMPTY);
         }
     }
 }
