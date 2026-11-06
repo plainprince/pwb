@@ -216,6 +216,24 @@ async fn test_chat_service_round_trip_over_e2ee() {
 
 /// Poll one transcript until the peer's receipt settles its last outbound
 /// entry (or fail the test with the missing half named).
+async fn wait_for_inbox(
+    chat: &std::sync::Arc<pwb_node::chat::ChatService>,
+    peer: &pwb_core::crypto::PublicKey,
+    what: &str,
+) {
+    let deadline = std::time::Instant::now() + Duration::from_secs(10);
+    loop {
+        if !chat.snapshot().transcript(peer).is_empty() {
+            return;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "{what}: the inbound chat never arrived"
+        );
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+}
+
 async fn wait_for_receipt(
     chat: &std::sync::Arc<pwb_node::chat::ChatService>,
     peer: &pwb_core::crypto::PublicKey,
@@ -284,14 +302,18 @@ async fn test_chat_over_an_onion_circuit() {
             pwb_node::chat::ChatRoute::Onion,
         )
         .expect("the onion chat sends (three direct peers exist for the circuit)");
-    tokio::time::sleep(Duration::from_millis(500)).await;
-
     let echo = chat_a.snapshot().transcript(&kp_d.public).to_vec();
     assert_eq!(echo.len(), 1, "A keeps its outbound echo");
     assert!(echo[0].outbound);
     assert!(echo[0].via_onion, "the send took the circuit");
     assert_eq!(echo[0].text, "hello over a circuit");
 
+    wait_for_inbox(
+        &chat_d,
+        &kp_a.public,
+        "D received the chat through the exit",
+    )
+    .await;
     let inbox = chat_d.snapshot().transcript(&kp_a.public).to_vec();
     assert_eq!(inbox.len(), 1, "D received the chat through the exit");
     assert!(!inbox[0].outbound);
