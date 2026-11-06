@@ -13,3 +13,6 @@
 # generated demo artifacts (regenerate with `cargo run -p pwb-web`)
 /demo.pwb
 /demo_site/
+.aider*
+.freebuff*
+.cloud-attachments*
