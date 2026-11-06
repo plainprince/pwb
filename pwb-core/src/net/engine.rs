@@ -251,6 +251,12 @@ pub struct NodeEngine {
     /// Anti-replay state for inbound [`NetworkMessage::Sealed`] payloads
     /// opened with [`SendFlags::E2EE`].
     e2ee: Arc<E2eeState>,
+    /// Unacknowledged direct messages (seq -> datagrams) for selective
+    /// retransmit. Bounded; lossy peers cause paced retries, not growth.
+    pending: super::reliability::SharedPending,
+    /// Per-peer RTT / loss estimates driving retransmit timeouts and
+    /// reliability-aware onion path selection (route around slow relays).
+    reliability: super::reliability::SharedReliability,
 }
 
 impl NodeEngine {
@@ -290,6 +296,8 @@ impl NodeEngine {
             punch_waiters: Arc::new(Mutex::new(HashMap::new())),
             cover: Mutex::new(None),
             e2ee: Arc::new(E2eeState::default()),
+            pending: Arc::new(Mutex::new(HashMap::new())),
+            reliability: Arc::new(Mutex::new(super::reliability::ReliabilityTracker::default())),
         }
     }
 
@@ -399,6 +407,14 @@ impl NodeEngine {
         let relay_routes_for_handler = Arc::clone(&self.relay_routes);
         let advertised_addr = self.advertised_addr().unwrap_or(bound_addr);
         let e2ee_for_receiver = Arc::clone(&self.e2ee);
+        let seq_for_receiver = Arc::clone(&self.seq);
+        let pending_for_receiver = Arc::clone(&self.pending);
+        let reliability_for_receiver = Arc::clone(&self.reliability);
+        let pending_for_retransmit = Arc::clone(&self.pending);
+        let reliability_for_retransmit = Arc::clone(&self.reliability);
+        let outgoing_for_retransmit = self.outgoing_tx.clone();
+        let metrics_for_retransmit = Arc::clone(&self.metrics);
+        let running_for_retransmit = Arc::clone(&self.running);
 
         // Spawn message handler loop (processes inbound messages and forwards
         // them to application subscribers).
@@ -420,9 +436,20 @@ impl NodeEngine {
             .await;
         });
         // Spawn outgoing sender loop (transmits queued datagrams to peers).
+        // Plus the selective-retransmit loop (ACK-driven retries for loss).
         tokio::spawn(async move {
             loops::sender_loop(socket, outgoing_rx, running_clone2, metrics_for_sender).await;
         });
+        {
+            let tx = outgoing_for_retransmit.clone();
+            let pending = pending_for_retransmit.clone();
+            let rel = reliability_for_retransmit.clone();
+            let running = running_for_retransmit.clone();
+            let metrics = metrics_for_retransmit.clone();
+            tokio::spawn(async move {
+                loops::retransmit_loop(tx, pending, rel, running, metrics).await;
+            });
+        }
 
         // Optional decoy dispatch. Kept off unless the operator asked for it;
         // the loop samples an exponential delay and needs at least three peer
@@ -475,6 +502,9 @@ impl NodeEngine {
                     metrics: metrics_for_receiver,
                     relay_routes: relay_routes_for_receiver,
                     punch_waiters: punch_waiters_for_receiver,
+                    seq: seq_for_receiver,
+                    pending: pending_for_receiver,
+                    reliability: reliability_for_receiver,
                 },
             )
             .await;
@@ -576,6 +606,15 @@ impl NodeEngine {
         recipient: &PublicKey,
         message: &NetworkMessage,
     ) -> Result<Vec<Vec<u8>>, NetworkError> {
+        let (_, datagrams) = self.encode_message_for_tracked(recipient, message)?;
+        Ok(datagrams)
+    }
+
+    fn encode_message_for_tracked(
+        &self,
+        recipient: &PublicKey,
+        message: &NetworkMessage,
+    ) -> Result<(u64, Vec<Vec<u8>>), NetworkError> {
         let bytes = serde_json::to_vec(message).map_err(NetworkError::Serialization)?;
         if bytes.len() > MAX_MESSAGE_SIZE {
             return Err(NetworkError::MessageTooLarge {
@@ -590,7 +629,7 @@ impl NodeEngine {
             ))
         })?;
         let seq = self.seq.fetch_add(1, Ordering::Relaxed);
-        envelope::encode_for(
+        let datagrams = envelope::encode_for(
             &self.config.keypair,
             &recipient_dh,
             seq,
@@ -600,7 +639,8 @@ impl NodeEngine {
         .map_err(|_| NetworkError::MessageTooLarge {
             len: bytes.len(),
             max: MAX_MESSAGE_SIZE,
-        })
+        })?;
+        Ok((seq, datagrams))
     }
 
     /// Send a message to a specific peer.
@@ -642,7 +682,25 @@ impl NodeEngine {
         } else {
             message
         };
-        let datagrams = self.encode_message_for(peer, &message)?;
+        // Acks complete reliability; never track them (no ack storm) and
+        // never retransmit liveness probes themselves (dial retries those).
+        let track = !matches!(
+            message,
+            NetworkMessage::Ack { .. }
+                | NetworkMessage::Ping { .. }
+                | NetworkMessage::Pong { .. }
+        );
+        let (seq, datagrams) = self.encode_message_for_tracked(peer, &message)?;
+        if track {
+            let rto = self.rto_for(&key);
+            let mut pending = self.pending.lock().unwrap();
+            if pending.len() < super::reliability::MAX_PENDING {
+                pending.insert(
+                    seq,
+                    super::reliability::PendingSend::new(key, addr, datagrams.clone(), rto),
+                );
+            }
+        }
         match via {
             Some(relay) => self.send_relayed(&relay, peer, addr, datagrams),
             None => {
@@ -651,6 +709,76 @@ impl NodeEngine {
                     let _ = self.outgoing_tx.try_send((addr, datagram));
                 }
                 Ok(())
+            }
+        }
+    }
+
+    fn rto_for(&self, peer: &PublicKey) -> std::time::Duration {
+        let default = super::reliability::RTO_BASE;
+        if let Some(stats) = self.reliability.lock().unwrap().stats(peer).cloned() {
+            let rtt = stats.rtt.max(std::time::Duration::from_millis(50));
+            (rtt * 2).clamp(
+                super::reliability::RTO_BASE,
+                super::reliability::RTO_MAX,
+            )
+        } else {
+            default
+        }
+    }
+
+    /// Reliability-aware onion path: rank known relays by RTT / loss score
+    /// and return the best `count` (3..=6), avoiding hosts in failure
+    /// cooldown. Falls back to the raw peer set when nothing is measured.
+    pub fn select_onion_path(&self, count: usize) -> Option<Vec<DhPublicKey>> {
+        let count = count.clamp(crate::onion::MIN_HOPS, crate::onion::MAX_LAYER_SLOTS);
+        let peers: Vec<(PublicKey, DhPublicKey)> = {
+            let table = self.peer_table.lock().unwrap();
+            table
+                .keys()
+                .filter(|k| **k != self.config.keypair.public)
+                .filter_map(|k| DhPublicKey::from_ed25519(k).map(|dh| (*k, dh)))
+                .collect()
+        };
+        if peers.len() < count {
+            return None;
+        }
+        let keys: Vec<PublicKey> = peers.iter().map(|(k, _)| *k).collect();
+        let ranked = self.reliability.lock().unwrap().ranked(&keys);
+        let by_key: std::collections::HashMap<PublicKey, DhPublicKey> =
+            peers.into_iter().collect();
+        Some(
+            ranked
+                .into_iter()
+                .take(count)
+                .filter_map(|k| by_key.get(&k).copied())
+                .collect(),
+        )
+    }
+
+    /// Record a successful onion reply through `path` (RTT sample).
+    pub fn record_onion_success(&self, path: &[DhPublicKey], rtt: std::time::Duration) {
+        let table = self.peer_table.lock().unwrap();
+        let mut rel = self.reliability.lock().unwrap();
+        for hop in path {
+            if let Some((key, _)) = table
+                .iter()
+                .find(|(k, _)| DhPublicKey::from_ed25519(k) == Some(*hop))
+            {
+                rel.record_success(key, Some(rtt));
+            }
+        }
+    }
+
+    /// Record a failed onion attempt so the next path avoids slow relays.
+    pub fn record_onion_failure(&self, path: &[DhPublicKey]) {
+        let table = self.peer_table.lock().unwrap();
+        let mut rel = self.reliability.lock().unwrap();
+        for hop in path {
+            if let Some((key, _)) = table
+                .iter()
+                .find(|(k, _)| DhPublicKey::from_ed25519(k) == Some(*hop))
+            {
+                rel.record_failure(key);
             }
         }
     }
@@ -911,12 +1039,6 @@ impl NodeEngine {
         if path.len() < 3 {
             return Err(NetworkError::InvalidMessage);
         }
-        let entry = path[0];
-        let entry_addr = self
-            .onion_address(&entry)
-            .ok_or_else(|| NetworkError::PeerNotFound(entry.to_hex()))?;
-        let return_path = self.build_return_path(path)?;
-
         let mut request_id = [0u8; 16];
         OsRng.fill_bytes(&mut request_id);
         let (tx, mut rx) = mpsc::channel(1);
@@ -925,37 +1047,99 @@ impl NodeEngine {
             .unwrap()
             .insert(request_id, tx);
 
-        let deadline = tokio::time::Instant::now() + timeout;
-        let retry = (timeout / 3).max(Duration::from_millis(120));
+        let start = tokio::time::Instant::now();
+        let deadline = start + timeout;
+        // Hedged retries: the first attempt uses the caller's path; a slow
+        // or lossy entry relay stalls the whole circuit (TCP/Tor's core
+        // failure), so the second attempt races the same request over the
+        // best-ranked alternate entry while the first is still in flight.
+        // Same request_id, so the first reply wins and the loser is dropped.
+        let mut attempt = 0u32;
+        let mut active_path = path.to_vec();
+        let mut active_return = self.build_return_path(&active_path)?;
+        let mut active_addr = self
+            .onion_address(&active_path[0])
+            .ok_or_else(|| NetworkError::PeerNotFound(active_path[0].to_hex()))?;
         let result = loop {
             self.send_onion_framed(
                 signing_key,
-                entry_addr,
-                path,
+                active_addr,
+                &active_path,
                 OnionKind::Request,
                 request_id,
-                Some(&return_path),
+                Some(&active_return),
                 message,
             )?;
+            // Short first wait (fast path answers quickly), then hedge.
+            let wait = if attempt == 0 {
+                (timeout / 4).clamp(Duration::from_millis(150), Duration::from_millis(500))
+            } else {
+                (timeout / 3).max(Duration::from_millis(200))
+            };
             let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
             if remaining.is_zero() {
                 break Err(NetworkError::Timeout);
             }
-            match tokio::time::timeout(remaining.min(retry), rx.recv()).await {
-                Ok(Some(reply)) => break Ok(reply),
+            match tokio::time::timeout(remaining.min(wait), rx.recv()).await {
+                Ok(Some(reply)) => {
+                    self.record_onion_success(&active_path, start.elapsed());
+                    self.metrics.record_onion_hedged();
+                    break Ok(reply);
+                }
                 Ok(None) => break Err(NetworkError::Timeout),
                 Err(_) => {
                     if tokio::time::Instant::now() >= deadline {
                         break Err(NetworkError::Timeout);
                     }
+                    // Mark this entry suspect and hedge over a better one.
+                    self.record_onion_failure(&active_path);
+                    attempt += 1;
+                    if let Some(alt) = self.hedged_path(path) {
+                        active_path = alt;
+                        if let Ok(ret) = self.build_return_path(&active_path) {
+                            if let Some(addr) = self.onion_address(&active_path[0]) {
+                                active_return = ret;
+                                active_addr = addr;
+                            }
+                        }
+                    }
                 }
             }
         };
+        if result.is_err() {
+            self.record_onion_failure(&active_path);
+        }
         self.pending_onion_replies
             .lock()
             .unwrap()
             .remove(&request_id);
         result
+    }
+
+    /// Alternate path for a hedged retry: keep the caller's exit/middle but
+    /// swap a failing entry for the best-ranked spare relay.
+    fn hedged_path(&self, original: &[DhPublicKey]) -> Option<Vec<DhPublicKey>> {
+        let spare = self.select_onion_path(original.len())?;
+        // Prefer a path whose entry differs (the slow hop is usually first).
+        if spare[0] != original[0] {
+            return Some(spare);
+        }
+        // Same entry ranked best: try any peer not in the original path.
+        let peers: Vec<DhPublicKey> = {
+            let table = self.peer_table.lock().unwrap();
+            table
+                .keys()
+                .filter(|k| **k != self.config.keypair.public)
+                .filter_map(|k| DhPublicKey::from_ed25519(k))
+                .filter(|dh| !original.contains(dh))
+                .collect()
+        };
+        let mut alt = original.to_vec();
+        if let Some(entry) = peers.first() {
+            alt[0] = *entry;
+            return Some(alt);
+        }
+        None
     }
 
     /// Answer an onion request through its return path. The reply obeys the
@@ -1367,7 +1551,8 @@ impl NodeEngine {
         self.connect_to(addr, pubkey)?;
 
         let nonce = rand::random::<u64>();
-        let deadline = tokio::time::Instant::now() + timeout;
+        let start = tokio::time::Instant::now();
+        let deadline = start + timeout;
         // UDP can drop the Ping or its Pong, so a single probe is not enough
         // to decide a public peer is unreachable. Resend a few times within
         // the caller's budget; the marker stays the same, so a late reply to
@@ -1378,6 +1563,7 @@ impl NodeEngine {
             let now = tokio::time::Instant::now();
             if now >= deadline {
                 self.metrics.record_peer_dial(false);
+                self.reliability.lock().unwrap().record_failure(&pubkey);
                 return Err(NetworkError::Timeout);
             }
             if now >= next_ping {
@@ -1394,6 +1580,10 @@ impl NodeEngine {
                 // NAT mapping, so do not require address equality.
                 Ok(Some((_from, NetworkMessage::Pong { nonce: echoed }))) if echoed == nonce => {
                     self.metrics.record_peer_dial(true);
+                    self.reliability
+                        .lock()
+                        .unwrap()
+                        .record_success(&pubkey, Some(start.elapsed()));
                     return self
                         .get_peer(&pubkey)
                         .ok_or(NetworkError::PeerNotFound(pubkey.to_hex()));
@@ -1401,11 +1591,13 @@ impl NodeEngine {
                 Ok(Some(_)) => continue,
                 Ok(None) => {
                     self.metrics.record_peer_dial(false);
+                    self.reliability.lock().unwrap().record_failure(&pubkey);
                     return Err(NetworkError::InvalidMessage);
                 }
                 Err(_) => {
                     if tokio::time::Instant::now() >= deadline {
                         self.metrics.record_peer_dial(false);
+                        self.reliability.lock().unwrap().record_failure(&pubkey);
                         return Err(NetworkError::Timeout);
                     }
                 }
@@ -1723,6 +1915,8 @@ impl Clone for NodeEngine {
             punch_waiters: Arc::clone(&self.punch_waiters),
             cover: Mutex::new(self.cover.lock().unwrap().clone()),
             e2ee: Arc::clone(&self.e2ee),
+            pending: Arc::clone(&self.pending),
+            reliability: Arc::clone(&self.reliability),
         }
     }
 }

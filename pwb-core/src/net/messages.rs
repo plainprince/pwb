@@ -833,6 +833,18 @@ pub enum NetworkMessage {
     /// Reply to [`NetworkMessage::Ping`].
     Pong { nonce: u64 },
 
+    /// Selective acknowledgement for one reassembled direct message.
+    ///
+    /// `seq` is the envelope sequence the sender assigned to the whole
+    /// message (every fragment of a large message shares it). The receiver
+    /// emits it once the message verified and was queued for the handler, so
+    /// the sender can stop retransmitting. `sender` must equal the envelope
+    /// signer. Acks are never acknowledged or retransmitted themselves, so
+    /// there is no ack storm; a peer that never acks simply causes the
+    /// sender to retransmit up to [`MAX_RETRANSMITS`](super::reliability::MAX_RETRANSMITS)
+    /// and then give up, exactly like loss today but bounded and paced.
+    Ack { sender: PublicKey, seq: u64 },
+
     /// Ask an already-reachable rendezvous peer to help two peers punch a UDP
     /// hole through their NATs. The rendezvous observes the requester's real
     /// source address and signals both sides with each other's address; each

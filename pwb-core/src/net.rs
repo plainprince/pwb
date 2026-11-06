@@ -34,6 +34,8 @@ mod envelope;
 mod loops;
 mod messages;
 mod onion_transport;
+pub mod reliability;
+pub use reliability::{PendingSend, ReliabilityTracker};
 
 #[cfg(test)]
 mod tests;

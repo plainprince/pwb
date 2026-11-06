@@ -51,6 +51,11 @@ pub struct Metrics {
     pub hole_punch_failures: AtomicU64,
     pub e2ee_messages_opened: AtomicU64,
     pub e2ee_messages_dropped: AtomicU64,
+    pub acks_sent: AtomicU64,
+    pub acks_received: AtomicU64,
+    pub retransmits: AtomicU64,
+    pub retransmit_expired: AtomicU64,
+    pub onion_hedged: AtomicU64,
 }
 
 impl Metrics {
@@ -81,6 +86,11 @@ impl Metrics {
             hole_punch_failures: AtomicU64::new(0),
             e2ee_messages_opened: AtomicU64::new(0),
             e2ee_messages_dropped: AtomicU64::new(0),
+            acks_sent: AtomicU64::new(0),
+            acks_received: AtomicU64::new(0),
+            retransmits: AtomicU64::new(0),
+            retransmit_expired: AtomicU64::new(0),
+            onion_hedged: AtomicU64::new(0),
         }
     }
 
@@ -183,6 +193,26 @@ impl Metrics {
         Self::bump(&self.e2ee_messages_dropped, 1);
     }
 
+    pub fn record_ack_sent(&self) {
+        Self::bump(&self.acks_sent, 1);
+    }
+
+    pub fn record_ack_received(&self) {
+        Self::bump(&self.acks_received, 1);
+    }
+
+    pub fn record_retransmit(&self) {
+        Self::bump(&self.retransmits, 1);
+    }
+
+    pub fn record_retransmit_expired(&self) {
+        Self::bump(&self.retransmit_expired, 1);
+    }
+
+    pub fn record_onion_hedged(&self) {
+        Self::bump(&self.onion_hedged, 1);
+    }
+
     /// A stable, serializable view of every counter plus process uptime.
     pub fn snapshot(&self) -> MetricsSnapshot {
         MetricsSnapshot {
@@ -211,6 +241,11 @@ impl Metrics {
             hole_punch_failures: self.hole_punch_failures.load(Ordering::Relaxed),
             e2ee_messages_opened: self.e2ee_messages_opened.load(Ordering::Relaxed),
             e2ee_messages_dropped: self.e2ee_messages_dropped.load(Ordering::Relaxed),
+            acks_sent: self.acks_sent.load(Ordering::Relaxed),
+            acks_received: self.acks_received.load(Ordering::Relaxed),
+            retransmits: self.retransmits.load(Ordering::Relaxed),
+            retransmit_expired: self.retransmit_expired.load(Ordering::Relaxed),
+            onion_hedged: self.onion_hedged.load(Ordering::Relaxed),
         }
     }
 
@@ -280,6 +315,11 @@ impl Metrics {
                 "pwb_e2ee_messages_dropped_total",
                 snapshot.e2ee_messages_dropped,
             ),
+            ("pwb_acks_sent_total", snapshot.acks_sent),
+            ("pwb_acks_received_total", snapshot.acks_received),
+            ("pwb_retransmits_total", snapshot.retransmits),
+            ("pwb_retransmit_expired_total", snapshot.retransmit_expired),
+            ("pwb_onion_hedged_total", snapshot.onion_hedged),
         ];
         let mut out = String::new();
         for (name, value) in gauges {
@@ -326,6 +366,11 @@ pub struct MetricsSnapshot {
     pub hole_punch_failures: u64,
     pub e2ee_messages_opened: u64,
     pub e2ee_messages_dropped: u64,
+    pub acks_sent: u64,
+    pub acks_received: u64,
+    pub retransmits: u64,
+    pub retransmit_expired: u64,
+    pub onion_hedged: u64,
 }
 
 /// Whether structured JSON logging was requested for this process.

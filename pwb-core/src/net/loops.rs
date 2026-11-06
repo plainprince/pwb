@@ -288,6 +288,9 @@ pub(super) struct InboundState {
     pub metrics: Arc<Metrics>,
     pub relay_routes: Arc<Mutex<HashMap<PublicKey, PublicKey>>>,
     pub punch_waiters: Arc<Mutex<HashMap<PublicKey, mpsc::Sender<SocketAddr>>>>,
+    pub seq: Arc<AtomicU64>,
+    pub pending: super::reliability::SharedPending,
+    pub reliability: super::reliability::SharedReliability,
 }
 
 /// Everything the inbound handler needs to answer protocol messages.
@@ -468,6 +471,119 @@ pub(super) async fn cover_traffic_loop(
     }
 }
 
+/// Retransmit loop for reliable direct messages: resends unacknowledged
+/// datagrams with exponential backoff so one lost fragment does not kill a
+/// whole multi-fragment message on a lossy path. Selective repeat per
+/// message (seq), so a slow peer never head-of-line blocks the rest.
+pub(super) async fn retransmit_loop(
+    outgoing_tx: mpsc::Sender<OutgoingDatagram>,
+    pending: super::reliability::SharedPending,
+    reliability: super::reliability::SharedReliability,
+    running: Arc<Mutex<bool>>,
+    metrics: Arc<Metrics>,
+) {
+    use super::reliability::{MAX_PENDING, PENDING_TTL};
+    let mut ticker = tokio::time::interval(Duration::from_millis(50));
+    loop {
+        ticker.tick().await;
+        if !*running.lock().unwrap() {
+            break;
+        }
+        let now = Instant::now();
+        let due: Vec<(u64, super::reliability::PendingSend)> = {
+            let mut guard = pending.lock().unwrap();
+            // Expire stale entries first (bounded memory even under loss).
+            let expired: Vec<u64> = guard
+                .iter()
+                .filter(|(_, p)| {
+                    now.duration_since(p.created) >= PENDING_TTL
+                        || p.attempts > super::reliability::MAX_RETRANSMITS
+                })
+                .map(|(seq, _)| *seq)
+                .collect();
+            for seq in expired {
+                if let Some(p) = guard.remove(&seq) {
+                    reliability.lock().unwrap().record_failure(&p.peer);
+                    metrics.record_retransmit_expired();
+                }
+            }
+            if guard.len() > MAX_PENDING {
+                // Drop oldest beyond the cap; loss already, don't grow.
+                let mut ordered: Vec<(u64, Instant)> =
+                    guard.iter().map(|(s, p)| (*s, p.created)).collect();
+                ordered.sort_by_key(|(_, t)| *t);
+                for (seq, _) in ordered.iter().take(guard.len() - MAX_PENDING) {
+                    guard.remove(seq);
+                }
+            }
+            guard
+                .iter()
+                .filter(|(_, p)| now >= p.deadline())
+                .map(|(s, p)| (*s, p.clone()))
+                .collect()
+        };
+        for (seq, mut entry) in due {
+            entry.attempts += 1;
+            entry.last_send = now;
+            let peer = entry.peer;
+            let datagrams = entry.datagrams.clone();
+            let addr = entry.addr;
+            {
+                if let Some(stored) = pending.lock().unwrap().get_mut(&seq) {
+                    stored.attempts = entry.attempts;
+                    stored.last_send = now;
+                } else {
+                    continue; // acked concurrently
+                }
+            }
+            reliability.lock().unwrap().record_retransmit(&peer);
+            metrics.record_retransmit();
+            for datagram in datagrams {
+                if outgoing_tx.try_send((addr, datagram)).is_err() {
+                    metrics.record_send_queue_drop();
+                    break;
+                }
+                // Space fragments of a retransmit so a burst does not
+                // re-overflow the same small receiver buffer that lost them.
+                tokio::time::sleep(Duration::from_millis(1)).await;
+            }
+        }
+    }
+}
+
+/// Encode and queue an `Ack` for `peer_seq` without tracking it (acks are
+/// never acknowledged, so there is no storm).
+fn send_ack(
+    state: &InboundState,
+    recipient: &PublicKey,
+    recipient_addr: SocketAddr,
+    peer_seq: u64,
+) {
+    let Some(recipient_dh) = DhPublicKey::from_ed25519(recipient) else {
+        return;
+    };
+    let ack = NetworkMessage::Ack {
+        sender: state.local_key,
+        seq: peer_seq,
+    };
+    let Ok(bytes) = serde_json::to_vec(&ack) else {
+        return;
+    };
+    let Ok(datagrams) = envelope::encode_for(
+        &state.local_keypair,
+        &recipient_dh,
+        state.seq.fetch_add(1, Ordering::Relaxed),
+        unix_time(),
+        &bytes,
+    ) else {
+        return;
+    };
+    for datagram in datagrams {
+        let _ = state.outgoing_tx.try_send((recipient_addr, datagram));
+    }
+    state.metrics.record_ack_sent();
+}
+
 /// Outgoing sender loop: dequeues `(SocketAddr, Vec<u8>)` datagrams and
 /// transmits them over the bound UDP socket. Runs until `running` is false.
 pub(super) async fn sender_loop(
@@ -481,8 +597,11 @@ pub(super) async fn sender_loop(
     // overflows and silently loses fragments, so pace the socket every
     // `SEND_BURST` datagrams. The pause is tiny compared with a circuit's
     // round-trip time and keeps bulk replies intact on loopback and LAN links.
-    const SEND_BURST: usize = 32;
-    const SEND_PAUSE: Duration = Duration::from_millis(1);
+    // On lossy / Tor-like paths bursts are the main self-inflicted loss, so
+    // the burst is kept small (16) with a 2ms gap: slightly slower on perfect
+    // links, dramatically more intact on lossy ones.
+    const SEND_BURST: usize = 16;
+    const SEND_PAUSE: Duration = Duration::from_millis(2);
     // The bound socket's family decides how destinations are written: an
     // IPv6 (including dual-stack `[::]`) socket must address IPv4 peers
     // v4-mapped. Resolve it once instead of per datagram.
@@ -684,6 +803,30 @@ pub(super) async fn receiver_loop(
                 if !payload_well_formed(&decoded) {
                     state.metrics.record_invalid();
                     continue;
+                }
+
+                // Selective ACK: acks complete a pending send (RTT sample),
+                // everything else gets acked back once verified. Acks are
+                // never re-acked, so there is no storm; old peers that do
+                // not understand Ack simply never send one and the sender
+                // retransmits a few times (extra traffic, same delivery).
+                if let NetworkMessage::Ack { seq, .. } = &decoded {
+                    let rtt = state
+                        .pending
+                        .lock()
+                        .unwrap()
+                        .remove(seq)
+                        .map(|p| p.last_send.elapsed());
+                    state
+                        .reliability
+                        .lock()
+                        .unwrap()
+                        .record_success(&message.sender, rtt);
+                    state.metrics.record_ack_received();
+                    register_peer(&state, &message.sender, message.from, len as u64);
+                    continue;
+                } else {
+                    send_ack(&state, &message.sender, message.from, message.seq);
                 }
 
                 // Per-peer quota: a peer that floods valid messages is dropped
@@ -1032,7 +1175,8 @@ fn claimed_identity_matches(message: &NetworkMessage, signer: &PublicKey) -> boo
         | NetworkMessage::RoomHistory { sender, .. }
         | NetworkMessage::BlogSubscribe { sender, .. }
         | NetworkMessage::BlogSync { sender }
-        | NetworkMessage::BlogHistory { sender, .. } => sender == signer,
+        | NetworkMessage::BlogHistory { sender, .. }
+        | NetworkMessage::Ack { sender, .. } => sender == signer,
         NetworkMessage::CheckIndexProof { proof, .. } => proof.miner == *signer,
         NetworkMessage::ProofVerdict { verifier, .. } => verifier == signer,
         NetworkMessage::ClaimDomainAttested { owner, .. }
