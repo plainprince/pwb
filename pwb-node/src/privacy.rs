@@ -373,7 +373,10 @@ mod tests {
         }
         // Mark one peer as failing so it drops out of the top pool.
         for _ in 0..5 {
-            observer.record_onion_failure(&[pwb_core::crypto::DhPublicKey::from_ed25519(&peers[0]).unwrap()]);
+            observer
+                .record_onion_failure(&[
+                    pwb_core::crypto::DhPublicKey::from_ed25519(&peers[0]).unwrap()
+                ]);
         }
         let mut rng = rand::thread_rng();
         let ranked = observer.ranked_direct_keys();

@@ -1388,8 +1388,11 @@ impl DomainService {
     /// cost O(degree) per hop. Fanout 6 converges in O(log N) rounds at
     /// O(6) cost, and dedup by claim digest keeps it terminating.
     fn forward_claim(&self, except: SocketAddr, message: NetworkMessage) {
-        let targets = self.engine.gossip_targets(Some(except), pwb_core::net::GOSSIP_FANOUT);
-        self.engine.send_to_each(&targets, message, pwb_core::net::SendFlags::EMPTY);
+        let targets = self
+            .engine
+            .gossip_targets(Some(except), pwb_core::net::GOSSIP_FANOUT);
+        self.engine
+            .send_to_each(&targets, message, pwb_core::net::SendFlags::EMPTY);
     }
 
     fn persist(&self) {
