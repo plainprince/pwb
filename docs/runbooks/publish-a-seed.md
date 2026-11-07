@@ -1,9 +1,18 @@
 # Runbook: publish a public seed and its join descriptor
 
-This is the end-to-end operational procedure for taking PlainWeb from "nobody
-can join" to "a stranger installs a client, runs it with no arguments, and is
-on the network". It covers one host and one signing key; repeat the seed step
-for each additional seed and list them all in one descriptor.
+This is the end-to-end operational procedure for publishing PlainWeb's signed
+seed list. The network already has one seed — a stranger installs a client,
+runs it with no arguments, and is on the network. Use this runbook to rotate
+that list, or to add an Nth seed. An extra seed is optional: one seed is
+enough to join (peer exchange and the DHT take over after first contact), and
+more seeds only reduce strain when the existing one is overloaded or slow, or
+provide backup.
+
+It covers one host and one signing key; repeat the seed step for each
+additional seed and list them all in one descriptor. Critically, adding a seed
+means re-publishing the *whole* list with the *same* release key — never
+generate a new key for an additional seed, or pinned clients will reject the
+descriptor.
 
 Use it with:
 
@@ -97,35 +106,48 @@ Wait for `Joined via 1 bootstrap peer(s)`, then `Ctrl-C` and remove
 grep pwb_peers_connected` should now show at least one peer. If it does not,
 stop here: a descriptor pointing at an unreachable seed is worse than none.
 
-## 3. Create the release signing key
+## 3. Reuse the release signing key (do not create a new one)
 
-Run this on the release machine, once. The script creates the identity on first
-use with mode `0600` and refuses to keep it inside the repository.
+The live `deploy/join.json` is signed by
+`137b303838f79e03eda3f26b4c62838d8c1cfca00ec6c113a0c89183f6add60a`.
+Run this on the release machine that already holds that key
+(`~/.pwb/join-release-identity.json`, `0600`). The script reuses the identity
+on every run and refuses to keep it inside the repository.
 
 ```sh
 bash deploy/publish-join.sh --help
 ```
 
-Back the key up somewhere durable and encrypted (password manager, sealed
-offline copy). Its public half is the value clients pin; the secret half is
-never printed by the script and must never be committed, pasted into an issue,
-or stored in CI logs.
+If you are the maintainer setting this up for the first time, the script
+creates the identity on first use. Back the key up somewhere durable and
+encrypted (password manager, sealed offline copy). Its public half is the
+value clients pin; the secret half is never printed by the script and must
+never be committed, pasted into an issue, or stored in CI logs. For every
+later seed, reuse this same key — a new key changes the signer and pinned
+clients will reject the descriptor.
 
-## 4. Generate the descriptor
+Community contributors: you do not have this key. Do not generate your own —
+just share the seed link from step 2 and let the maintainer run step 4.
 
-From a checkout of the release machine:
+## 4. Generate the descriptor (all seeds, every time)
+
+From a checkout on the release machine. Pass **every** healthy seed, not just
+the new one — the script rewrites the file, so any omitted seed is dropped.
+Copy the existing seeds from the current `deploy/join.json` and add the new
+link:
 
 ```sh
 bash deploy/publish-join.sh \
-  --seed 'plain://nodes.plain?connect=seed.example.com:7921/<seed_hex_pubkey>' \
+  --seed 'plain://nodes.plain?connect=45.86.155.45:7921/e9cf7f93312cc71d9a3cffd70ca5d2782fa9616a5848a4e330fca6c3e236db90' \
+  --seed 'plain://nodes.plain?connect=seed.example.com:7921/<new_seed_hex_pubkey>' \
   --anchor <attestor_hex_pubkey> \
   --expires-in 180
 ```
 
 What it does:
 
-1. normalizes the seed link and rejects anything that is not `host:port/<64-hex key>`;
-2. creates or reuses `~/.pwb/join-release-identity.json` (`0600`);
+1. normalizes each seed link and rejects anything that is not `host:port/<64-hex key>`;
+2. reuses `~/.pwb/join-release-identity.json` (`0600`) — the existing release key;
 3. writes the descriptor atomically to `deploy/join.json`;
 4. re-reads it with `pwb-node --verify-join`, enforcing signature and expiry;
 5. prints the public signer key.

@@ -663,11 +663,14 @@ counted), `public_network_smoke.rs` (two processes over a bootstrap link), and
 `private_routing.rs` (private search, content fetch, and domain resolution over
 an onion circuit).
 
-The remaining deployment step is operator work, not code: run a seed on a host
-with a public UDP port, publish the resulting signed `deploy/join.json` (or
-mirror it), and publish the signer/anchor keys through a channel independent of
-that host. Large-swarm validation, sybil resistance in an open network, and an
-independent security review are still open, as the sections above describe.
+The default seed list is live (`deploy/join.json` lists 1 seed, signed with the
+release key). The remaining deployment work is maintenance, not code: keep the
+seed reachable, renew the descriptor before expiry by re-running
+`deploy/publish-join.sh` with all seeds and the same key, and publish the
+signer/anchor keys through a channel independent of that host. Extra seeds are
+optional — one is enough to join — and only reduce strain or add redundancy.
+Large-swarm validation, sybil resistance in an open network, and an independent
+security review are still open, as the sections above describe.
 
 ## Status after the 2026-10-31 search pass
 

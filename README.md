@@ -6,25 +6,36 @@ No central servers. No pools. No duplicate work. Indexing, ranking, verification
 
 Browse official built-in pages on `.plain` and publish unofficial `.pwb` sites, with built-in decentralized search and domain registration — powered by Rust.
 
-## The network needs a seed — help start it
+## The network has a seed — extras are optional
 
 PlainWeb has no built-in bootstrap list. For a stranger to join from anywhere on
-the public internet, someone has to run a **seed** (a long-running `pwb-node`
-with a public address) and publish a signed join descriptor.
+the public internet, they fetch the signed join descriptor (`deploy/join.json`)
+and dial a **seed** (a long-running `pwb-node` with a public address).
 
-**Want to help? Run a seed and open a PR (or issue) with the published
-descriptor.** The two steps:
+That descriptor is now live: it lists 1 seed and is signed by `137b303838f79e03eda3f26b4c62838d8c1cfca00ec6c113a0c89183f6add60a`,
+so `pwb-node` with no flags joins the public seed automatically. You do not
+need to run a seed to use the network.
+
+**Want to help? Running an extra seed is optional.** One seed is enough to
+join — after that, peers gossip peer tables and the DHT takes over. An extra
+seed only helps when the single seed is overloaded or slow, or as backup if it
+goes down.
+
+Adding a seed now requires the release key, which is held by the maintainers
+— your own `publish-join.sh` run would sign with a different key and clients
+pinning the current signer would reject it. So do not submit a re-signed
+`deploy/join.json` yourself. Instead:
 
 1. Run a seed node: follow [docs/seed-node.md](docs/seed-node.md). Open UDP
    `7921` on a public VPS, install the systemd unit, and grab the printed
-   connection link.
-2. Publish the signed join descriptor with [deploy/publish-join.sh](deploy/publish-join.sh).
-   It writes `deploy/join.json`, verifies the signature, and prints the signer
-   public key. Commit that file and open a PR — or just open an issue with the
-   seed link, the signer key, and the `deploy/join.json` contents.
+   connection link (`plain://nodes.plain?connect=host:7921/<hex_pubkey>`).
+2. Open a PR (or issue) with just the seed link. A maintainer re-runs
+   [deploy/publish-join.sh](deploy/publish-join.sh) with **all** seeds (existing
+   + yours) using the existing release key, and commits the updated
+   `deploy/join.json`.
 
-Once merged, every new clone of this repository bootstraps from your seed with
-no flags. The full procedure (rotation, withdrawal, emergency shutdown) is in
+Once merged, every new clone bootstraps from both seeds with no flags. The
+full procedure (rotation, withdrawal, emergency shutdown) is in
 [docs/runbooks/publish-a-seed.md](docs/runbooks/publish-a-seed.md).
 
 ## What it is

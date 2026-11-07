@@ -67,8 +67,7 @@ use under `--data`), and merge well-known descriptors, and
 over onion circuits by default, with `--direct` as the only (and loudly
 labelled) opt-out; nodes answer onion-delivered shard, artifact, and registry
 queries. `pwb-node --help` documents the operator flags instead of ignoring
-them. `deploy/join.json` ships with an empty seed list until a real seed is
-published.
+them. `deploy/join.json` ships with 1 signed seed (signer `137b303838f79e03eda3f26b4c62838d8c1cfca00ec6c113a0c89183f6add60a`); extra seeds are optional and must be added with the same release key.
 
 A 2026-10-26 pass added `chat.plain` and a low-level E2EE send flag. Any
 message type can now be sealed end-to-end for its peer with
@@ -299,15 +298,16 @@ listed here so they are not mistaken for finished work.
   configured, and dials anchors through the DHT when they are not direct
   peers, so a stranger on a fresh bootstrap can collect a certificate the
   anchored verifier accepts.
-- **No public seed is hosted yet.** Clients can now discover seeds from a
+- **Public seed list is live (1 seed).** Clients discover seeds from the
   published descriptor (`deploy/join.json`, or `--join` / `PWB_JOIN` with
-  `--join-signer` pinning), and `--write-join` produces signed descriptors, but
-  the repository's descriptor has an empty seed list. Until an operator runs a
-  seed and publishes it, a flagless node prints "No public seed is published
-  yet" and falls back to LAN discovery. Bootstrap entries may use DNS names,
-  and [`docs/seed-node.md`](docs/seed-node.md) plus
-  [`deploy/pwb-seed.service`](deploy/pwb-seed.service) provide the deployment
-  recipe; hosting and funding the seed is operational work, not a protocol gap.
+  `--join-signer` pinning), and `deploy/publish-join.sh` produces signed
+descriptors with the existing release key. A flagless node now joins the
+  published seed; only when no seed answers does it fall back to LAN discovery.
+  Extra seeds are optional — one is enough to join, more only reduce strain or
+  add redundancy — and must be added by re-running the script with all seeds and
+  the same key (see [`docs/seed-node.md`](docs/seed-node.md) plus
+  [`deploy/pwb-seed.service`](deploy/pwb-seed.service)). Bootstrap entries may
+  use DNS names.
 - **Real-topology validation is incomplete.** NAT traversal, relay fallback,
   registry sync, batching, and peer exchange are tested on loopback with small
   clusters. A deterministic lossy-UDP shim now covers retry-on-loss for dials

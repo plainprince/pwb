@@ -138,26 +138,33 @@ seed list; `--join-signer` pins the key up front and
 
 ### Writing the descriptor you publish
 
-An operator who runs a seed (see
-[`docs/seed-node.md`](../docs/seed-node.md)) can write the descriptor from
-their own configuration. This is a maintenance command: it writes JSON, never
-starts the engine, and never writes a secret.
+`--write-join` is a maintenance command: it writes JSON, never starts the
+engine, and never writes a secret. The default URL (`deploy/join.json`) is
+maintainer-only — it is signed with the existing release key, so a seed
+operator who re-signs it with their own key would break pinned clients. Seed
+operators: share your connection link (see [`docs/seed-node.md`](../docs/seed-node.md))
+and the maintainer regenerates the file with all seeds via
+[`deploy/publish-join.sh`](../deploy/publish-join.sh).
+
+For your own separate network, write the descriptor from your own
+configuration:
 
 ```sh
-pwb-node --write-join deploy/join.json \
+pwb-node --write-join my-join.json \
   --join-seed 'seed.example.com:7921/<seed_hex_pubkey>' \
   --join-expires 1800000000 \
   --trust-anchor <attestor_hex_pubkey>
-# [Join] Wrote 1 seed(s) to deploy/join.json
+# [Join] Wrote 1 seed(s) to my-join.json
 # [Join] Signer public key: <hex>
 ```
 
 `--write-join-key <identity file>` signs with a dedicated key instead of the
-node's identity. Commit the file to the default URL, or host it anywhere and
-point clients at it with `--join`; publish the signer key in the same place so
-clients can pin it. `--join-seed` is repeatable, `--join-expires` is optional
-(unix seconds), and anchors come from `--trust-anchor` or the seed's existing
-configuration.
+node's identity. Host the file anywhere and point clients at it with `--join`;
+publish the signer key in the same place so clients can pin it.
+`--join-seed` is repeatable, `--join-expires` is optional (unix seconds), and
+anchors come from `--trust-anchor` or the seed's existing configuration.
+Extra seeds are optional for the default network: one seed is enough to join,
+and more only reduce strain when it is overloaded or slow.
 
 To withdraw a published seed list, add `--withdraw-join`. It signs a
 descriptor with zero seeds and cannot be combined with `--join-seed`:
@@ -180,9 +187,10 @@ pwb-node --verify-join deploy/join.json \
 ```
 
 [`deploy/publish-join.sh`](../deploy/publish-join.sh) automates the whole
-release step (key creation, atomic write, verification) and refuses to keep a
-signing key inside the repository. The surrounding procedure is the
-[publish-a-seed runbook](../docs/runbooks/publish-a-seed.md).
+release step (key reuse, atomic write, verification) and refuses to keep a
+signing key inside the repository. The surrounding procedure — including why
+the default descriptor must be regenerated with all seeds and the same key —
+is the [publish-a-seed runbook](../docs/runbooks/publish-a-seed.md).
 
 ## Native System Domain Handlers
 

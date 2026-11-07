@@ -29,10 +29,10 @@ First start creates your identity in `~/.pwb/` (on Windows: `%USERPROFILE%\.pwb`
 resolved from `$USERPROFILE` when `$HOME` is unset) and prints, among other things:
 
 ```text
-[Join] no seed list is published at https://raw.githubusercontent.com/plainprince/pwb/main/deploy/join.json yet (HTTP 404)
-[Join] No public seed list is published yet. Staying on LAN discovery; dial a peer yourself with --connect <link> or --bootstrap <host:port>/<key>.
+[Join] Descriptor published 1 seed(s) from https://raw.githubusercontent.com/plainprince/pwb/main/deploy/join.json
+[Join] Joined via 1 bootstrap peer(s).
 ...
-[Network] No bootstrap peers configured; LAN discovery only.
+[Network] Your connection link:
 
 [Network] Your connection link:
   plain://nodes.plain?connect=192.168.64.19:40877/de7e6336831a25cc82f72c0f4e4393270239c98d4d6a52e576ba9afcc0863fea
@@ -42,11 +42,10 @@ resolved from `$USERPROFILE` when `$HOME` is unset) and prints, among other thin
 and public key — safe to paste in chat or a ticket. Keep the process running;
 everything else happens in a second terminal.
 
-The `[Join]` lines are the public seed list. They say nothing is published on
-that URL yet (see [the public swarm](#the-public-swarm-today)), so a fresh node
-starts on LAN discovery and waits for someone to dial it. When it reaches
-nobody, it ends the startup output with the commands that would change that.
-Swap the link with a peer and you are on a network.
+The `[Join]` lines are the public seed list (see [the public swarm](#the-public-swarm-today)):
+a fresh node fetches `deploy/join.json` and joins the published seed, so no
+hand-copied link is needed. If the seed is unreachable it falls back to LAN
+discovery — swap a link with a peer and you are still on a network.
 
 On the same LAN you can stop here: start a second node and the two find each
 other over UDP 7922.
@@ -177,24 +176,24 @@ Health and metrics bind to loopback by default — keep them there.
 
 A node started with no `--connect`/`--bootstrap` fetches the project's
 published descriptor and dials the seeds it lists, so no hand-copied link is
-needed. **That file is not published yet** — the default URL currently returns
-404 because `deploy/join.json` has not been pushed, and the node says so and
-falls back to LAN discovery. There is no public swarm to join until someone
-deploys a seed and commits the descriptor.
-
-When that happens, nothing about your workflow changes:
+needed. That file **is** published: `deploy/join.json` currently lists 1 seed
+(`45.86.155.45:7921`), signed by
+`137b303838f79e03eda3f26b4c62838d8c1cfca00ec6c113a0c89183f6add60a`.
 
 ```sh
-pwb-node                     # joins the public seeds automatically
+pwb-node                     # joins the public seed automatically
 pwb-node --join-required     # ...or exits if no seed answers
 pwb-browser welcome.plain    # browser joins the same way
 ```
 
-If you want to be the one who publishes it, [Running a public seed
-node](seed-node.md) covers the host, firewall, and systemd unit, and the
-[publish-a-seed runbook](runbooks/publish-a-seed.md) covers signing, verifying,
-and rotating the descriptor. Any other operator's descriptor works just as
-well:
+Running an extra seed is optional — one seed is enough to join, and peer
+exchange plus the DHT take over after first contact. An extra seed only helps
+when the single seed is overloaded or slow, or as backup. [Running a public
+seed node](seed-node.md) covers the host, firewall, and systemd unit, and the
+[publish-a-seed runbook](runbooks/publish-a-seed.md) covers how the maintainer
+signs, verifies, and rotates the descriptor with the existing release key.
+Contributors share a seed link; they do not re-sign `deploy/join.json`
+themselves. Any other operator's descriptor works just as well:
 
 ```sh
 pwb-node --join https://example.org/join.json
@@ -206,7 +205,7 @@ pwb-node --join-signer <hex> --require-join-signature
 
 | Symptom | Cause | Fix |
 |---|---|---|
-| `no seed list is published … yet` | The public descriptor is not published yet | Use `--connect <link>` or `--bootstrap <host:port>/<key>` |
+| `no seed list is published … yet` | Stale mirror or unpublished custom URL (the default URL currently publishes 1 seed) | Check the URL with `curl -sI`, or use `--connect <link>` / `--bootstrap <host:port>/<key>` |
 | `Ignoring traffic from a peer speaking PlainWeb wire v3` | The two nodes were built from different protocol versions | Rebuild both from the same commit |
 | `No bootstrap peers reachable` | Wrong port or key, firewall, or the peer is not running | Re-copy the link; allow inbound UDP 7921 on the peer |
 | Two LAN nodes do not see each other | UDP 7922 blocked, or one used `--no-join` on a routed network | Allow UDP 7922, or exchange connection links |

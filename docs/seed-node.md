@@ -6,9 +6,14 @@ accepts those first connections, answers liveness probes, and gossips its peer
 table through `PeerExchange`; it has no special authority over search, content,
 or domain names.
 
-The project does not operate a seed for you. This page and
+The project already publishes one seed in `deploy/join.json`, so you do not
+need to run a seed to use the network — flagless `pwb-node` joins
+automatically. This page and
 [`deploy/pwb-seed.service`](../deploy/pwb-seed.service) are the deployment
-assets for running your own.
+assets for running an *additional* seed. An extra seed is optional: one seed
+is enough to join (peer exchange and the DHT take over after first contact),
+and a second seed only reduces strain when the first is overloaded or slow,
+or keeps joins working if it goes down.
 
 ## 1. Host and identity
 
@@ -67,35 +72,57 @@ expect: `0.0.0.0:7921` for the default, `[::]:7921` for a dual-stack bind.
 
 ## 3. Publish the join information
 
-Write a signed descriptor that clients fetch on their own. This never starts
-the engine, so it is safe to run on the seed host or on an operator machine:
+The default descriptor (`deploy/join.json`) is signed with the project's
+release key, which lives outside the repository on the maintainer's machine
+(`~/.pwb/join-release-identity.json`, `0600`). A descriptor you sign yourself
+with `pwb-node --write-join` has a different signer, so clients pinning the
+current signer (`137b303838f79e03eda3f26b4c62838d8c1cfca00ec6c113a0c89183f6add60a`)
+would reject it. **Do not submit a re-signed `deploy/join.json` yourself.**
+
+Instead, after your seed is reachable, open a PR (or issue) with just the
+seed's connection link:
+
+```text
+plain://nodes.plain?connect=seed.example.com:7921/<seed_hex_pubkey>
+```
+
+A maintainer then re-runs [`deploy/publish-join.sh`](../deploy/publish-join.sh)
+with **all** seeds (the existing ones from `deploy/join.json` plus yours) using
+the existing release key, verifies with `pwb-node --verify-join`, and commits
+the result. The full maintainer procedure — including rotation and emergency
+withdrawal — is in the [publish-a-seed runbook](runbooks/publish-a-seed.md).
+
+If you run your own separate network (not the default URL), you can publish
+the descriptor yourself. This never starts the engine, so it is safe to run on
+the seed host or on an operator machine:
 
 ```sh
-pwb-node --write-join deploy/join.json \
+pwb-node --write-join my-join.json \
   --join-seed 'seed.example.com:7921/<seed_hex_pubkey>' \
   --join-expires 1800000000 \
   --trust-anchor <attestor_hex_pubkey> --trust-anchor <attestor_hex_pubkey>
 ```
 
-It prints `[Join] Signer public key: <hex>` and exits. Commit the file to the
-repository's `deploy/join.json` (the default URL clients fetch), or host it at
-any stable HTTPS URL and hand clients `--join <url>`. An explicit
+It prints `[Join] Signer public key: <hex>` and exits. Host the file at any
+stable HTTPS URL and hand clients `--join <url>`. An explicit
 `--bootstrap` / `PWB_BOOTSTRAP` still works and suppresses the default fetch;
 either way the seed key is pinned, so a changed DNS answer cannot substitute a
 different identity.
 
-Descriptors written by `--write-join` are signed with the node identity, or
-with `--write-join-key <identity file>` when you want a dedicated release key.
-Publish that signer key next to the descriptor and have clients pass
-`--join-signer <hex>` (optionally with `--require-join-signature`). The first
-signer a client sees is also remembered under `--data`, so a compromised
-mirror cannot silently swap the seed list later.
+For a custom network, descriptors written by `--write-join` are signed with
+the node identity, or with `--write-join-key <identity file>` when you want a
+dedicated release key. Publish that signer key next to the descriptor and have
+clients pass `--join-signer <hex>` (optionally with `--require-join-signature`).
+The first signer a client sees is also remembered under `--data`, so a
+compromised mirror cannot silently swap the seed list later.
 
-[`deploy/publish-join.sh`](../deploy/publish-join.sh) wraps that command for a
-release: it validates the seed links, creates a `0600` signing key outside the
-repository, writes the descriptor atomically, verifies it with
-`--verify-join`, and prints the public signer key. The full procedure —
-including rotation and an emergency withdrawal — is in the
+For the default URL, [`deploy/publish-join.sh`](../deploy/publish-join.sh) is
+maintainer-only: it reuses the existing release key
+(`~/.pwb/join-release-identity.json`) — it only creates one on first use —
+validates the seed links, writes the descriptor atomically, verifies it with
+`--verify-join`, and prints the public signer key. It must be run with all
+seeds every time, or omitted seeds are dropped. The full procedure — including
+rotation and an emergency withdrawal — is in the
 [publish-a-seed runbook](runbooks/publish-a-seed.md).
 
 Check a descriptor (local or published) the way a client will, without
