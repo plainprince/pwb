@@ -1,9 +1,14 @@
 {
   "version": 1,
-  "generated_at": 1761264000,
-  "expires_at": null,
-  "seeds": [],
+  "generated_at": 1794046475,
+  "expires_at": 1809598475,
+  "seeds": [
+    {
+      "address": "45.86.155.45:7921",
+      "public_key": "e9cf7f93312cc71d9a3cffd70ca5d2782fa9616a5848a4e330fca6c3e236db90"
+    }
+  ],
   "trust_anchors": [],
-  "signer": null,
-  "signature": null
+  "signer": "137b303838f79e03eda3f26b4c62838d8c1cfca00ec6c113a0c89183f6add60a",
+  "signature": "33bd5f6a82d772ee14a0feec80dd219503847f9933481ac5860459dec4714081494a6c29e2567b2c1749201ac6a7af14c3a776352d1da9d0ecdb689eff0dbb0e"
 }
