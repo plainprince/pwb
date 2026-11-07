@@ -350,13 +350,17 @@ impl BlogService {
         if !*announced {
             *announced = true;
             drop(announced);
-            let _ = self.engine.broadcast(NetworkMessage::BlogSubscribe {
-                sender: self.local,
-                subscribed: true,
-            });
-            let _ = self
-                .engine
-                .broadcast(NetworkMessage::BlogSync { sender: self.local });
+            let _ = self.engine.broadcast_gossip(
+                NetworkMessage::BlogSubscribe {
+                    sender: self.local,
+                    subscribed: true,
+                },
+                pwb_core::net::GOSSIP_FANOUT,
+            );
+            let _ = self.engine.broadcast_gossip(
+                NetworkMessage::BlogSync { sender: self.local },
+                pwb_core::net::GOSSIP_FANOUT,
+            );
         }
         Ok(())
     }
@@ -427,7 +431,7 @@ impl BlogService {
 
         let message = NetworkMessage::BlogEntry(entry.clone());
         self.engine
-            .broadcast(message)
+            .broadcast_gossip(message, pwb_core::net::GOSSIP_FANOUT)
             .map_err(|error| error.to_string())?;
 
         if self.record(entry) {

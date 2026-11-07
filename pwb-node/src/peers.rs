@@ -184,6 +184,40 @@ pub async fn restore(engine: &NodeEngine, path: &Path) -> usize {
     connected
 }
 
+/// Runtime failover: when the live peer table drains to zero (seed died,
+/// NAT rebinding, long partition), retry remembered peers then one bootstrap
+/// seed. Jittered so every stranded node does not hammer the seed in
+/// lockstep, and gated on an empty table so healthy nodes never add load.
+/// Returns after one attempt; the caller loops on an interval.
+pub async fn try_rejoin_once(engine: &NodeEngine, path: &Path) -> usize {
+    if !engine.peer_table().lock().unwrap().is_empty() {
+        return 0;
+    }
+    // Small jitter: 1-3s, so a network-wide partition does not thunder-herd.
+    let jitter = 1000 + (rand::random::<u64>() % 2000);
+    tokio::time::sleep(Duration::from_millis(jitter)).await;
+    if !engine.peer_table().lock().unwrap().is_empty() {
+        return 0;
+    }
+    let restored = restore(engine, path).await;
+    if restored > 0 {
+        return restored;
+    }
+    engine.connect_bootstrap_verified().await.len()
+}
+
+/// Background failover loop: every `interval`, rejoin if isolated.
+pub async fn rejoin_loop(engine: NodeEngine, path: std::path::PathBuf, interval: Duration) {
+    let mut ticker = tokio::time::interval(interval);
+    loop {
+        ticker.tick().await;
+        let rejoined = try_rejoin_once(&engine, &path).await;
+        if rejoined > 0 {
+            eprintln!("[Network] Failover rejoin: reconnected to {rejoined} peer(s).",);
+        }
+    }
+}
+
 /// Periodically write the merged peer store so a restart can rejoin without a
 /// bootstrap. Existing remembered peers survive a temporarily empty table.
 pub async fn persist_loop(

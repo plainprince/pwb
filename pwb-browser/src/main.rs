@@ -631,11 +631,10 @@ async fn main() {
     // so it is a direct-mode-only behaviour.
     if privacy == pwb_node::privacy::PrivacyMode::Direct {
         for (content_id, title) in host.artifacts() {
-            let _ = engine.broadcast(NetworkMessage::gossip_announce(
-                &identity.keypair,
-                content_id,
-                title,
-            ));
+            let _ = engine.broadcast_gossip(
+                NetworkMessage::gossip_announce(&identity.keypair, content_id, title),
+                pwb_core::net::GOSSIP_FANOUT,
+            );
         }
     }
 

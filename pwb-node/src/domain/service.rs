@@ -427,7 +427,12 @@ impl DomainService {
             .lock()
             .unwrap()
             .insert(claim_digest(&message));
-        let _ = self.engine.broadcast(message);
+        // Gossip, not full broadcast: claims re-forward via forward_claim,
+        // so fanout 6 converges in O(log N) rounds at O(6) cost instead of
+        // O(degree) per hop (accidental self-DDoS past a few dozen nodes).
+        let _ = self
+            .engine
+            .broadcast_gossip(message, pwb_core::net::GOSSIP_FANOUT);
         self.persist();
         self.broadcast_pricing_epoch();
         Ok(record)
@@ -531,7 +536,9 @@ impl DomainService {
             .lock()
             .unwrap()
             .insert(claim_digest(&message));
-        let _ = self.engine.broadcast(message);
+        let _ = self
+            .engine
+            .broadcast_gossip(message, pwb_core::net::GOSSIP_FANOUT);
         self.persist();
         self.broadcast_pricing_epoch();
         Ok(record)
@@ -606,7 +613,9 @@ impl DomainService {
             .lock()
             .unwrap()
             .insert(claim_digest(&message));
-        let _ = self.engine.broadcast(message);
+        let _ = self
+            .engine
+            .broadcast_gossip(message, pwb_core::net::GOSSIP_FANOUT);
         self.persist();
         self.broadcast_pricing_epoch();
         Ok(record)
@@ -694,13 +703,16 @@ impl DomainService {
             node_count: self.peers().len() as u64 + 1,
         };
         self.apply_pricing_stats(stats);
-        let _ = self.engine.broadcast(NetworkMessage::PricingEpoch {
-            sender: self.keypair.public,
-            epoch: stats.epoch,
-            registrations: stats.registrations,
-            network_work: stats.network_work,
-            node_count: stats.node_count,
-        });
+        let _ = self.engine.broadcast_gossip(
+            NetworkMessage::PricingEpoch {
+                sender: self.keypair.public,
+                epoch: stats.epoch,
+                registrations: stats.registrations,
+                network_work: stats.network_work,
+                node_count: stats.node_count,
+            },
+            pwb_core::net::GOSSIP_FANOUT,
+        );
     }
 
     fn apply_pricing_stats(&self, stats: PricingEpochStats) {
@@ -772,7 +784,7 @@ impl DomainService {
 
         let mut tasks = JoinSet::new();
         for exit in peers {
-            let path = privacy::select_path(&self.engine, Some(exit), 3)?;
+            let path = privacy::select_path_dynamic(&self.engine, Some(exit))?;
             let query_id = self.next_query_id.fetch_add(1, Ordering::Relaxed);
             let mut challenge = [0u8; 32];
             rand::thread_rng().fill_bytes(&mut challenge);
@@ -1371,20 +1383,13 @@ impl DomainService {
             .collect()
     }
 
-    /// Send `message` to every known peer except `except`.
+    /// Gossip `message` to a random fanout (excluding the sender's address).
+    /// Full broadcast here is degree^hops amplification: every claim would
+    /// cost O(degree) per hop. Fanout 6 converges in O(log N) rounds at
+    /// O(6) cost, and dedup by claim digest keeps it terminating.
     fn forward_claim(&self, except: SocketAddr, message: NetworkMessage) {
-        let addresses: Vec<SocketAddr> = self
-            .engine
-            .peer_table()
-            .lock()
-            .unwrap()
-            .values()
-            .map(|info| info.address)
-            .filter(|addr| *addr != except)
-            .collect();
-        for address in addresses {
-            let _ = self.engine.send_to_addr(address, message.clone());
-        }
+        let targets = self.engine.gossip_targets(Some(except), pwb_core::net::GOSSIP_FANOUT);
+        self.engine.send_to_each(&targets, message, pwb_core::net::SendFlags::EMPTY);
     }
 
     fn persist(&self) {

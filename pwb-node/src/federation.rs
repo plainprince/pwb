@@ -256,11 +256,10 @@ impl DistributedSearch {
         // happen to be responsible for its terms can still learn about it and
         // fetch the bytes. The envelope authenticates the publisher; the
         // announcement also carries a signature over the announced tuple.
-        let _ = self.engine.broadcast(NetworkMessage::gossip_announce(
-            &self.keypair,
-            content_id,
-            bundle.title.clone(),
-        ));
+        let _ = self.engine.broadcast_gossip(
+            NetworkMessage::gossip_announce(&self.keypair, content_id, bundle.title.clone()),
+            pwb_core::net::GOSSIP_FANOUT,
+        );
 
         // Indexing is content-addressed useful work: meter the bytes actually
         // parsed and mint against a receipt that re-derives their hash.
@@ -288,11 +287,14 @@ impl DistributedSearch {
                         &receipt.term_hash,
                     )),
                 };
-                let _ = self.engine.broadcast(NetworkMessage::CheckIndexProof {
-                    query_id: rand::random(),
-                    proof,
-                    bundle_bytes: bytes.to_vec(),
-                });
+                let _ = self.engine.broadcast_gossip(
+                    NetworkMessage::CheckIndexProof {
+                        query_id: rand::random(),
+                        proof,
+                        bundle_bytes: bytes.to_vec(),
+                    },
+                    pwb_core::net::GOSSIP_FANOUT,
+                );
             }
         }
         drop(minter);
@@ -949,7 +951,7 @@ impl DistributedSearch {
         let mut tasks = JoinSet::new();
         let mut path_error: Option<PrivacyError> = None;
         for responder in &responders {
-            let path = match privacy::select_path(&self.engine, Some(*responder), 3) {
+            let path = match privacy::select_path_dynamic(&self.engine, Some(*responder)) {
                 Ok(path) => path,
                 Err(error) => {
                     path_error = Some(error);
@@ -1104,7 +1106,7 @@ impl DistributedSearch {
         // chunk replies.
         let mut tasks = JoinSet::new();
         for exit in peers {
-            let path = privacy::select_path(&self.engine, Some(exit), 3)?;
+            let path = privacy::select_path_dynamic(&self.engine, Some(exit))?;
             let engine = self.engine.clone();
             tasks.spawn(async move {
                 let circuit_key = Keypair::generate();
@@ -1156,7 +1158,7 @@ impl DistributedSearch {
         // retry on a fresh circuit.
         let mut assembled = None;
         for _ in 0..2 {
-            let path = privacy::select_path(&self.engine, Some(exit), 3)?;
+            let path = privacy::select_path_dynamic(&self.engine, Some(exit))?;
             let circuit_key = Keypair::generate();
             let message = NetworkMessage::FetchArtifactChunk {
                 content_id: requested,
@@ -1208,7 +1210,7 @@ impl DistributedSearch {
                 let chunk_len = (total - chunk_offset).min(MAX_ARTIFACT_CHUNK);
                 offset += chunk_len;
                 expected.push((chunk_offset, chunk_len));
-                let path = privacy::select_path(&self.engine, Some(exit), 3)?;
+                let path = privacy::select_path_dynamic(&self.engine, Some(exit))?;
                 let engine = self.engine.clone();
                 batch.spawn(async move {
                     for _ in 0..2 {

@@ -1417,6 +1417,15 @@ async fn main() {
         identity.public_key(),
     ));
 
+    // Background failover: if the table drains to zero at runtime (seed
+    // died, NAT rebinding), retry remembered peers + one seed. Gated on
+    // emptiness + jittered, so healthy nodes add zero load.
+    let rejoin_handle = tokio::spawn(peers::rejoin_loop(
+        engine.clone(),
+        peer_store_path.clone(),
+        Duration::from_secs(60),
+    ));
+
     // Publish only after the join attempt: postings are replicated to the
     // peers known at publish time, so publishing earlier would leave the
     // content stranded on this node in anything larger than a tiny cluster.
@@ -1929,6 +1938,7 @@ async fn main() {
     seed_handle.abort();
     onion_handle.abort();
     px_handle.abort();
+    rejoin_handle.abort();
     if let Some(handle) = deferred_claim_handle {
         handle.abort();
     }

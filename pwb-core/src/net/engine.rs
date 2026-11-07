@@ -736,6 +736,63 @@ impl NodeEngine {
         }
     }
 
+    /// Direct peer keys ranked best-first by RTT / loss score (failure
+    /// cooldown excluded unless everything is in cooldown). Used by
+    /// reliability-aware path selection so a slow or lossy relay stops
+    /// being picked for new circuits without ever being probed in lockstep.
+    pub fn ranked_direct_keys(&self) -> Vec<PublicKey> {
+        let keys: Vec<PublicKey> = {
+            let table = self.peer_table.lock().unwrap();
+            table
+                .keys()
+                .filter(|k| **k != self.config.keypair.public)
+                .copied()
+                .collect()
+        };
+        self.reliability.lock().unwrap().ranked(&keys)
+    }
+
+    /// Health snapshot for adaptive decisions: (measured peers, mean RTT ms,
+    /// failure rate). Unmeasured peers count as 250ms / 20% loss so a fresh
+    /// swarm does not look healthier than a proven one.
+    pub fn reliability_summary(&self) -> (usize, f64, f64) {
+        let guard = self.reliability.lock().unwrap();
+        let keys: Vec<PublicKey> = {
+            let table = self.peer_table.lock().unwrap();
+            table
+                .keys()
+                .filter(|k| **k != self.config.keypair.public)
+                .copied()
+                .collect()
+        };
+        if keys.is_empty() {
+            return (0, 250.0, 0.2);
+        }
+        let mut rtt_sum = 0.0;
+        let mut fail_sum = 0.0;
+        let mut measured = 0;
+        for key in &keys {
+            match guard.stats(key) {
+                Some(stats) => {
+                    measured += 1;
+                    rtt_sum += stats.rtt.as_secs_f64() * 1000.0;
+                    let total = stats.successes + stats.failures;
+                    if total > 0 {
+                        fail_sum += stats.failures as f64 / total as f64;
+                    } else {
+                        fail_sum += 0.2;
+                    }
+                }
+                None => {
+                    rtt_sum += 250.0;
+                    fail_sum += 0.2;
+                }
+            }
+        }
+        let n = keys.len() as f64;
+        (measured, rtt_sum / n, fail_sum / n)
+    }
+
     /// Reliability-aware onion path: rank known relays by RTT / loss score
     /// and return the best `count` (3..=6), avoiding hosts in failure
     /// cooldown. Falls back to the raw peer set when nothing is measured.

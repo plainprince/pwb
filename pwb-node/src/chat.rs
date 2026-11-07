@@ -42,7 +42,7 @@ use pwb_core::net::{
     NetworkError, NetworkMessage, NodeEngine, OnionRequest, SendFlags, MAX_CHAT_TEXT,
 };
 
-use crate::privacy::{select_path, MIN_ONION_HOPS};
+use crate::privacy;
 use rand::rngs::OsRng;
 use rand::RngCore;
 use serde::{Deserialize, Serialize};
@@ -494,7 +494,7 @@ impl ChatService {
         let route = match route {
             ChatRoute::Direct => ChatRoute::Direct,
             ChatRoute::Onion | ChatRoute::Auto => {
-                match select_path(&self.engine, Some(*peer), MIN_ONION_HOPS) {
+                match privacy::select_path_dynamic(&self.engine, Some(*peer)) {
                     Ok(built) => {
                         path = Some(built);
                         ChatRoute::Onion

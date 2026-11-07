@@ -497,15 +497,23 @@ impl RoomService {
         }
 
         if self.announced.lock().unwrap().insert(room.clone()) {
-            let _ = self.engine.broadcast(NetworkMessage::RoomSubscribe {
-                sender: self.local,
-                room: room.clone(),
-                subscribed: true,
-            });
-            let _ = self.engine.broadcast(NetworkMessage::RoomSync {
-                sender: self.local,
-                room,
-            });
+            // Membership is rare (once per room join) but still gossip:
+            // a 100-peer swarm does not need 100 copies of a join.
+            let _ = self.engine.broadcast_gossip(
+                NetworkMessage::RoomSubscribe {
+                    sender: self.local,
+                    room: room.clone(),
+                    subscribed: true,
+                },
+                pwb_core::net::GOSSIP_FANOUT,
+            );
+            let _ = self.engine.broadcast_gossip(
+                NetworkMessage::RoomSync {
+                    sender: self.local,
+                    room,
+                },
+                pwb_core::net::GOSSIP_FANOUT,
+            );
         }
         Ok(())
     }
@@ -572,8 +580,11 @@ impl RoomService {
         self.seen.lock().unwrap().insert(post_digest(&post));
 
         let message = NetworkMessage::RoomPost(post.clone());
+        // Seed the flood via gossip fanout: relays re-gossip to a fanout,
+        // so the initial send must match (full broadcast here would be
+        // degree^hops amplification on every post).
         self.engine
-            .broadcast(message)
+            .broadcast_gossip(message, pwb_core::net::GOSSIP_FANOUT)
             .map_err(|error| error.to_string())?;
 
         if self.record(&room, post) {
