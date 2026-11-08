@@ -17,6 +17,10 @@ pub enum WireError {
     /// The bundle names an author but does not carry a valid signature by that
     /// author. A named author is never accepted on trust.
     InvalidAuthorSignature,
+    /// The element tree nests deeper than [`crate::wire::MAX_TREE_DEPTH`].
+    /// Decoding recurses per level, so an unbounded tree is a stack-overflow
+    /// vector from untrusted peer bytes.
+    TreeTooDeep,
 }
 
 impl std::fmt::Display for WireError {
@@ -39,6 +43,7 @@ impl std::fmt::Display for WireError {
             WireError::InvalidAuthorSignature => {
                 write!(f, "the author signature is missing or invalid")
             }
+            WireError::TreeTooDeep => write!(f, "the artifact's element tree is nested too deeply"),
         }
     }
 }

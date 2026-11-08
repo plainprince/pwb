@@ -95,7 +95,7 @@ Layering the Chaum-style blind Schnorr vouchers of `pwb-core::crypto` over the Â
 
 #### Requester side
 
-- `BlindWithdrawal::prepare` rebuilds each `BlindVoucherNonce` from its wire point (`BlindVoucherNonce::from_point`, new in `pwb-core::crypto` â€” placeholder scalar, never signable), blinds fresh secrets
+- `BlindWithdrawal::prepare` rebuilds each issuer commitment from its wire point (`BlindVoucherCommitment::from_bytes` in `pwb-core::crypto`); the commitment type has no secret scalar and cannot be handed to the signer, blinds fresh secrets
 - `finish` unblinds partial signatures into `WithdrawnVoucher`s that carry the bearer secret
 
 #### `withdraw_attested`

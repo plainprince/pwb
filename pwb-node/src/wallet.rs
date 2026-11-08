@@ -179,26 +179,34 @@ impl Wallet {
             std::fs::create_dir_all(parent)
                 .map_err(|e| format!("cannot create '{}': {e}", parent.display()))?;
         }
-        let tmp = self.path.with_extension("json.tmp");
-        std::fs::write(&tmp, json).map_err(|e| format!("cannot write '{}': {e}", tmp.display()))?;
-        restrict_permissions(&tmp)?;
-        std::fs::rename(&tmp, &self.path)
-            .map_err(|e| format!("cannot replace '{}': {e}", self.path.display()))?;
+        // A unique name plus `create_new` means a stale temp file or a
+        // pre-planted symlink can never be followed and written through.
+        let tmp = self
+            .path
+            .with_extension(format!("json.tmp-{}", rand::random::<u64>()));
+        write_private(&tmp, &json).map_err(|e| format!("cannot write '{}': {e}", tmp.display()))?;
+        if let Err(error) = std::fs::rename(&tmp, &self.path) {
+            let _ = std::fs::remove_file(&tmp);
+            return Err(format!("cannot replace '{}': {error}", self.path.display()));
+        }
         Ok(())
     }
 }
 
-/// Vouchers are bearer instruments: keep the file readable only by the owner.
-#[cfg(unix)]
-fn restrict_permissions(path: &Path) -> Result<(), String> {
-    use std::os::unix::fs::PermissionsExt;
-    std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))
-        .map_err(|e| format!("cannot restrict '{}': {e}", path.display()))
-}
-
-#[cfg(not(unix))]
-fn restrict_permissions(_path: &Path) -> Result<(), String> {
-    Ok(())
+/// Vouchers are bearer instruments: create the file already readable only by
+/// the owner, so there is no window in which another local user can open it.
+fn write_private(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
+    use std::io::Write;
+    let mut options = std::fs::OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    let mut file = options.open(path)?;
+    file.write_all(bytes)?;
+    file.sync_all()
 }
 
 /// Attestor set for `subject` at `epoch`: the pinned anchors when the node

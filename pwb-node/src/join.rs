@@ -32,6 +32,27 @@ use pwb_core::net::{resolve_bootstrap_peer, BootstrapPeer};
 pub const DEFAULT_JOIN_URL: &str =
     "https://raw.githubusercontent.com/plainprince/pwb/main/deploy/join.json";
 
+/// Signing key compiled in for [`DEFAULT_JOIN_URL`].
+///
+/// Trust-on-first-use is not acceptable for the built-in source: whoever
+/// controls the network on a client's first run would otherwise choose the
+/// signer, and could then feed it a seed list of their own. The release key is
+/// therefore pinned in the binary; rotating it requires a release. Other
+/// sources keep the TOFU policy.
+pub const DEFAULT_JOIN_SIGNER: &str =
+    "137b303838f79e03eda3f26b4c62838d8c1cfca00ec6c113a0c89183f6add60a";
+
+/// The compiled-in signer for the built-in descriptor URL.
+pub fn default_join_signer() -> Option<PublicKey> {
+    let bytes = hex::decode(DEFAULT_JOIN_SIGNER).ok()?;
+    Some(PublicKey(bytes.try_into().ok()?))
+}
+
+/// Whether `source` is the descriptor this build trusts out of the box.
+pub fn is_default_join_source(source: &str) -> bool {
+    source.trim_end_matches('/') == DEFAULT_JOIN_URL
+}
+
 /// Largest descriptor body accepted from any source.
 pub const MAX_JOIN_BYTES: usize = 256 * 1024;
 
@@ -292,10 +313,17 @@ pub async fn discover(
 
     for source in sources {
         let cleartext = source.starts_with("http://");
+        // The built-in URL is pinned to the release key; a stale TOFU pin or a
+        // user-supplied key never weakens (or stands in for) that binding.
+        let source_expected = if is_default_join_source(source) {
+            default_join_signer().or(expected)
+        } else {
+            expected
+        };
         match fetch_descriptor(source).await {
             Ok(mut descriptor) => {
                 if cleartext {
-                    match (expected, descriptor.signer) {
+                    match (source_expected, descriptor.signer) {
                         (Some(known), Some(signer)) if known == signer => {}
                         (Some(_), None) => {
                             last_error = Some(JoinSourceError::MissingSignature);
@@ -314,7 +342,8 @@ pub async fn discover(
                         }
                     }
                 }
-                if let Err(error) = check_descriptor(&descriptor, expected, require_signature, now)
+                if let Err(error) =
+                    check_descriptor(&descriptor, source_expected, require_signature, now)
                 {
                     last_error = Some(error);
                     continue;
@@ -331,7 +360,7 @@ pub async fn discover(
                     descriptor.trust_anchors.clear();
                 }
                 if let (None, Some(signer), Some(data_dir)) =
-                    (expected, descriptor.signer, data_dir)
+                    (source_expected, descriptor.signer, data_dir)
                 {
                     if let Err(error) = save_pinned_signer(data_dir, signer) {
                         eprintln!("[Join] Could not pin join signer: {error}");
@@ -498,6 +527,23 @@ mod tests {
         let other = Keypair::generate().public;
         assert!(matches!(
             check_descriptor(&descriptor, Some(other), true, 0),
+            Err(JoinSourceError::SignerMismatch { .. })
+        ));
+    }
+
+    #[test]
+    fn default_source_is_pinned_to_the_release_key() {
+        let release = default_join_signer().expect("compiled-in signer parses");
+        assert_eq!(release.to_hex(), DEFAULT_JOIN_SIGNER);
+        assert!(is_default_join_source(DEFAULT_JOIN_URL));
+        assert!(is_default_join_source(&format!("{DEFAULT_JOIN_URL}/")));
+        assert!(!is_default_join_source("https://example.com/join.json"));
+
+        // A descriptor signed by anyone else is not accepted for the
+        // built-in URL, even with trust-on-first-use otherwise allowed.
+        let descriptor = descriptor();
+        assert!(matches!(
+            check_descriptor(&descriptor, default_join_signer(), false, 0),
             Err(JoinSourceError::SignerMismatch { .. })
         ));
     }

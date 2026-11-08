@@ -229,11 +229,38 @@ pub const UNOFFICIAL_TLDS: &[&str] = &[
     "com",
 ];
 
+/// Whether one dot-separated label is a valid name component: 1–63 ASCII
+/// alphanumerics or hyphens, with no leading or trailing hyphen.
+///
+/// Names are compared and stored verbatim, so anything outside this set would
+/// let two visually identical names refer to different records, or smuggle
+/// path/URL syntax into a name.
+pub fn is_valid_domain_label(label: &str) -> bool {
+    !label.is_empty()
+        && label.len() <= 63
+        && !label.starts_with('-')
+        && !label.ends_with('-')
+        && label
+            .bytes()
+            .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'-')
+}
+
+/// Whether `name` is a valid dotted name (1–253 bytes, every label valid).
+///
+/// Callers should lowercase first; the case-insensitive entry point is
+/// [`is_unofficial_domain`].
+pub fn is_valid_domain_name(name: &str) -> bool {
+    !name.is_empty() && name.len() <= 253 && name.split('.').all(is_valid_domain_label)
+}
+
 /// The unofficial TLD `name` ends in (lowercased input, matched case-insensitively),
 /// or `None` when the name carries no listed TLD — including `.plain` names and
 /// bare names without a dot.
 pub fn unofficial_tld(name: &str) -> Option<&'static str> {
     let lower = name.trim().to_lowercase();
+    if !is_valid_domain_name(&lower) {
+        return None;
+    }
     UNOFFICIAL_TLDS.iter().copied().find(|tld| {
         lower
             .strip_suffix(&format!(".{tld}"))
@@ -334,6 +361,35 @@ mod tests {
         }
         // Nested labels stay claimable (matching the previous `.pwb` rule).
         assert!(is_unofficial_domain("a.b.com"));
+    }
+
+    #[test]
+    fn test_invalid_labels_are_not_claimable() {
+        for name in [
+            "a/b.pwb",
+            "a b.pwb",
+            "a_b.pwb",
+            "a?.pwb",
+            "-lead.pwb",
+            "trail-.pwb",
+            "a..pwb",
+            ".pwb",
+            "a.b..com",
+            "über.pwb",
+            "a\u{0}b.pwb",
+        ] {
+            assert!(!is_unofficial_domain(name), "{name:?} must be invalid");
+        }
+
+        let long = "a".repeat(64);
+        assert!(!is_unofficial_domain(&format!("{long}.pwb")));
+
+        assert!(is_unofficial_domain("a-b.pwb"));
+        assert!(is_unofficial_domain("a1.b2.vio"));
+        assert!(is_unofficial_domain(&format!("{}.pwb", "a".repeat(63))));
+        assert!(is_valid_domain_label("a-b"));
+        assert!(!is_valid_domain_label("a.b"));
+        assert!(!is_valid_domain_label(""));
     }
 
     #[test]

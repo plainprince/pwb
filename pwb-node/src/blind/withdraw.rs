@@ -3,7 +3,7 @@
 use std::fmt;
 
 use pwb_core::crypto::{
-    BlindVoucher, BlindVoucherNonce, BlindVoucherPartialSignature, BlindVoucherPublicKey,
+    BlindVoucher, BlindVoucherCommitment, BlindVoucherPartialSignature, BlindVoucherPublicKey,
     ContentId, PublicKey, VoucherBlindRequest, VoucherBlindState, VoucherBlinding, VoucherSecret,
 };
 
@@ -81,10 +81,19 @@ impl BlindWithdrawal {
         issuer_public: &BlindVoucherPublicKey,
         nonce_points: &[[u8; 32]],
     ) -> Result<Self, BlindError> {
+        if denomination == 0 || nonce_points.is_empty() {
+            return Err(BlindError::InvalidAmount);
+        }
+        if denomination
+            .checked_mul(nonce_points.len() as u64)
+            .is_none()
+        {
+            return Err(BlindError::InvalidAmount);
+        }
         let mut entries = Vec::with_capacity(nonce_points.len());
         for point in nonce_points {
             let nonce =
-                BlindVoucherNonce::from_point(*point).ok_or(BlindError::NonceCountMismatch)?;
+                BlindVoucherCommitment::from_bytes(*point).ok_or(BlindError::NonceCountMismatch)?;
             let secret = VoucherSecret::random();
             let blinding = VoucherBlinding::random();
             let (state, request) = BlindVoucher::blind_request(
@@ -171,13 +180,22 @@ pub fn withdraw_attested(
         .public_key(denomination)
         .ok_or(BlindError::UnknownDenomination(denomination))?;
 
-    // Issuer commits nonces; requester blinds against them.
-    let nonce_points = issuer.commit_nonces(denomination, chunks);
+    // Issuer commits nonces; requester blinds against them. The request id
+    // names this batch so an abandoned withdrawal cannot block another.
+    let request_id = rand::random::<u64>();
+    let nonce_points = issuer.commit_nonces(request_id, denomination, chunks);
     let withdrawal = BlindWithdrawal::prepare(denomination, &issuer_public, &nonce_points)?;
 
-    // Issuer signs blind, bounded by the attested balance.
+    // Issuer signs blind, bounded by the attested balance. On failure the
+    // partial batch is discarded so its nonces do not linger.
     let requests = withdrawal.requests();
-    let partials = issuer.sign_batch(&requests, balance)?;
+    let partials = match issuer.sign_batch(request_id, &requests, balance) {
+        Ok(partials) => partials,
+        Err(error) => {
+            issuer.clear_pending(request_id);
+            return Err(error);
+        }
+    };
 
     // Requester unblinds into spendable vouchers.
     let vouchers = withdrawal.finish(&partials)?;

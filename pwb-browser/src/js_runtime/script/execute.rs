@@ -2,12 +2,13 @@
 
 use rquickjs::{CatchResultExt, Object, Value};
 
-use super::super::core::{get_or_create_context, DomHandle, JsError};
+use super::super::core::{get_or_create_context, DomHandle, ExecutionDeadline, JsError};
 use super::super::devtools::append_console_line;
 use super::{bindings, webapis, wrapper};
 
 /// Execute a JS script payload against a DOM handle with custom `document` bindings.
 pub fn execute_script(dom_handle: &DomHandle, script: &str) -> Result<(), JsError> {
+    let _deadline = ExecutionDeadline::arm();
     let context = get_or_create_context()?;
 
     context.with(|ctx| {

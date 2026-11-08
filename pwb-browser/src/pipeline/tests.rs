@@ -651,6 +651,28 @@ fn register_plain_claim_submissions_render_the_console_response() {
 }
 
 #[test]
+fn scripted_claim_navigation_does_not_spend_credits() {
+    let mut h = harness();
+    let before = h.app.domain.available_credits();
+    let cid = ContentId([4; 32]).to_hex();
+
+    // A page script cannot submit a claim: no ledger spend, no registry entry,
+    // and the user sees a confirmation notice instead.
+    h.app
+        .handle_pending_navigation(&format!("register.plain?claim=evil.non&cid={cid}"), true);
+    assert_eq!(h.app.domain.available_credits(), before);
+    assert!(h.app.domain.resolve_local("evil.non").is_none());
+    assert!(h
+        .app
+        .dom_handle_render
+        .dom
+        .borrow()
+        .title
+        .to_lowercase()
+        .contains("claim"));
+}
+
+#[test]
 fn go_canonicalizes_bare_words_and_resolves_unofficial_tlds() {
     let mut h = harness();
     h.app.set_initial_url("welcome.plain");

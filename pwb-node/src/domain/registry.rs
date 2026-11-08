@@ -76,13 +76,12 @@ impl DomainRegistry {
     }
 
     /// Merge a registry that evolved in isolation into this one (gossip
-    /// partition merge). Deterministic CRDT semantics — commutative,
-    /// associative and idempotent:
+    /// partition merge). Deterministic and idempotent for honest state:
     ///
     /// * domains seen on only one side are kept;
-    /// * conflicting claims for the same domain resolve to the highest
-    ///   `registered_at_epoch` (last writer wins); ties break on the
-    ///   lexicographic owner public key bytes;
+    /// * ownership is not transferable: a claim from a different key is
+    ///   dropped, while the same owner's highest `registered_at_epoch` wins;
+    ///   this is order-dependent only for the conflicting (invalid) claim;
     /// * attested funding groups that overspend their cited balance are
     ///   repaired (see [`Self::repair_funding`]): the same certificate
     ///   cannot fund two surviving claims, even across partitions;
@@ -94,11 +93,13 @@ impl DomainRegistry {
         for (domain, record) in &other.records {
             let keep = match self.records.get(domain) {
                 None => true,
-                Some(existing) => {
-                    record.registered_at_epoch > existing.registered_at_epoch
-                        || (record.registered_at_epoch == existing.registered_at_epoch
-                            && record.owner.0 < existing.owner.0)
-                }
+                // A name is owned by the key that first registered it. A
+                // record from another owner can never supersede it, however
+                // new its epoch is: only a verified payment could authorize a
+                // transfer, and there is no transfer protocol.
+                Some(existing) if existing.owner != record.owner => false,
+                // Same owner: only a strictly later epoch supersedes.
+                Some(existing) => record.registered_at_epoch > existing.registered_at_epoch,
             };
             if keep {
                 self.records.insert(domain.clone(), record.clone());
@@ -290,10 +291,10 @@ impl DomainRegistry {
         self.records.contains_key(&domain.trim().to_lowercase())
     }
 
-    /// Apply one record using the same deterministic last-writer-wins rule as
-    /// [`Self::merge`] (higher `registered_at_epoch` wins; ties break on the
-    /// lexicographically smaller owner key). Returns `true` when the stored
-    /// registry changed (i.e. this is new or supersedes the existing record).
+    /// Apply one record using the same rule as [`Self::merge`]: a later
+    /// `registered_at_epoch` from the same owner supersedes, and a record from
+    /// any other owner is refused. Returns `true` when the stored registry
+    /// changed (i.e. this is new or supersedes the existing record).
     pub fn apply_record(&mut self, record: DomainRecord) -> bool {
         let domain = record.domain.trim().to_lowercase();
         let record = DomainRecord {
@@ -302,11 +303,12 @@ impl DomainRegistry {
         };
         let keep = match self.records.get(&domain) {
             None => true,
-            Some(existing) => {
-                record.registered_at_epoch > existing.registered_at_epoch
-                    || (record.registered_at_epoch == existing.registered_at_epoch
-                        && record.owner.0 < existing.owner.0)
-            }
+            // Ownership is not transferable: reject a record from a different
+            // key even if it claims a later epoch. Without this, any peer could
+            // sign a fresh claim for an existing name and take it over.
+            Some(existing) if existing.owner != record.owner => false,
+            // Same owner: only a strictly later epoch supersedes.
+            Some(existing) => record.registered_at_epoch > existing.registered_at_epoch,
         };
         if keep && self.records.get(&domain) != Some(&record) {
             self.records.insert(domain, record);

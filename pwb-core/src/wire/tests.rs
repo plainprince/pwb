@@ -260,3 +260,33 @@ fn test_compressed_bundle_rejects_oversized_declaration() {
     let err = Bundle::deserialize(&bomb).expect_err("oversized declaration is rejected");
     assert!(matches!(err, WireError::CompressionFailed(_)));
 }
+
+#[test]
+fn test_deeply_nested_tree_is_rejected() {
+    // Each level is a complete 8-byte node with one child, so a hostile peer
+    // can build thousands of levels in a few kilobytes. The decoder must stop
+    // at the depth cap instead of recursing until the stack overflows.
+    let levels = MAX_TREE_DEPTH + 32;
+    let mut tree = Vec::with_capacity((levels + 1) * 8);
+    for _ in 0..levels {
+        tree.extend_from_slice(&[4, 0, 0, 0, 0, 0, 0, 1]);
+    }
+    tree.extend_from_slice(&[4, 0, 0, 0, 0, 0, 0, 0]);
+
+    let mut raw = Vec::new();
+    raw.extend_from_slice(MAGIC);
+    raw.extend_from_slice(&CURRENT_VERSION.to_be_bytes());
+    raw.push(0); // no author key
+    raw.extend_from_slice(&0u16.to_be_bytes()); // title symbol
+    raw.extend_from_slice(&1u16.to_be_bytes()); // one symbol
+    raw.extend_from_slice(&1u16.to_be_bytes());
+    raw.extend_from_slice(b"t");
+    raw.extend_from_slice(&(tree.len() as u32).to_be_bytes());
+    raw.extend_from_slice(&tree);
+    raw.extend_from_slice(&0u32.to_be_bytes()); // no script
+    raw.extend_from_slice(&0u32.to_be_bytes()); // no components
+    raw.extend_from_slice(&0u32.to_be_bytes()); // no modules
+
+    let err = Bundle::deserialize(&raw).expect_err("deep tree is rejected");
+    assert!(matches!(err, WireError::TreeTooDeep));
+}

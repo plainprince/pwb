@@ -6,6 +6,7 @@ use std::fmt;
 
 use rand::rngs::OsRng;
 use rand::RngCore;
+use zeroize::{Zeroize, ZeroizeOnDrop};
 
 /// 256-bit Identity Public Key (Ed25519).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -24,14 +25,33 @@ impl fmt::Display for PublicKey {
 }
 
 /// 256-bit Identity Secret Key (Ed25519).
-#[derive(Debug, Clone)]
+///
+/// `Debug` is deliberately redacted: keys end up in error types and log lines
+/// far more often than intended, and a secret written to a log cannot be
+/// recalled. The buffer is zeroed when the key is dropped.
+#[derive(Clone, Zeroize, ZeroizeOnDrop)]
 pub struct SecretKey(pub [u8; 32]);
 
+impl fmt::Debug for SecretKey {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("SecretKey([redacted])")
+    }
+}
+
 /// Ed25519 Identity Keypair.
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct Keypair {
     pub public: PublicKey,
     pub secret: SecretKey,
+}
+
+impl fmt::Debug for Keypair {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("Keypair")
+            .field("public", &self.public)
+            .field("secret", &self.secret)
+            .finish()
+    }
 }
 
 impl Keypair {

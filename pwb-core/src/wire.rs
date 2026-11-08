@@ -22,6 +22,7 @@ mod tests;
 pub use bundle::Bundle;
 pub use constants::{
     COMPRESSED_MAGIC, COMPRESSION_VERSION, CURRENT_VERSION, MAGIC, MAX_DECOMPRESSED_BYTES,
+    MAX_TREE_DEPTH,
 };
 pub use error::WireError;
 pub use symbol::SymbolTable;

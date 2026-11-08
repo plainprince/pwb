@@ -566,6 +566,24 @@ impl BrowserApp {
         }
     }
 
+    /// Apply a navigation requested by a page (a link click or
+    /// `__pwb_navigate`). `scripted` is true only for the JavaScript path.
+    ///
+    /// SECURITY: a page script must not be able to spend credits. A
+    /// `register.plain?claim=…` URL submitted by `__pwb_navigate` only renders
+    /// a notice; the user has to open the console and submit the claim
+    /// themselves. A native link click is a user gesture and still navigates.
+    pub(super) fn handle_pending_navigation(&mut self, url: &str, scripted: bool) {
+        if scripted && is_register_target(url) && register_claim_of(url).is_some() {
+            self.show_error_page(
+                "claim needs confirmation",
+                "A page script cannot spend credits. Open register.plain from the address bar and submit the claim yourself.",
+            );
+            return;
+        }
+        self.go(url);
+    }
+
     /// Execute a chrome button click. Returns `false` for actions this shell
     /// does not implement.
     pub(super) fn handle_chrome_action(&mut self, action: ChromeAction) -> bool {
@@ -1067,10 +1085,9 @@ impl ApplicationHandler for BrowserApp {
         // recreating the winit EventLoop (which cannot be recreated in the
         // same process).
         let pending_url = self.dom_handle_render.pending_navigate.borrow_mut().take();
+        let scripted = self.dom_handle_render.scripted_navigate.replace(false);
         if let Some(url) = pending_url {
-            // `go` records the navigation in the active tab, refreshes the
-            // chrome, and routes system pages / searches / remote content.
-            self.go(&url);
+            self.handle_pending_navigation(&url, scripted);
             if let Some(w) = self.window.as_ref() {
                 w.request_redraw();
             }

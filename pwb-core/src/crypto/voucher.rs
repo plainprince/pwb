@@ -11,7 +11,7 @@ use rand::RngCore;
 
 use zeroize::{Zeroize, ZeroizeOnDrop};
 
-use super::issuer::{BlindVoucherNonce, BlindVoucherPublicKey};
+use super::issuer::{BlindVoucherCommitment, BlindVoucherPublicKey};
 
 /// Bearer secret that defines a blind credit voucher's hidden token.
 ///
@@ -292,14 +292,15 @@ impl BlindVoucher {
         secret: &VoucherSecret,
         blinding: &VoucherBlinding,
         issuer_public: &BlindVoucherPublicKey,
-        nonce: &BlindVoucherNonce,
+        nonce: &BlindVoucherCommitment,
     ) -> Option<(VoucherBlindState, VoucherBlindRequest)> {
         let issuer_point = issuer_public.as_point()?;
         let token = voucher_token(&secret.0);
         let alpha = Scalar::from_bytes_mod_order(blinding.alpha.0);
         let beta = Scalar::from_bytes_mod_order(blinding.beta.0);
 
-        let commitment = nonce.point + &alpha * RISTRETTO_BASEPOINT_TABLE + beta * issuer_point;
+        let commitment =
+            nonce.as_point() + &alpha * RISTRETTO_BASEPOINT_TABLE + beta * issuer_point;
         let challenge = blind_voucher_challenge(amount, &issuer_point, &commitment, &token);
 
         Some((

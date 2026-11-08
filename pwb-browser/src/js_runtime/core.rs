@@ -4,10 +4,25 @@ use crate::dom::Dom;
 use crate::event_handler::EventHandlerRegistry;
 use crate::webapi::WebApiState;
 use rquickjs::{Context, Runtime};
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+use std::time::{Duration, Instant};
+
+/// Upper bound on the QuickJS heap for one page. A hostile script that
+/// allocates without limit fails with an out-of-memory exception instead of
+/// exhausting the host process's memory.
+const JS_MEMORY_LIMIT: usize = 64 * 1024 * 1024;
+/// Upper bound on the JS value stack (QuickJS's default is 256 KiB).
+const JS_STACK_LIMIT: usize = 1 << 20;
+/// Wall-clock budget for one script or event handler. QuickJS polls the
+/// interrupt handler while executing, so `while (true) {}` cannot freeze the
+/// browser forever.
+#[cfg(not(test))]
+const JS_EXECUTION_TIMEOUT: Duration = Duration::from_secs(3);
+#[cfg(test)]
+const JS_EXECUTION_TIMEOUT: Duration = Duration::from_secs(1);
 
 /// Errors raised while initializing or executing JavaScript.
 #[derive(Debug)]
@@ -47,6 +62,11 @@ pub struct DomHandle {
     /// JS event handlers). The pipeline checks this after event dispatch and
     /// restarts the browser with the new bundle.
     pub pending_navigate: Rc<RefCell<Option<String>>>,
+    /// True when [`pending_navigate`](Self::pending_navigate) was set by page
+    /// JavaScript (`__pwb_navigate`) rather than by a user click. Scripted
+    /// navigation must not spend credits, so the pipeline asks for explicit
+    /// confirmation instead of submitting a `register.plain` claim.
+    pub scripted_navigate: Rc<Cell<bool>>,
     /// A connection link the page wants to dial (set by `__pwb_connect(link)`
     /// from the `nodes.plain` connect card). The pipeline performs the dial on
     /// its Tokio runtime and renders the outcome.
@@ -87,6 +107,7 @@ impl DomHandle {
         *self.selected_node_id.borrow_mut() = None;
         *self.focused_input.borrow_mut() = None;
         *self.pending_navigate.borrow_mut() = None;
+        self.scripted_navigate.set(false);
         *self.pending_connect.borrow_mut() = None;
         *self.pending_chat.borrow_mut() = None;
         *self.pending_room.borrow_mut() = None;
@@ -108,6 +129,7 @@ impl DomHandle {
             selected_node_id: Rc::new(RefCell::new(None)),
             focused_input: Rc::new(RefCell::new(None)),
             pending_navigate: Rc::new(RefCell::new(None)),
+            scripted_navigate: Rc::new(Cell::new(false)),
             pending_connect: Rc::new(RefCell::new(None)),
             pending_chat: Rc::new(RefCell::new(None)),
             pending_room: Rc::new(RefCell::new(None)),
@@ -127,6 +149,26 @@ impl DomHandle {
 // `document`/`console` bindings for the current DOM handle.
 thread_local! {
     static JS_CONTEXT: RefCell<Option<rquickjs::Context>> = const { RefCell::new(None) };
+    /// Deadline for the script currently executing on this thread. `None`
+    /// means no script is running, so the interrupt handler never fires.
+    static JS_DEADLINE: Rc<Cell<Option<Instant>>> = Rc::new(Cell::new(None));
+}
+
+/// Arms the execution deadline for as long as it is alive, and clears it on
+/// drop (including when the script panics or returns an error).
+pub(crate) struct ExecutionDeadline;
+
+impl ExecutionDeadline {
+    pub(crate) fn arm() -> Self {
+        JS_DEADLINE.with(|deadline| deadline.set(Some(Instant::now() + JS_EXECUTION_TIMEOUT)));
+        Self
+    }
+}
+
+impl Drop for ExecutionDeadline {
+    fn drop(&mut self) {
+        JS_DEADLINE.with(|deadline| deadline.set(None));
+    }
 }
 
 /// Drop the shared page engine. The next `execute_script` creates a new
@@ -146,6 +188,14 @@ pub(crate) fn get_or_create_context() -> Result<rquickjs::Context, JsError> {
         let mut borrow = cell.borrow_mut();
         if borrow.is_none() {
             let runtime = Runtime::new().map_err(|e| JsError::InitFailed(e.to_string()))?;
+            runtime.set_memory_limit(JS_MEMORY_LIMIT);
+            runtime.set_max_stack_size(JS_STACK_LIMIT);
+            let deadline = JS_DEADLINE.with(Rc::clone);
+            runtime.set_interrupt_handler(Some(Box::new(move || {
+                deadline
+                    .get()
+                    .is_some_and(|deadline| Instant::now() >= deadline)
+            })));
             let context =
                 Context::full(&runtime).map_err(|e| JsError::InitFailed(e.to_string()))?;
             *borrow = Some(context);

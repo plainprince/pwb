@@ -41,8 +41,9 @@ fn issue_voucher(
 ) -> BlindVoucher {
     let public = issuer.public_key();
     let nonce = issuer.signing_nonce();
-    let (state, request) = BlindVoucher::blind_request(amount, secret, blinding, &public, &nonce)
-        .expect("valid issuer key");
+    let (state, request) =
+        BlindVoucher::blind_request(amount, secret, blinding, &public, &nonce.commitment())
+            .expect("valid issuer key");
     let partial = issuer
         .sign_blind(nonce, &request)
         .expect("issuer accepts the amount");
@@ -135,7 +136,7 @@ fn blind_voucher_partial_signature_roundtrip() {
 
     let nonce = issuer.signing_nonce();
     let (state, request) =
-        BlindVoucher::blind_request(11, &secret, &blinding, &public, &nonce).unwrap();
+        BlindVoucher::blind_request(11, &secret, &blinding, &public, &nonce.commitment()).unwrap();
     let partial = issuer.sign_blind(nonce, &request).unwrap();
     let bytes = partial.to_bytes();
     let restored = BlindVoucherPartialSignature::from_bytes(bytes).unwrap();
@@ -210,7 +211,8 @@ fn blind_voucher_denomination_keys_enforce_amount() {
     let blinding = VoucherBlinding::random();
     let nonce = hundred.signing_nonce();
     let (_state, request) =
-        BlindVoucher::blind_request(1000, &secret, &blinding, &public, &nonce).unwrap();
+        BlindVoucher::blind_request(1000, &secret, &blinding, &public, &nonce.commitment())
+            .unwrap();
     assert!(hundred.sign_blind(nonce, &request).is_none());
 
     // A 1000 voucher cannot verify against the 100 public key.
@@ -232,7 +234,7 @@ fn blind_voucher_nonce_point_roundtrip_is_requester_side() {
 
     // The requester reconstructs the commitment from the wire bytes and
     // can complete blind_request with it.
-    let restored = BlindVoucherNonce::from_point(point).expect("valid point");
+    let restored = BlindVoucherCommitment::from_bytes(point).expect("valid point");
     assert_eq!(restored.to_bytes(), point);
 
     let secret = VoucherSecret::random();
@@ -245,7 +247,7 @@ fn blind_voucher_nonce_point_roundtrip_is_requester_side() {
     assert!(voucher.verify(&public));
 
     // Garbage bytes do not decompress.
-    assert!(BlindVoucherNonce::from_point([0xff; 32]).is_none());
+    assert!(BlindVoucherCommitment::from_bytes([0xff; 32]).is_none());
 }
 
 #[test]

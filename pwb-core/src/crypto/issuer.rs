@@ -37,8 +37,12 @@ impl BlindVoucherPublicKey {
 }
 
 /// One-time issuer nonce for a single blinded signing request.
+///
+/// Only the issuer can construct this type, and [`BlindVoucherIssuer::sign_blind`]
+/// consumes it by value, so a requester can never supply a nonce with a
+/// fabricated (for example zero) secret scalar.
 pub struct BlindVoucherNonce {
-    pub(super) point: RistrettoPoint,
+    point: RistrettoPoint,
     nonce: ScalarBytes,
 }
 
@@ -48,22 +52,36 @@ impl BlindVoucherNonce {
         self.point.compress().to_bytes()
     }
 
-    /// Reconstruct the public commitment from its 32-byte wire encoding.
-    ///
-    /// The requester side of the protocol only needs the point (to build the
-    /// blinded challenge in [`BlindVoucher::blind_request`]); the secret
-    /// scalar stays with the issuer. The reconstructed nonce carries a
-    /// placeholder scalar and must never be passed to
-    /// [`BlindVoucherIssuer::sign_blind`] — only the issuer's own nonces from
-    /// [`BlindVoucherIssuer::signing_nonce`] may sign.
-    ///
-    /// [`BlindVoucher::blind_request`]: super::voucher::BlindVoucher::blind_request
-    pub fn from_point(point: [u8; 32]) -> Option<Self> {
-        let decompressed = CompressedRistretto(point).decompress()?;
-        Some(BlindVoucherNonce {
-            point: decompressed,
-            nonce: ScalarBytes([0u8; 32]),
-        })
+    /// The public half of this nonce, safe to send and to store on the
+    /// requester side.
+    pub fn commitment(&self) -> BlindVoucherCommitment {
+        BlindVoucherCommitment { point: self.point }
+    }
+}
+
+/// Public one-time commitment from an issuer's nonce.
+///
+/// This is all the requester needs to blind a request. It deliberately has no
+/// secret scalar and no path back to [`BlindVoucherNonce`], so a nonce that
+/// arrived over the wire can never be handed to the signer.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct BlindVoucherCommitment {
+    point: RistrettoPoint,
+}
+
+impl BlindVoucherCommitment {
+    pub fn to_bytes(&self) -> [u8; 32] {
+        self.point.compress().to_bytes()
+    }
+
+    pub fn from_bytes(point: [u8; 32]) -> Option<Self> {
+        CompressedRistretto(point)
+            .decompress()
+            .map(|point| Self { point })
+    }
+
+    pub(super) fn as_point(&self) -> RistrettoPoint {
+        self.point
     }
 }
 

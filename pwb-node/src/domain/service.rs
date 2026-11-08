@@ -399,9 +399,24 @@ impl DomainService {
             Some(record) => unix_time().max(record.registered_at_epoch.saturating_add(1)),
             None => unix_time(),
         };
-        let signature = self.keypair.sign(&domain_claim_sign_message(
-            &domain, target, owner, cost, epoch,
-        ));
+        // A funded record keeps its funding citation (and the signature that
+        // binds it) when the owner re-points it; dropping it would downgrade
+        // the name to an unverifiable record.
+        let funding = existing.as_ref().and_then(|record| record.funding);
+        let signature = match funding {
+            Some(funding) => self.keypair.sign(&domain_claim_funding_sign_message(
+                &domain,
+                target,
+                owner,
+                cost,
+                epoch,
+                &funding.head,
+                funding.balance,
+            )),
+            None => self.keypair.sign(&domain_claim_sign_message(
+                &domain, target, owner, cost, epoch,
+            )),
+        };
         let record = DomainRecord {
             domain: domain.clone(),
             target_content_id: target,
@@ -409,19 +424,58 @@ impl DomainService {
             credits_spent: cost,
             registered_at_epoch: epoch,
             signature: Some(signature),
-            // Plain claims draw on the local signed ledger, not on an
-            // attested funding head.
-            funding: None,
+            funding,
         };
         self.registry.lock().unwrap().apply_record(record.clone());
 
-        let message = NetworkMessage::ClaimDomain {
-            domain,
-            target_content_id: target,
-            owner,
-            credits_spent: cost,
-            registered_at_epoch: epoch,
-            signature,
+        let message = if let Some(funding) = funding {
+            // Re-points of funded names must travel as attested claims so the
+            // certificate (and the funding-bound signature) stay verifiable.
+            let certificate = self
+                .funding_certificates
+                .lock()
+                .unwrap()
+                .get(&(owner, funding.head))
+                .cloned();
+            let Some(certificate) = certificate else {
+                // The local record is updated, but the network cannot verify
+                // the re-point without the certificate; keep it local.
+                self.persist();
+                self.broadcast_pricing_epoch();
+                return Ok(record);
+            };
+            let (neighborhood, _) = self.attestor_quorum(&owner, epoch);
+            NetworkMessage::ClaimDomainAttested {
+                domain,
+                target_content_id: target,
+                owner,
+                credits_spent: cost,
+                registered_at_epoch: epoch,
+                certificate,
+                neighborhood,
+                funding_head: funding.head,
+                funding_balance: funding.balance,
+                signature,
+            }
+        } else if is_update {
+            // An unfunded (local/blind) name can be re-pointed by its owner.
+            NetworkMessage::ClaimDomain {
+                domain,
+                target_content_id: target,
+                owner,
+                credits_spent: cost,
+                registered_at_epoch: epoch,
+                signature,
+            }
+        } else {
+            NetworkMessage::ClaimDomain {
+                domain,
+                target_content_id: target,
+                owner,
+                credits_spent: cost,
+                registered_at_epoch: epoch,
+                signature,
+            }
         };
         self.seen_claims
             .lock()
@@ -462,9 +516,12 @@ impl DomainService {
         if !is_unofficial_domain(&domain) {
             return Err(ClaimError::UnknownTld);
         }
-        if self.registry.lock().unwrap().contains(&domain) {
-            return Err(ClaimError::AlreadyRegistered);
-        }
+        let existing = self.registry.lock().unwrap().resolve(&domain).cloned();
+        let is_update = match &existing {
+            Some(record) if record.owner == self.keypair.public => true,
+            Some(_) => return Err(ClaimError::AlreadyRegistered),
+            None => false,
+        };
         // The attestor set comes from the pinned anchors when configured, or
         // from the deterministic live-peer neighborhood otherwise; a claimant
         // cannot choose a small or self-controlled quorum.
@@ -475,30 +532,53 @@ impl DomainService {
                 "certificate is for another subject".to_string(),
             ));
         }
-        let cost = self.claim_cost();
-        // Spendable balance is derived from the live funded records, so a
-        // restarted node enforces the same budget as before the restart.
-        let already = self
-            .registry
-            .lock()
-            .unwrap()
-            .claimed_by(&certificate.subject);
-        if already.saturating_add(cost) > certificate.balance {
-            return Err(ClaimError::Attestation(
-                AttestationError::InsufficientAttestedBalance {
-                    attested: certificate.balance,
-                    already_claimed: already,
-                    needed: cost,
-                }
-                .to_string(),
-            ));
+        let cost = if is_update { 0 } else { self.claim_cost() };
+        if is_update {
+            // A re-point must cite the funding the name already carries; it
+            // spends nothing and cannot swap in a different balance view.
+            let funding = existing.as_ref().and_then(|record| record.funding);
+            if funding.map(|funding| (funding.head, funding.balance))
+                != Some((certificate.head, certificate.balance))
+            {
+                return Err(ClaimError::Attestation(
+                    "re-point must cite the name's existing funding".to_string(),
+                ));
+            }
+        } else {
+            // Spendable balance is derived from the live funded records, so a
+            // restarted node enforces the same budget as before the restart.
+            let already = self
+                .registry
+                .lock()
+                .unwrap()
+                .claimed_by(&certificate.subject);
+            if already.saturating_add(cost) > certificate.balance {
+                return Err(ClaimError::Attestation(
+                    AttestationError::InsufficientAttestedBalance {
+                        attested: certificate.balance,
+                        already_claimed: already,
+                        needed: cost,
+                    }
+                    .to_string(),
+                ));
+            }
         }
 
         let funding = ClaimFunding {
             head: certificate.head,
             balance: certificate.balance,
         };
-        let registered_at_epoch = unix_time().max(certificate.epoch);
+        let registered_at_epoch = match &existing {
+            Some(record) => unix_time().max(record.registered_at_epoch.saturating_add(1)),
+            None => unix_time().max(certificate.epoch),
+        };
+        // Remember the verified certificate so registry sync can serve this
+        // record's funding proof later (and so a re-point can cite it).
+        self.cache_funding_certificate(
+            self.keypair.public,
+            funding.head,
+            QuorumCertificateWire::from(certificate),
+        );
         let owner = self.keypair.public;
         let signature = self.keypair.sign(&domain_claim_funding_sign_message(
             &domain,
@@ -1078,7 +1158,10 @@ impl DomainService {
             return;
         }
         // The owner re-pointing an existing name pays nothing; every other
-        // claim must cover the current rolling price.
+        // claim must cover the current rolling price. `credits_spent` is
+        // self-declared (a documented limitation of the plain-claim path), so
+        // this check bounds spam but cannot prove payment outside the
+        // claimant's own ledger; attested claims carry the proof.
         let current_owner = self
             .registry
             .lock()
@@ -1156,8 +1239,32 @@ impl DomainService {
         if is_reserved_system_domain(&domain)
             || !is_unofficial_domain(&domain)
             || credited_claim_epoch_invalid(registered_at_epoch)
-            || credits_spent < self.claim_cost()
         {
+            return;
+        }
+        let existing = self.registry.lock().unwrap().resolve(&domain).cloned();
+        let is_owner_update = existing
+            .as_ref()
+            .is_some_and(|record| record.owner == owner);
+        if existing.is_some() && !is_owner_update {
+            // Ownership never transfers: a certificate funds the owner's
+            // first claim only, not a takeover of someone else's name.
+            return;
+        }
+        if is_owner_update {
+            // A re-point spends nothing and must cite the same funding head.
+            let Some(record) = existing.as_ref() else {
+                return;
+            };
+            if credits_spent != 0
+                || record
+                    .funding
+                    .map(|funding| (funding.head, funding.balance))
+                    != Some((funding_head, funding_balance))
+            {
+                return;
+            }
+        } else if credits_spent < self.claim_cost() {
             return;
         }
         let certificate_wire = certificate;
@@ -1208,9 +1315,11 @@ impl DomainService {
         let record = DomainRecord::from(wire);
         let changed = {
             let mut registry = self.registry.lock().unwrap();
-            let already = registry.claimed_by(&owner);
-            if already.saturating_add(credits_spent) > certificate.balance {
-                return;
+            if !is_owner_update {
+                let already = registry.claimed_by(&owner);
+                if already.saturating_add(credits_spent) > certificate.balance {
+                    return;
+                }
             }
             registry.apply_record(record)
         };

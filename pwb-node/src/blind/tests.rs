@@ -27,7 +27,7 @@ fn test_denomination_keys_are_independent() {
     assert_ne!(ten.to_bytes(), fifty.to_bytes());
     assert!(issuer.public_key(7).is_none());
     assert_eq!(issuer.denominations(), vec![1, 5, 10, 25, 50]);
-    assert!(issuer.commit_nonces(7, 1).is_empty());
+    assert!(issuer.commit_nonces(1, 7, 1).is_empty());
 }
 
 #[test]
@@ -110,18 +110,20 @@ fn test_withdrawal_refusals() {
 fn test_sign_batch_validates_before_consuming_nonces() {
     let mut issuer = make_issuer();
     let key = issuer.public_key(10).unwrap();
-    let points = issuer.commit_nonces(10, 2);
+    let request_id = 77;
+    let points = issuer.commit_nonces(request_id, 10, 2);
+    assert_eq!(issuer.pending_batches(), 1);
 
     // Request count mismatch.
     let withdrawal = BlindWithdrawal::prepare(10, &key, &points).unwrap();
     assert_eq!(
-        issuer.sign_batch(&withdrawal.requests()[..1], 100),
+        issuer.sign_batch(request_id, &withdrawal.requests()[..1], 100),
         Err(BlindError::NonceCountMismatch)
     );
 
     // Over the spendable bound.
     assert_eq!(
-        issuer.sign_batch(&withdrawal.requests(), 15),
+        issuer.sign_batch(request_id, &withdrawal.requests(), 15),
         Err(BlindError::InsufficientBalance {
             balance: 15,
             needed: 20
@@ -131,21 +133,29 @@ fn test_sign_batch_validates_before_consuming_nonces() {
     // Amount outside the paired denomination key.
     let wrong = BlindWithdrawal::prepare(50, &issuer.public_key(50).unwrap(), &points).unwrap();
     assert_eq!(
-        issuer.sign_batch(&wrong.requests(), 1000),
+        issuer.sign_batch(request_id, &wrong.requests(), 1000),
         Err(BlindError::AmountMismatch)
     );
 
     // The refused calls did not burn the nonces: the honest batch still signs.
     let requests = withdrawal.requests();
-    let partials = issuer.sign_batch(&requests, 100).expect("sign");
+    let partials = issuer.sign_batch(request_id, &requests, 100).expect("sign");
     let vouchers = withdrawal.finish(&partials).expect("unblind");
     assert_eq!(vouchers.len(), 2);
+    assert_eq!(issuer.pending_batches(), 0);
 
-    // The queue is drained now: re-submitting the same requests fails.
+    // The batch is drained now: re-submitting the same requests fails.
     assert_eq!(
-        issuer.sign_batch(&requests, 100),
+        issuer.sign_batch(request_id, &requests, 100),
         Err(BlindError::NonceCountMismatch)
     );
+
+    // A live request id cannot be reused to obtain a second commitment.
+    let points = issuer.commit_nonces(9, 10, 1);
+    assert_eq!(points.len(), 1);
+    assert!(issuer.commit_nonces(9, 10, 1).is_empty());
+    issuer.clear_pending(9);
+    assert_eq!(issuer.pending_batches(), 0);
 }
 
 #[test]
@@ -346,7 +356,8 @@ fn test_prepare_rejects_invalid_points_and_finish_rejects_count_mismatch() {
         BlindWithdrawal::prepare(10, &key, &[[0xff; 32]]).unwrap_err(),
         BlindError::NonceCountMismatch
     );
-    let points = issuer.commit_nonces(10, 2);
+    let points = issuer.commit_nonces(31, 10, 2);
+    assert!(issuer.commit_nonces(31, 10, 2).is_empty());
     let withdrawal = BlindWithdrawal::prepare(10, &key, &points).unwrap();
     assert_eq!(withdrawal.total(), 20);
     assert_eq!(

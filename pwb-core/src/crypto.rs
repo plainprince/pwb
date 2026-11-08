@@ -17,7 +17,9 @@ mod tests;
 pub use content::ContentId;
 pub use dh::{DhKeypair, DhPublicKey, DhSecretKey};
 pub use identity::{Keypair, PublicKey, SecretKey, Signature};
-pub use issuer::{BlindVoucherIssuer, BlindVoucherNonce, BlindVoucherPublicKey};
+pub use issuer::{
+    BlindVoucherCommitment, BlindVoucherIssuer, BlindVoucherNonce, BlindVoucherPublicKey,
+};
 pub use spend::{VoucherSpendError, VoucherSpendLog};
 pub use voucher::{
     BlindVoucher, BlindVoucherPartialSignature, VoucherBlindRequest, VoucherBlindState,

@@ -1429,13 +1429,13 @@ async fn process_message(
         // usable addresses and never overwrite existing knowledge with them;
         // the advertised peer still has to authenticate before it is trusted.
         NetworkMessage::PeerExchange { peers, .. } => {
-            merge_peers(peers, peer_table, config, routing);
+            merge_peers(peers, sender_addr.ip(), peer_table, config, routing);
         }
 
         // Nodes is the reply to FindNode: merge the discovered contacts, then
         // the caller (or the next lookup round) sees them in the DHT table.
         NetworkMessage::Nodes { peers, .. } => {
-            merge_peers(peers, peer_table, config, routing);
+            merge_peers(peers, sender_addr.ip(), peer_table, config, routing);
         }
 
         // Kademlia FIND_NODE: return the closest contacts we know for target.
@@ -1668,11 +1668,56 @@ fn send_signed_route(
     }
 }
 
+/// Whether an advertised address is acceptable gossip from `sender`.
+///
+/// Loopback, private, and link-local addresses are only useful on the same
+/// local network, so a remote sender may not inject them: otherwise a hostile
+/// peer could make every dial target `127.0.0.1` or a private host and abuse
+/// the victim's local network position. Multicast, unspecified, and broadcast
+/// addresses are never dial targets.
+fn acceptable_gossip_addr(sender: IpAddr, addr: SocketAddr) -> bool {
+    if addr.port() == 0 || addr.ip().is_unspecified() || addr.ip().is_multicast() {
+        return false;
+    }
+    match addr.ip() {
+        IpAddr::V4(ip) => {
+            if ip.is_broadcast() {
+                return false;
+            }
+            if ip.is_loopback() || ip.is_private() || ip.is_link_local() {
+                // Only a peer that is itself on a local/loopback network may
+                // advertise a local address (and it must be the same family).
+                return match sender {
+                    IpAddr::V4(sender) => {
+                        sender.is_loopback() || sender.is_private() || sender.is_link_local()
+                    }
+                    IpAddr::V6(_) => false,
+                };
+            }
+            true
+        }
+        IpAddr::V6(ip) => {
+            let segments = ip.segments();
+            let is_local = ip.is_loopback()
+                || (segments[0] & 0xfe00) == 0xfc00 // unique local
+                || (segments[0] & 0xffc0) == 0xfe80; // link local
+            if is_local {
+                return matches!(sender, IpAddr::V6(sender) if sender.is_loopback() || {
+                    let segments = sender.segments();
+                    (segments[0] & 0xfe00) == 0xfc00 || (segments[0] & 0xffc0) == 0xfe80
+                });
+            }
+            true
+        }
+    }
+}
+
 /// Merge an advertised peer list into both the flat peer table and the DHT.
 /// Invalid/self addresses are ignored; advertised entries still have to
 /// authenticate before they become trusted for encryption.
 fn merge_peers(
     peers: Vec<(SocketAddr, PublicKey)>,
+    sender: IpAddr,
     peer_table: &Arc<Mutex<HashMap<PublicKey, PeerInfo>>>,
     config: &NodeConfig,
     routing: &Arc<Mutex<RoutingTable>>,
@@ -1685,7 +1730,7 @@ fn merge_peers(
     // must not cost 10k inserts in one handler turn.
     let cap = peers.len().min(64);
     for (addr, pubkey) in peers.into_iter().take(cap) {
-        if pubkey == local_key || addr.port() == 0 || addr.ip().is_unspecified() {
+        if pubkey == local_key || !acceptable_gossip_addr(sender, addr) {
             continue;
         }
         if pt.contains_key(&pubkey) {
@@ -1876,5 +1921,56 @@ mod tests {
         assert!(cache.accept(&[2u8; CELL_SIZE], now));
         assert!(cache.accept(&[3u8; CELL_SIZE], now));
         assert_eq!(cache.seen.len(), 2);
+    }
+}
+
+#[cfg(test)]
+mod gossip_addr_tests {
+    use super::*;
+
+    #[test]
+    fn gossip_rejects_local_addresses_from_remote_senders() {
+        let remote: IpAddr = "203.0.113.9".parse().unwrap();
+        assert!(!acceptable_gossip_addr(
+            remote,
+            "127.0.0.1:9000".parse().unwrap()
+        ));
+        assert!(!acceptable_gossip_addr(
+            remote,
+            "192.168.1.2:9000".parse().unwrap()
+        ));
+        assert!(!acceptable_gossip_addr(
+            remote,
+            "[::1]:9000".parse().unwrap()
+        ));
+        assert!(!acceptable_gossip_addr(
+            remote,
+            "0.0.0.0:9000".parse().unwrap()
+        ));
+        assert!(!acceptable_gossip_addr(
+            remote,
+            "224.0.0.1:9000".parse().unwrap()
+        ));
+        assert!(!acceptable_gossip_addr(
+            remote,
+            "255.255.255.255:9000".parse().unwrap()
+        ));
+
+        // A local sender may advertise locally reachable peers.
+        let local: IpAddr = "192.168.1.9".parse().unwrap();
+        assert!(acceptable_gossip_addr(
+            local,
+            "192.168.1.2:9000".parse().unwrap()
+        ));
+        assert!(acceptable_gossip_addr(
+            "127.0.0.1".parse().unwrap(),
+            "127.0.0.1:9000".parse().unwrap()
+        ));
+
+        // Public addresses are fine from anyone.
+        assert!(acceptable_gossip_addr(
+            remote,
+            "198.51.100.7:9000".parse().unwrap()
+        ));
     }
 }

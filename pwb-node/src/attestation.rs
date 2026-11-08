@@ -15,10 +15,11 @@
 //!
 //! [`AttestBalance`]: pwb_core::net::NetworkMessage::AttestBalance
 
+use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use pwb_core::crypto::{ContentId, Keypair, PublicKey};
 use pwb_core::discovery::unix_time;
@@ -46,11 +47,32 @@ pub const MAX_WITHDRAWAL_CHUNKS: usize = 64;
 /// How long a client waits for an attestor reply.
 pub const ATTEST_TIMEOUT: Duration = Duration::from_millis(700);
 
+/// How long an incomplete withdrawal keeps its committed nonces. A second
+/// round that never arrives must not block later withdrawals forever.
+const WITHDRAWAL_TTL: Duration = Duration::from_secs(120);
+
+/// Upper bound on concurrent in-flight withdrawals (one entry per requester
+/// and query id), so cycling query ids cannot grow the map without bound.
+const MAX_PENDING_WITHDRAWALS: usize = 256;
+
 struct PendingWithdrawal {
-    query_id: u64,
     subject: PublicKey,
     epoch: u64,
     nonce_points: Vec<[u8; 32]>,
+    deadline: Instant,
+}
+
+/// One authenticated `WithdrawCommit`: the requester, where to answer, and the
+/// voucher shape it asked for. Grouped so the commit handler cannot mix fields
+/// from different messages.
+struct WithdrawCommit {
+    sender: PublicKey,
+    from: SocketAddr,
+    subject: PublicKey,
+    epoch: u64,
+    denomination: u64,
+    count: usize,
+    query_id: u64,
 }
 
 /// A node's attestation endpoint: signed balances, blind issuance, and
@@ -60,7 +82,10 @@ pub struct AttestationService {
     keypair: Keypair,
     ledger: Mutex<AttestorLedger>,
     issuer: Mutex<BlindBalanceIssuer>,
-    pending: Mutex<Option<PendingWithdrawal>>,
+    /// In-flight withdrawals keyed by `(requester, query_id)`. Keying by the
+    /// authenticated requester means one peer cannot consume or overwrite
+    /// another's committed nonces.
+    pending: Mutex<HashMap<(PublicKey, u64), PendingWithdrawal>>,
     policy: MintPolicy,
     path: Option<PathBuf>,
 }
@@ -108,7 +133,7 @@ impl AttestationService {
             keypair,
             ledger: Mutex::new(ledger),
             issuer: Mutex::new(BlindBalanceIssuer::with_defaults(master_seed)),
-            pending: Mutex::new(None),
+            pending: Mutex::new(HashMap::new()),
             policy: MintPolicy::default(),
             path,
         }
@@ -232,23 +257,24 @@ impl AttestationService {
                     denomination,
                     count,
                     query_id,
-                    ..
-                } => self.on_withdraw_commit(
+                    sender,
+                } => self.on_withdraw_commit(WithdrawCommit {
+                    sender,
                     from,
                     subject,
                     epoch,
                     denomination,
-                    count as usize,
+                    count: count as usize,
                     query_id,
-                ),
+                }),
 
                 NetworkMessage::WithdrawSign {
                     query_id,
                     subject,
                     epoch,
                     requests,
-                    ..
-                } => self.on_withdraw_sign(from, query_id, subject, epoch, requests),
+                    sender,
+                } => self.on_withdraw_sign(sender, from, query_id, subject, epoch, requests),
 
                 NetworkMessage::CheckIndexProof {
                     query_id,
@@ -282,21 +308,43 @@ impl AttestationService {
         }
     }
 
-    fn on_withdraw_commit(
-        &self,
-        from: SocketAddr,
-        subject: PublicKey,
-        epoch: u64,
-        denomination: u64,
-        count: usize,
-        query_id: u64,
-    ) {
-        if subject == self.keypair.public
-            || count == 0
-            || count > MAX_WITHDRAWAL_CHUNKS
-            || self.pending.lock().unwrap().is_some()
-        {
+    fn on_withdraw_commit(&self, commit: WithdrawCommit) {
+        let WithdrawCommit {
+            sender,
+            from,
+            subject,
+            epoch,
+            denomination,
+            count,
+            query_id,
+        } = commit;
+        // SECURITY: a withdrawal spends `subject`'s attested balance, so only
+        // `subject` may request it. `sender` is the envelope signer (the engine
+        // already enforces `sender == signer`), which authenticates the
+        // requester. Without this check any peer could blind-withdraw another
+        // identity's credits and keep the bearer vouchers.
+        if sender != subject {
             return;
+        }
+        if subject == self.keypair.public || count == 0 || count > MAX_WITHDRAWAL_CHUNKS {
+            return;
+        }
+        let now = Instant::now();
+        {
+            let mut pending = self.pending.lock().unwrap();
+            pending.retain(|_, withdrawal| withdrawal.deadline > now);
+            if pending.contains_key(&(sender, query_id)) {
+                return;
+            }
+            if pending.len() >= MAX_PENDING_WITHDRAWALS {
+                if let Some(oldest) = pending
+                    .iter()
+                    .min_by_key(|(_, withdrawal)| withdrawal.deadline)
+                    .map(|(key, _)| *key)
+                {
+                    pending.remove(&oldest);
+                }
+            }
         }
         let Some(voucher_key) = self.issuer.lock().unwrap().public_key(denomination) else {
             return;
@@ -305,17 +353,20 @@ impl AttestationService {
             .issuer
             .lock()
             .unwrap()
-            .commit_nonces(denomination, count);
+            .commit_nonces(query_id, denomination, count);
         if nonce_points.len() != count {
             return;
         }
         let binding = sign_binding(&self.keypair, epoch, denomination, voucher_key);
-        *self.pending.lock().unwrap() = Some(PendingWithdrawal {
-            query_id,
-            subject,
-            epoch,
-            nonce_points: nonce_points.clone(),
-        });
+        self.pending.lock().unwrap().insert(
+            (sender, query_id),
+            PendingWithdrawal {
+                subject,
+                epoch,
+                nonce_points: nonce_points.clone(),
+                deadline: now + WITHDRAWAL_TTL,
+            },
+        );
         let _ = self.engine.send_to_addr(
             from,
             NetworkMessage::WithdrawNonces {
@@ -328,33 +379,54 @@ impl AttestationService {
 
     fn on_withdraw_sign(
         &self,
+        sender: PublicKey,
         from: SocketAddr,
         query_id: u64,
         subject: PublicKey,
         epoch: u64,
         requests: Vec<VoucherBlindRequestWire>,
     ) {
-        let pending = self.pending.lock().unwrap().take();
-        let Some(pending) = pending else {
+        // A second round must come from the same authenticated identity (and
+        // for the same subject) that committed the nonces.
+        if sender != subject {
+            return;
+        }
+        let key = (sender, query_id);
+        let Some(pending) = self.pending.lock().unwrap().remove(&key) else {
             return;
         };
-        if pending.query_id != query_id
-            || pending.subject != subject
+        if pending.subject != subject
             || pending.epoch != epoch
             || requests.len() != pending.nonce_points.len()
         {
-            // Put the pending withdrawal back only when the correlation fields
-            // match; a mismatched request must not consume someone else's
-            // committed nonces.
-            *self.pending.lock().unwrap() = Some(pending);
+            // The correlation fields do not match. Put the pending withdrawal
+            // back while it is live so the rightful requester can retry; a
+            // mismatched request never consumes its nonces.
+            if pending.deadline > Instant::now() {
+                self.pending.lock().unwrap().insert(key, pending);
+            }
             return;
         }
 
         let requests: Vec<pwb_core::crypto::VoucherBlindRequest> =
             requests.iter().map(request_from_wire).collect();
-        let total: u64 = requests.iter().map(|request| request.amount).sum();
+        let total = requests
+            .iter()
+            .try_fold(0u64, |total, request| total.checked_add(request.amount));
+        let Some(total) = total else {
+            self.issuer.lock().unwrap().clear_pending(query_id);
+            return;
+        };
         let balance = self.ledger.lock().unwrap().balance(&subject);
-        let Ok(partials) = self.issuer.lock().unwrap().sign_batch(&requests, balance) else {
+        let Ok(partials) = self
+            .issuer
+            .lock()
+            .unwrap()
+            .sign_batch(query_id, &requests, balance)
+        else {
+            // This withdrawal is abandoned: drop its nonces instead of leaving
+            // a batch that no later request can ever match.
+            self.issuer.lock().unwrap().clear_pending(query_id);
             return;
         };
 
@@ -698,6 +770,58 @@ mod tests {
             max_peers: 10,
             heartbeat_interval: Duration::from_secs(30),
         })
+    }
+
+    #[test]
+    fn withdrawal_must_be_requested_by_the_subject() {
+        let attestor = Keypair::generate();
+        let service = AttestationService::new(engine(&attestor), attestor.clone(), &[1u8; 32]);
+        let victim = Keypair::generate().public;
+        let attacker = Keypair::generate().public;
+        let from: SocketAddr = "127.0.0.1:41000".parse().unwrap();
+
+        // The attacker signs the envelope (sender) but names the victim as the
+        // subject. No nonces may be committed.
+        service.on_withdraw_commit(WithdrawCommit {
+            sender: attacker,
+            from,
+            subject: victim,
+            epoch: current_epoch(),
+            denomination: 10,
+            count: 1,
+            query_id: 5,
+        });
+        assert!(service.pending.lock().unwrap().is_empty());
+        assert_eq!(service.issuer.lock().unwrap().pending_batches(), 0);
+
+        // The subject itself is accepted.
+        service.on_withdraw_commit(WithdrawCommit {
+            sender: victim,
+            from,
+            subject: victim,
+            epoch: current_epoch(),
+            denomination: 10,
+            count: 1,
+            query_id: 6,
+        });
+        assert_eq!(service.pending.lock().unwrap().len(), 1);
+        assert_eq!(service.issuer.lock().unwrap().pending_batches(), 1);
+
+        // A failed second round discards the batch instead of leaving nonces
+        // that would wedge every later withdrawal.
+        service.on_withdraw_sign(
+            victim,
+            from,
+            6,
+            victim,
+            current_epoch(),
+            vec![VoucherBlindRequestWire {
+                amount: 5,
+                blinded_challenge: [0u8; 32],
+            }],
+        );
+        assert!(service.pending.lock().unwrap().is_empty());
+        assert_eq!(service.issuer.lock().unwrap().pending_batches(), 0);
     }
 
     #[test]

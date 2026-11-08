@@ -264,6 +264,7 @@ pub(super) fn install<'js>(dom_handle: &DomHandle, ctx: &Ctx<'js>, global: &Obje
             "__pwb_navigate",
             Function::new(ctx.clone(), move |url: String| {
                 *nav.pending_navigate.borrow_mut() = Some(url);
+                nav.scripted_navigate.set(true);
             })
             .unwrap(),
         )

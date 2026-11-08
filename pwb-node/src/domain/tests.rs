@@ -29,6 +29,47 @@ fn test_domain_registry_security_rules() {
 }
 
 #[test]
+fn test_records_never_change_owner() {
+    let mut reg = DomainRegistry::new();
+    let owner = Keypair::generate();
+    let attacker = Keypair::generate();
+    let original = DomainRecord {
+        domain: "bank.pwb".into(),
+        target_content_id: ContentId([1; 32]),
+        owner: owner.public,
+        credits_spent: 10,
+        registered_at_epoch: 100,
+        signature: None,
+        funding: None,
+    };
+    assert!(reg.apply_record(original.clone()));
+
+    // A later epoch does not let another key take the name over.
+    let takeover = DomainRecord {
+        domain: "bank.pwb".into(),
+        target_content_id: ContentId([2; 32]),
+        owner: attacker.public,
+        credits_spent: 10,
+        registered_at_epoch: 1_000_000,
+        signature: None,
+        funding: None,
+    };
+    assert!(!reg.apply_record(takeover.clone()));
+    assert_eq!(
+        reg.resolve("bank.pwb").unwrap().target_content_id,
+        original.target_content_id
+    );
+
+    // The merge path enforces the same rule.
+    let mut peer = DomainRegistry::new();
+    assert!(peer.apply_record(takeover));
+    reg.merge(&peer);
+    let record = reg.resolve("bank.pwb").unwrap();
+    assert_eq!(record.owner, owner.public);
+    assert_eq!(record.target_content_id, original.target_content_id);
+}
+
+#[test]
 fn test_unofficial_tld_list_is_the_claimable_namespace() {
     let mut reg = DomainRegistry::new();
     let cid = ContentId([1; 32]);
@@ -544,19 +585,23 @@ fn test_apply_record_inserts_updates_and_ignores_stale_or_duplicate() {
     // Re-applying the identical record is a no-op.
     assert!(!reg.apply_record(record("site.pwb", cid, high, 3)));
 
-    // A lower epoch is stale and ignored.
-    assert!(!reg.apply_record(record("site.pwb", cid, low, 2)));
+    // A lower epoch from the same owner is stale and ignored.
+    assert!(!reg.apply_record(record("site.pwb", cid, high, 2)));
     assert_eq!(reg.resolve("site.pwb").unwrap().owner, high);
 
-    // A higher epoch supersedes.
-    assert!(reg.apply_record(record("site.pwb", cid, low, 5)));
-    assert_eq!(reg.resolve("site.pwb").unwrap().owner, low);
+    // A higher epoch from the same owner supersedes.
+    let newer = ContentId([7; 32]);
+    assert!(reg.apply_record(record("site.pwb", newer, high, 5)));
+    assert_eq!(reg.resolve("site.pwb").unwrap().owner, high);
     assert_eq!(reg.resolve("site.pwb").unwrap().registered_at_epoch, 5);
+    assert_eq!(reg.resolve("site.pwb").unwrap().target_content_id, newer);
 
-    // Same epoch tiebreaks on the lexicographically smaller owner key.
-    assert!(reg.apply_record(record("site.pwb", cid, PublicKey([0; 32]), 5)));
-    assert_eq!(reg.resolve("site.pwb").unwrap().owner, PublicKey([0; 32]));
-    assert!(!reg.apply_record(record("site.pwb", cid, high, 5)));
+    // Ownership is not transferable: a different key never supersedes,
+    // whatever epoch it claims.
+    assert!(!reg.apply_record(record("site.pwb", cid, low, 6)));
+    assert!(!reg.apply_record(record("site.pwb", cid, PublicKey([0; 32]), 1)));
+    assert_eq!(reg.resolve("site.pwb").unwrap().owner, high);
+    assert_eq!(reg.resolve("site.pwb").unwrap().registered_at_epoch, 5);
 
     assert_eq!(reg.records_snapshot().len(), 1);
 }
@@ -580,7 +625,7 @@ fn test_domain_registry_merge_keeps_domains_unique_to_each_side() {
 }
 
 #[test]
-fn test_domain_registry_merge_conflict_higher_epoch_wins() {
+fn test_domain_registry_merge_never_changes_owner() {
     let cid = ContentId([9; 32]);
     let alice = PublicKey([10; 32]);
     let bob = PublicKey([11; 32]);
@@ -612,13 +657,15 @@ fn test_domain_registry_merge_conflict_higher_epoch_wins() {
     );
     a.merge(&b);
     let record = a.resolve("contested.pwb").expect("merged record exists");
-    assert_eq!(record.owner, bob);
-    assert_eq!(record.registered_at_epoch, 7);
+    // Bob's later, differently owned record is rejected: a name stays with
+    // the key that registered it.
+    assert_eq!(record.owner, alice);
+    assert_eq!(record.registered_at_epoch, 3);
     assert_eq!(record.target_content_id, cid);
 }
 
 #[test]
-fn test_domain_registry_merge_same_epoch_tiebreaks_by_owner() {
+fn test_domain_registry_merge_keeps_the_local_owner_on_a_conflict() {
     let cid = ContentId([9; 32]);
     let low = PublicKey([1; 32]);
     let high = PublicKey([255; 32]);
@@ -651,9 +698,10 @@ fn test_domain_registry_merge_same_epoch_tiebreaks_by_owner() {
         },
     );
     a.merge(&b);
-    assert_eq!(a.resolve("tie.pwb").unwrap().owner, low);
+    assert_eq!(a.resolve("tie.pwb").unwrap().owner, high);
 
-    // Symmetric: merging in the opposite order yields the same winner.
+    // A conflicting same-epoch claim is invalid, so the opposite merge order
+    // also keeps what it already had. There is no owner tiebreak.
     let mut c = DomainRegistry::new();
     let mut d = DomainRegistry::new();
     c.records.insert(
@@ -681,7 +729,7 @@ fn test_domain_registry_merge_same_epoch_tiebreaks_by_owner() {
         },
     );
     d.merge(&c);
-    assert_eq!(d.resolve("tie.pwb").unwrap().owner, low);
+    assert_eq!(d.resolve("tie.pwb").unwrap().owner, high);
 }
 
 /// A funded record builder for merge/repair tests: `spent` credits cited
@@ -915,30 +963,9 @@ fn test_domain_registry_merge_is_commutative_and_idempotent() {
         let mut b = DomainRegistry::new();
         let _ = a.register("alpha.pwb", cid, alice);
         let _ = b.register("beta.pwb", cid, bob);
-        a.records.insert(
-            "contested.pwb".into(),
-            DomainRecord {
-                domain: "contested.pwb".into(),
-                target_content_id: cid,
-                owner: alice,
-                credits_spent: 0,
-                registered_at_epoch: 3,
-                signature: None,
-                funding: None,
-            },
-        );
-        b.records.insert(
-            "contested.pwb".into(),
-            DomainRecord {
-                domain: "contested.pwb".into(),
-                target_content_id: cid,
-                owner: bob,
-                credits_spent: 0,
-                registered_at_epoch: 7,
-                signature: None,
-                funding: None,
-            },
-        );
+        // Conflicting claims for one name are order-dependent by design (the
+        // first owner wins), so they are covered by the dedicated test above
+        // rather than by this convergence check.
         a.records.insert(
             "alice.pwb".into(),
             funded_record("alice.pwb", cid, alice, 50, 3, [1; 32], 100),

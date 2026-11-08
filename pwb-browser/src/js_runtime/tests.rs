@@ -1490,3 +1490,28 @@ fn test_tree_rows_hit_only_their_own_row() {
         drop(dom);
     }
 }
+
+#[test]
+fn test_runaway_script_is_interrupted() {
+    let handle = test_handle();
+    let start = std::time::Instant::now();
+    let err = execute_script(&handle, "while (true) {}").unwrap_err();
+    assert!(
+        start.elapsed() < std::time::Duration::from_secs(10),
+        "the execution deadline stops an infinite loop"
+    );
+    assert!(!err.to_string().is_empty());
+
+    // An interrupt leaves the engine usable for the next script.
+    execute_script(&handle, "__pwb_setText('#main-btn', 'alive');").unwrap();
+    assert_eq!(btn_text(&handle), "alive");
+}
+
+#[test]
+fn test_memory_limit_rejects_huge_allocations() {
+    let handle = test_handle();
+    // 512 MiB is far above the 64 MiB page budget; the allocation must fail
+    // with a JS exception instead of consuming host memory without bound.
+    let err = execute_script(&handle, "new Uint8Array(512 * 1024 * 1024);").unwrap_err();
+    assert!(!err.to_string().is_empty());
+}

@@ -219,27 +219,27 @@ fn test_multi_node_domain_claim_and_partition_merge() {
 }
 
 #[test]
-fn test_multi_node_contested_domain_last_writer_wins() {
+fn test_multi_node_contested_domain_keeps_the_first_owner() {
     let mut left = DomainRegistry::new();
     let mut right = DomainRegistry::new();
     let cid = ContentId([9; 32]);
     let alice = PublicKey([10; 32]);
     let bob = PublicKey([11; 32]);
 
-    // Both partitions claim the same domain at the same epoch; the merge
-    // tie-breaks deterministically by owner public-key bytes.
+    // Both partitions claim the same domain. Ownership is not transferable:
+    // a merge never replaces the owner a registry already recorded, so a
+    // conflicting claim (which should not exist honestly) is dropped rather
+    // than handing the name to whichever side has the later epoch.
     assert!(left.register("contested.pwb", cid, alice).is_ok());
     assert!(right.register("contested.pwb", cid, bob).is_ok());
 
     left.merge(&right);
-    let record = left.resolve("contested.pwb").expect("merged record");
-    assert_eq!(record.owner, alice, "smaller owner bytes win the tie");
+    assert_eq!(left.resolve("contested.pwb").unwrap().owner, alice);
 
-    // Symmetric merge order → same winner (commutative).
-    let mut right2 = right.clone();
-    let left2 = left.clone();
-    right2.merge(&left2);
-    assert_eq!(right2.resolve("contested.pwb").unwrap().owner, alice);
+    // The opposite merge order keeps the record that side already had.
+    let mut right_first = right.clone();
+    right_first.merge(&left);
+    assert_eq!(right_first.resolve("contested.pwb").unwrap().owner, bob);
 }
 
 #[test]

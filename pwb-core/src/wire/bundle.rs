@@ -6,6 +6,7 @@ use std::collections::HashMap;
 
 use super::constants::{
     COMPRESSED_MAGIC, COMPRESSION_VERSION, CURRENT_VERSION, MAGIC, MAX_DECOMPRESSED_BYTES,
+    MAX_TREE_DEPTH,
 };
 use super::error::WireError;
 use super::symbol::SymbolTable;
@@ -333,7 +334,7 @@ impl Bundle {
 
         let mut tree_cursor = 0;
         let mut id_counter = 0;
-        let root_node = decode_node(tree_slice, &mut tree_cursor, &symbols, &mut id_counter)?;
+        let root_node = decode_node(tree_slice, &mut tree_cursor, &symbols, &mut id_counter, 0)?;
 
         if cursor + 4 > src.len() {
             return Err(WireError::UnexpectedEof);
@@ -392,7 +393,7 @@ impl Bundle {
             cursor += tree_len;
             let mut tree_cursor = 0;
             let mut id_counter = 0;
-            let body = decode_node(tree_slice, &mut tree_cursor, &symbols, &mut id_counter)?;
+            let body = decode_node(tree_slice, &mut tree_cursor, &symbols, &mut id_counter, 0)?;
             let name = symbols
                 .get(name_sym)
                 .ok_or(WireError::InvalidSymbol(name_sym))?
@@ -526,7 +527,11 @@ fn decode_node(
     cursor: &mut usize,
     symbols: &SymbolTable,
     id_counter: &mut usize,
+    depth: usize,
 ) -> Result<PlainNode, WireError> {
+    if depth > MAX_TREE_DEPTH {
+        return Err(WireError::TreeTooDeep);
+    }
     if *cursor >= src.len() {
         return Err(WireError::UnexpectedEof);
     }
@@ -594,7 +599,7 @@ fn decode_node(
     *cursor += 4;
 
     for _ in 0..child_count {
-        let child = decode_node(src, cursor, symbols, id_counter)?;
+        let child = decode_node(src, cursor, symbols, id_counter, depth + 1)?;
         node.children.push(child);
     }
 
