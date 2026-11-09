@@ -181,6 +181,9 @@ pub(crate) fn reset_js_context() {
     JS_CONTEXT.with(|cell| {
         *cell.borrow_mut() = None;
     });
+    // Rejections from the page being torn down must not surface on the next
+    // page's console.
+    super::errors::clear_rejections();
 }
 
 pub(crate) fn get_or_create_context() -> Result<rquickjs::Context, JsError> {
@@ -190,6 +193,8 @@ pub(crate) fn get_or_create_context() -> Result<rquickjs::Context, JsError> {
             let runtime = Runtime::new().map_err(|e| JsError::InitFailed(e.to_string()))?;
             runtime.set_memory_limit(JS_MEMORY_LIMIT);
             runtime.set_max_stack_size(JS_STACK_LIMIT);
+            // Unhandled promise rejections would otherwise be silent.
+            super::errors::install_rejection_tracker(&runtime);
             let deadline = JS_DEADLINE.with(Rc::clone);
             runtime.set_interrupt_handler(Some(Box::new(move || {
                 deadline

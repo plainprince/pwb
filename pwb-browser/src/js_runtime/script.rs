@@ -5,4 +5,4 @@ mod execute;
 mod webapis;
 mod wrapper;
 
-pub use execute::execute_script;
+pub use execute::{execute_script, execute_script_named};

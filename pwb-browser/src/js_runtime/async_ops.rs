@@ -1,11 +1,12 @@
 //! Async operation polling, timer pumping, and JS event-handler dispatch.
 
 use crate::webapi;
-use rquickjs::{Function, Object};
+use rquickjs::{CatchResultExt, Function, Object};
 
 use super::core::{get_or_create_context, DomHandle, JsError};
 use super::devtools::append_console_line;
-use super::script::execute_script;
+use super::errors::{drain_microtasks, report_error};
+use super::script::execute_script_named;
 
 /// Fire due `setTimeout`/`setInterval` callbacks (called from the event loop's
 /// `about_to_wait`). Returns whether any callback ran — the caller requests a
@@ -32,7 +33,11 @@ pub fn pump_timers(dom_handle: &DomHandle) -> bool {
             if let Some(reg) = &registry {
                 let callback: Option<Function> = reg.get(id.to_string()).ok();
                 if let Some(callback) = callback {
-                    let _: rquickjs::Result<()> = callback.call(());
+                    // An exception in a timer callback must not vanish: report
+                    // it to the devtools console like any other uncaught error.
+                    if let Err(caught) = callback.call::<_, ()>(()).catch(&ctx) {
+                        report_error(dom_handle, &caught);
+                    }
                 }
                 if interval_ms.is_none() {
                     // One-shot: drop the callback from the registry.
@@ -41,9 +46,8 @@ pub fn pump_timers(dom_handle: &DomHandle) -> bool {
             }
         }
         // Run any promise reactions the callbacks queued.
-        while ctx.execute_pending_job() {}
+        drain_microtasks(&ctx, dom_handle);
     });
-    let _ = dom_handle;
     true
 }
 
@@ -88,12 +92,16 @@ pub fn poll_async_ops(dom_handle: &DomHandle) -> bool {
                                 let _ = obj
                                     .set("_body", String::from_utf8_lossy(&resp.body).to_string());
                                 if let Some(resolve) = resolve {
-                                    let _: rquickjs::Result<()> = resolve.call((obj,));
+                                    if let Err(caught) = resolve.call::<_, ()>((obj,)).catch(&ctx) {
+                                        report_error(dom_handle, &caught);
+                                    }
                                 }
                             }
                             Err(msg) => {
                                 if let Some(reject) = reject {
-                                    let _: rquickjs::Result<()> = reject.call((msg,));
+                                    if let Err(caught) = reject.call::<_, ()>((msg,)).catch(&ctx) {
+                                        report_error(dom_handle, &caught);
+                                    }
                                 }
                             }
                         }
@@ -110,14 +118,15 @@ pub fn poll_async_ops(dom_handle: &DomHandle) -> bool {
                             webapi::WsEvent::Error(e) => ("error".to_string(), e.clone()),
                             webapi::WsEvent::Close => ("close".to_string(), String::new()),
                         };
-                        let _: rquickjs::Result<()> = f.call((id, kind, data));
+                        if let Err(caught) = f.call::<_, ()>((id, kind, data)).catch(&ctx) {
+                            report_error(dom_handle, &caught);
+                        }
                     }
                 }
             }
         }
-        while ctx.execute_pending_job() {}
+        drain_microtasks(&ctx, dom_handle);
     });
-    let _ = dom_handle;
     true
 }
 
@@ -148,28 +157,35 @@ pub fn execute_event_handler_typed(
     // batch of handlers, so any single `preventDefault()` call wins even when
     // several handlers run for the same event.
     let trimmed = source.trim();
-    let script = match event_type {
-        Some(evt) => {
-            let prelude = format!(
-                "var el = document.selector('#{node_id}');\n\
-                 var __evt = {{ type: '{evt}', defaultPrevented: false, preventDefault: function() {{ this.defaultPrevented = true; __pwb_suppressContextMenu(true); }} }};\n\
-                 var event = __evt;"
-            );
-            if trimmed.starts_with("function") || trimmed.starts_with("async function") {
-                format!("{prelude}\n({trimmed}).call(el, __evt);")
-            } else {
-                format!("{prelude}\n(function(evt) {{ {trimmed} }}).call(el, __evt);")
-            }
+    // The prelude stays on the handler's first line so an exception's reported
+    // line numbers still match the handler source, while the stack names the
+    // event and element that failed (`event-click-12.pjs`).
+    let prelude = match event_type {
+        Some(evt) => format!(
+            "var el = document.selector('#{node_id}');\
+             var __evt = {{ type: '{evt}', defaultPrevented: false, preventDefault: function() {{ this.defaultPrevented = true; __pwb_suppressContextMenu(true); }} }};\
+             var event = __evt;"
+        ),
+        None => format!("var el = document.selector('#{node_id}');"),
+    };
+    let script = if trimmed.starts_with("function") || trimmed.starts_with("async function") {
+        // The newline keeps a trailing `// comment` from swallowing the
+        // closing call (and leaves reported line numbers unchanged).
+        match event_type {
+            Some(_) => format!("{prelude}({trimmed}\n).call(el, event);"),
+            None => format!("{prelude}({trimmed}\n).call(el);"),
         }
-        None => {
-            if trimmed.starts_with("function") || trimmed.starts_with("async function") {
-                format!("var el = document.selector('#{node_id}');\n({trimmed}).call(el);")
-            } else {
-                format!("var el = document.selector('#{node_id}');\n(function() {{ {trimmed} }}).call(el);")
-            }
+    } else {
+        match event_type {
+            Some(_) => format!("{prelude}(function(evt){{{trimmed}\n}}).call(el, event);"),
+            None => format!("{prelude}(function(){{{trimmed}\n}}).call(el);"),
         }
     };
-    execute_script(dom_handle, &script)
+    let label = match event_type {
+        Some(evt) => format!("event-{evt}-{node_id}.pjs"),
+        None => format!("event-click-{node_id}.pjs"),
+    };
+    execute_script_named(dom_handle, &script, &label)
 }
 
 /// Log a message to the devtools console panel (and stdout). Used by the pipeline

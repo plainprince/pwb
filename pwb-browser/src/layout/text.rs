@@ -8,9 +8,13 @@ use pwb_core::spec::UnitValue;
 
 /// Resolve a `UnitValue` against a dimension (containing block size) and the viewport.
 /// Returns `None` for `Auto`.
+///
+/// Authored `px` values are CSS pixels: they multiply by the display scale so
+/// the layout lands on physical device pixels (see [`crate::dpi`]). Percentages
+/// and `vw`/`vh` resolve against dimensions that are already in device pixels.
 pub fn resolve_unit(uv: UnitValue, dim: f32, viewport_w: f32, viewport_h: f32) -> Option<f32> {
     match uv {
-        UnitValue::Px(v) => Some(v),
+        UnitValue::Px(v) => Some(crate::dpi::px(v)),
         UnitValue::Percent(p) => Some(dim * p),
         UnitValue::Vw(p) => Some(viewport_w * p),
         UnitValue::Vh(p) => Some(viewport_h * p),

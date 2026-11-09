@@ -19,19 +19,24 @@ pub fn draw_tooltip(
     if title.is_empty() {
         return;
     }
-    let font_size = (viewport_h as f32 * 0.03).clamp(16.0, 34.0);
+    // The tooltip is browser chrome: a constant size in CSS pixels that is
+    // rasterized at the display scale, so it stays crisp rather than growing
+    // with (or staying tiny on) a high-density viewport.
+    let (_, css_height) = crate::dpi::logical_size(viewport_w, viewport_h);
+    let font_size = crate::dpi::px((css_height as f32 * 0.03).clamp(16.0, 34.0));
     let text_w = measure_text(title, font_size);
     let pad = font_size * 0.5;
-    let tip_w = (text_w + pad * 2.0).min(viewport_w as f32 - 20.0);
+    let tip_w = (text_w + pad * 2.0).min(viewport_w as f32 - crate::dpi::px(20.0));
     let tip_h = font_size + pad * 2.0;
     // Position below and to the right of the cursor, clamped to the viewport.
-    let mut tip_x = mx + 12.0;
-    let mut tip_y = my + 20.0;
-    if tip_x + tip_w > viewport_w as f32 - 4.0 {
-        tip_x = (viewport_w as f32 - tip_w - 4.0).max(4.0);
+    let mut tip_x = mx + crate::dpi::px(12.0);
+    let mut tip_y = my + crate::dpi::px(20.0);
+    let margin = crate::dpi::px(4.0);
+    if tip_x + tip_w > viewport_w as f32 - margin {
+        tip_x = (viewport_w as f32 - tip_w - margin).max(margin);
     }
-    if tip_y + tip_h > viewport_h as f32 - 4.0 {
-        tip_y = (my - tip_h - 4.0).max(4.0);
+    if tip_y + tip_h > viewport_h as f32 - margin {
+        tip_y = (my - tip_h - margin).max(margin);
     }
     let tip_rect = Rect::from_xywh(tip_x, tip_y, tip_w, tip_h).unwrap();
     // Background.

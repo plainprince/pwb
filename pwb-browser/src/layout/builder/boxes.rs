@@ -447,7 +447,7 @@ pub(super) fn build_box(
             // Text centering is handled by the renderer.
             let rect = Rect::from_xywh(flow_x, start_y, btn_width, btn_height)
                 .unwrap_or_else(|| Rect::from_xywh(flow_x, start_y, btn_width, 40.0).unwrap());
-            *y += btn_height + ctx.page.spacing;
+            *y += btn_height + crate::dpi::px(ctx.page.spacing);
             rect
         }
         Tag::Input => {
@@ -487,7 +487,9 @@ pub(super) fn build_box(
                 resolve_unit(uv, containing.width(), ctx.viewport_w, ctx.viewport_h)
             });
             let input_width = explicit
-                .unwrap_or_else(|| (text_w + pad * 2.0 + 8.0).max(140.0))
+                .unwrap_or_else(|| {
+                    (text_w + pad * 2.0 + crate::dpi::px(8.0)).max(crate::dpi::px(140.0))
+                })
                 .min(max_width);
             // An explicit height (the chrome address field) wins over the
             // content-sized one.
@@ -499,7 +501,7 @@ pub(super) fn build_box(
                 .unwrap_or(font_size + pad * 2.0);
             let rect = Rect::from_xywh(flow_x, *y, input_width, input_height)
                 .unwrap_or_else(|| Rect::from_xywh(flow_x, *y, 140.0, 30.0).unwrap());
-            *y += input_height + ctx.page.spacing;
+            *y += input_height + crate::dpi::px(ctx.page.spacing);
             rect
         }
         Tag::Image => {
@@ -507,10 +509,13 @@ pub(super) fn build_box(
             // lengths, and otherwise take a 320x180 default (never wider than
             // the content box). The renderer scales the decoded PNG to fill
             // the rect.
+            // `width`/`height` attributes are CSS pixels like every other
+            // authored length, so they scale with the display too.
             let attr_px = |name: &str| {
                 node.attributes
                     .get(name)
                     .and_then(|v| v.trim().parse::<f32>().ok())
+                    .map(crate::dpi::px)
             };
             let w = attr_px("width")
                 .or_else(|| {
@@ -518,7 +523,7 @@ pub(super) fn build_box(
                         resolve_unit(uv, containing.width(), ctx.viewport_w, ctx.viewport_h)
                     })
                 })
-                .unwrap_or(max_width.min(320.0))
+                .unwrap_or(max_width.min(crate::dpi::px(320.0)))
                 .clamp(1.0, max_width);
             let h = attr_px("height")
                 .or_else(|| {
@@ -526,11 +531,11 @@ pub(super) fn build_box(
                         resolve_unit(uv, containing.height(), ctx.viewport_w, ctx.viewport_h)
                     })
                 })
-                .unwrap_or(180.0)
+                .unwrap_or(crate::dpi::px(180.0))
                 .max(1.0);
             let rect = Rect::from_xywh(flow_x, *y, w, h)
                 .unwrap_or_else(|| Rect::from_xywh(flow_x, *y, w, 1.0).unwrap());
-            *y += h + ctx.page.spacing;
+            *y += h + crate::dpi::px(ctx.page.spacing);
             rect
         }
         Tag::Icon => {
@@ -554,9 +559,10 @@ pub(super) fn build_box(
                     resolve_unit(uv, containing.height(), ctx.viewport_w, ctx.viewport_h)
                 })
                 .unwrap_or(font_size);
-            let rect = Rect::from_xywh(flow_x, *y, w, h)
-                .unwrap_or_else(|| Rect::from_xywh(flow_x, *y, 24.0, 24.0).unwrap());
-            *y += h + ctx.page.spacing * 0.5;
+            let rect = Rect::from_xywh(flow_x, *y, w, h).unwrap_or_else(|| {
+                Rect::from_xywh(flow_x, *y, crate::dpi::px(24.0), crate::dpi::px(24.0)).unwrap()
+            });
+            *y += h + crate::dpi::px(ctx.page.spacing) * 0.5;
             rect
         }
     };

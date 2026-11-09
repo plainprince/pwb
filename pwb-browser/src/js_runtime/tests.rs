@@ -1515,3 +1515,101 @@ fn test_memory_limit_rejects_huge_allocations() {
     let err = execute_script(&handle, "new Uint8Array(512 * 1024 * 1024);").unwrap_err();
     assert!(!err.to_string().is_empty());
 }
+
+/// Collect the devtools console output lines from a test handle.
+fn console_lines(handle: &DomHandle) -> Vec<String> {
+    let dom = handle.dom.borrow();
+    find_node_by_selector(&dom.root, "#console-output")
+        .map(|output| {
+            output
+                .children
+                .iter()
+                .filter_map(|child| child.text.clone())
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+#[test]
+fn uncaught_page_errors_name_the_script_and_keep_their_stack() {
+    let handle = test_handle();
+    let error = execute_script(
+        &handle,
+        "function boom() {\n  throw new TypeError('nope');\n}\nboom();",
+    )
+    .expect_err("the exception propagates to the caller");
+    assert!(error.to_string().contains("nope"));
+
+    let lines = console_lines(&handle);
+    assert_eq!(
+        lines.first().map(String::as_str),
+        Some("Uncaught TypeError: nope"),
+        "the console gets a clean error summary, not a Rust debug dump: {lines:?}"
+    );
+    assert!(
+        lines.iter().any(|line| line.contains("page.pjs")),
+        "stack frames name the evaluated script: {lines:?}"
+    );
+    assert!(
+        lines
+            .iter()
+            .skip(1)
+            .any(|line| line.trim_start().starts_with("at ")),
+        "stack frames are rendered as their own lines: {lines:?}"
+    );
+}
+
+#[test]
+fn handler_errors_name_the_event_and_element() {
+    let handle = test_handle();
+    execute_script(
+        &handle,
+        r#"
+        var btn = document.getElementById("main-btn");
+        btn.onClick(function() { throw new Error("handler failed"); });
+        "#,
+    )
+    .expect("script runs");
+    let handler = handle.event_registry.get_handlers(2, "click").remove(0);
+
+    let error = execute_event_handler(&handle, 2, &handler).expect_err("handler throws");
+    assert!(error.to_string().contains("handler failed"));
+    let lines = console_lines(&handle);
+    assert!(
+        lines.iter().any(|line| line.contains("event-click-2.pjs")),
+        "the stack points at the handler that failed: {lines:?}"
+    );
+}
+
+#[test]
+fn timer_errors_are_reported_instead_of_swallowed() {
+    let handle = test_handle();
+    execute_script(
+        &handle,
+        "setTimeout(function() { throw new Error('timer boom'); }, 0);",
+    )
+    .expect("timer is scheduled");
+    // The deadline is now, so the next pump fires it.
+    pump_timers(&handle);
+
+    let lines = console_lines(&handle);
+    assert!(
+        lines.iter().any(|line| line.contains("timer boom")),
+        "a timer exception must reach the devtools console: {lines:?}"
+    );
+}
+
+#[test]
+fn promise_callback_errors_are_reported() {
+    let handle = test_handle();
+    execute_script(
+        &handle,
+        "Promise.resolve().then(function() { throw new Error('async boom'); });",
+    )
+    .expect("the script itself succeeds");
+    let lines = console_lines(&handle);
+    assert!(
+        lines.iter().any(|line| line.contains("async boom")),
+        "an exception in a promise reaction must reach devtools: {lines:?}"
+    );
+}

@@ -179,6 +179,7 @@ pub fn build_browser_app(
         modifiers_state: winit::keyboard::ModifiersState::default(),
         resize_state: None,
         pixmap: tiny_skia::Pixmap::new(1, 1).unwrap(),
+        current_bundle: bundle_bytes.to_vec(),
         search,
         host,
         registry,
@@ -212,7 +213,7 @@ pub fn run_event_loop(mut app: BrowserApp) -> Result<(), PipelineError> {
     let event_loop = EventLoop::new().map_err(|e| PipelineError::Windowing(e.to_string()))?;
 
     println!(
-        "Opening interactive Skia desktop window (Press F12 or Cmd+Shift+I for devtools.plain)..."
+        "Opening interactive Skia desktop window (F12 or Cmd+Shift+I for devtools.plain; Ctrl/Cmd+S saves the page as a .pwb bundle)..."
     );
     event_loop
         .run_app(&mut app)

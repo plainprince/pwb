@@ -876,7 +876,13 @@ fn print_help() {
     println!(
         "      --listen <addr>    UDP listen address (default: 0.0.0.0:0; [::]:0 for dual-stack IPv4+IPv6, 127.0.0.1:0 for localhost-only)"
     );
+
     println!("  -h, --help           Show this help message");
+    println!();
+    println!(
+        "Set PWB_SCALE=1.5 to force a HiDPI factor when the compositor reports the wrong one;"
+    );
+    println!("downloads go to PWB_DOWNLOADS (default: ~/Downloads, else ~/.pwb/downloads).");
     println!();
     println!("Examples:");
     println!(

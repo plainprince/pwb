@@ -4,6 +4,7 @@ mod async_ops;
 mod core;
 mod devtools;
 mod dom_utils;
+mod errors;
 mod script;
 
 pub use async_ops::{
@@ -11,7 +12,7 @@ pub use async_ops::{
 };
 pub(crate) use core::reset_js_context;
 pub use core::{DomHandle, JsError};
-pub use script::execute_script;
+pub use script::{execute_script, execute_script_named};
 
 #[cfg(test)]
 mod tests;

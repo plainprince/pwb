@@ -8,12 +8,14 @@
 - **Crisp TTF text rasterization**: Powered by `ab_glyph` to outline and render system TTF fonts (Arial/Helvetica/DejaVu) with Porter-Duff alpha blending.
 - **Theme system (`.ptheme`)**: UI colors, site default colors, chrome layout, icon set, and pixel sizes in `~/.pwb/themes`, hot-reloaded while the browser runs. See [docs/themes.md](docs/themes.md).
 - **Gently scaled pixel sizing**: Buttons, text, and spacing use theme pixel sizes scaled by window size instead of viewport-height fractions, so controls are neither tiny nor oversized.
+- **HiDPI / OS scaling**: Layout runs in CSS pixels and rasterizes into the window's physical pixel buffer, so on Retina, Wayland fractional scaling, or a Windows monitor with 125–200% scaling the page is the right size *and* drawn at full device resolution (vector text, borders, and images are not upscaled). The compositor's scale factor is followed live when the window changes monitors; `PWB_SCALE=<factor>` forces one when a compositor reports something unexpected.
 - **PlainJS runtime (`.pjs`)**: QuickJS-NG embedded engine executing `.pjs` scripts with custom `document` DOM manipulation APIs.
 - **Content-bound scrolling**: Scroll position capped to content height with a visual scrollbar.
 - **Text selection & clipboard**: Text selection with `Ctrl+C`/`Cmd+C` copy, `Ctrl+X`/`Cmd+X` cut, and `Ctrl+V`/`Cmd+V` paste into focused inputs via one long-lived `arboard` handle (so X11/Wayland clipboard managers keep the contents).
 - **Context menu**: Right-click selects "Copy" or "Inspect Element"; native AppKit menu on macOS, an in-window menu on Linux/Windows with a live hover highlight (click outside or press Escape to dismiss).
 - **PNG images**: `<image>`/`<img>` decodes PNGs (file paths, `file://`, or `data:image/png;base64,…`), caches them, and scales them to the layout box; unreadable sources show a placeholder.
 - **Native links**: Clicking `<link href="…">`/`<a href="…">` (or text inside it) follows the target through the normal navigation path, with no JavaScript required.
+- **Downloads**: `Ctrl/Cmd+S` saves the current page as a `.pwb` bundle plus a `<name>_files/` folder with its images (inline `data:` images and on-disk assets). Links and addresses pointing at a file PlainWeb cannot render — images, PDFs, or any unknown extension — download to disk instead of failing, with the type detected from the extension or the file's leading bytes. Files go to `PWB_DOWNLOADS`, else `~/Downloads`, else `~/.pwb/downloads`, and never overwrite an existing file.
 - **Verified authorship & page isolation**: signed artifacts are verified on decode (a tampered or missing author signature is rejected with a readable error page), and every top-level navigation gets a fresh QuickJS context and DOM/async state so one page cannot leave globals or handlers behind. Unsigned bundles remain supported.
 
 ## Native system domains
@@ -141,6 +143,8 @@ Every page is rendered under a fixed browser chrome:
 - **History** — `Alt+Left` / `Alt+Right` and the `Back` / `Fwd` buttons walk
   each tab's history. `history.plain` lists the session.
 - **Reload** — `Ctrl/Cmd+R` or the `Reload` button.
+- **Save page** — `Ctrl/Cmd+S` writes the page bundle and its images to the
+  downloads directory (see above).
 - **Bookmarks** — `Ctrl/Cmd+D` or the `Save` button toggles the current page;
   `bookmarks.plain` lists saved pages as native links.
 - **Connection badge** — `● N peers` (green) or `● offline` (red) mirrors the

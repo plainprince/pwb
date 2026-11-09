@@ -8,6 +8,8 @@ pub mod builtin_sites;
 pub mod bundler;
 pub mod context_menu;
 pub mod dom;
+pub mod downloads;
+pub mod dpi;
 pub mod event_handler;
 pub mod feather;
 pub mod js_runtime;

@@ -57,9 +57,10 @@ pub fn render_dom_into_pixmap(
     let viewport_height = height as f32;
 
     let scrollbar_info = if content_height > viewport_height {
-        let scrollbar_width = 11.0;
+        let scrollbar_width = crate::dpi::px(11.0);
         let track_height = viewport_height;
-        let thumb_height = (viewport_height / content_height * viewport_height).max(30.0);
+        let thumb_height =
+            (viewport_height / content_height * viewport_height).max(crate::dpi::px(30.0));
         let max_scroll = content_height - viewport_height;
         let thumb_y = (scroll_y / max_scroll * (track_height - thumb_height))
             .clamp(0.0, track_height - thumb_height);

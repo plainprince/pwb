@@ -75,18 +75,30 @@ pub(crate) mod inline {
     use pwb_core::spec::Color;
     use tiny_skia::{Paint, Pixmap, Rect, Transform};
 
-    /// Menu width in device pixels.
+    /// Menu width in CSS pixels.
     pub(crate) const WIDTH: f32 = 190.0;
-    /// Height of one menu row.
+    /// Height of one menu row in CSS pixels.
     pub(crate) const ITEM_HEIGHT: f32 = 30.0;
     /// Vertical padding above the first and below the last row.
     pub(crate) const PADDING: f32 = 6.0;
 
+    /// Menu metrics in device pixels. Geometry and hit-testing share this, so
+    /// the painted rows and the clickable rows never disagree on a HiDPI
+    /// display.
+    fn metrics() -> (f32, f32, f32) {
+        (
+            crate::dpi::px(WIDTH),
+            crate::dpi::px(ITEM_HEIGHT),
+            crate::dpi::px(PADDING),
+        )
+    }
+
     /// The menu rectangle for a click at `(x, y)`, clamped to the viewport so
     /// a menu opened near an edge stays fully visible.
     pub(crate) fn menu_rect(x: f32, y: f32, viewport_w: f32, viewport_h: f32) -> Rect {
-        let width = WIDTH.min(viewport_w.max(1.0));
-        let height = (ITEM_HEIGHT * ITEMS.len() as f32 + PADDING * 2.0).min(viewport_h.max(1.0));
+        let (width, item_h, padding) = metrics();
+        let width = width.min(viewport_w.max(1.0));
+        let height = (item_h * ITEMS.len() as f32 + padding * 2.0).min(viewport_h.max(1.0));
         let left = x.min(viewport_w - width).max(0.0);
         let top = y.min(viewport_h - height).max(0.0);
         Rect::from_xywh(left, top, width, height)
@@ -98,16 +110,18 @@ pub(crate) mod inline {
         if x < rect.left() || x >= rect.right() || y < rect.top() || y >= rect.bottom() {
             return None;
         }
-        let local = y - rect.top() - PADDING;
+        let (_, item_h, padding) = metrics();
+        let local = y - rect.top() - padding;
         if local < 0.0 {
             return None;
         }
-        let index = (local / ITEM_HEIGHT) as usize;
+        let index = (local / item_h) as usize;
         (index < ITEMS.len()).then_some(index)
     }
 
     /// Paint the menu, highlighting the row under the cursor.
     pub(crate) fn draw(pixmap: &mut Pixmap, rect: Rect, mouse_x: f32, mouse_y: f32) {
+        let (_, item_h, padding) = metrics();
         let mut paint = Paint::default();
         // 1px border + body.
         paint.set_color_rgba8(88, 91, 112, 255);
@@ -124,24 +138,25 @@ pub(crate) mod inline {
 
         let hovered = hit(rect, mouse_x, mouse_y);
         for (index, label) in ITEMS.iter().enumerate() {
-            let top = rect.top() + PADDING + ITEM_HEIGHT * index as f32;
+            let top = rect.top() + padding + item_h * index as f32;
             if hovered == Some(index) {
                 if let Some(row) = Rect::from_xywh(
                     rect.left() + 1.0,
                     top,
                     (rect.width() - 2.0).max(1.0),
-                    ITEM_HEIGHT,
+                    item_h,
                 ) {
                     paint.set_color_rgba8(69, 71, 90, 255);
                     pixmap.fill_rect(row, &paint, Transform::identity(), None);
                 }
             }
+            let font_size = crate::dpi::px(15.0);
             draw_text_ab_glyph(
                 pixmap,
                 label,
-                rect.left() + 12.0,
-                top + (ITEM_HEIGHT - 15.0) / 2.0,
-                15.0,
+                rect.left() + crate::dpi::px(12.0),
+                top + (item_h - font_size * 1.1) / 2.0,
+                font_size,
                 Color {
                     r: 205,
                     g: 214,

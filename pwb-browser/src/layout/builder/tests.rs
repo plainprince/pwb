@@ -1067,3 +1067,54 @@ fn scratch_tab_dump() {
     }
     dump(&root, 0);
 }
+
+/// HiDPI: the same CSS layout must land on twice as many device pixels rather
+/// than rendering at CSS resolution and upscaling (which would blur text).
+/// Percentages stay relative to the device viewport; authored px lengths and
+/// theme defaults scale.
+#[test]
+fn hidpi_layout_uses_css_pixels_at_device_resolution() {
+    let root = node(
+        1,
+        Tag::Document,
+        HashMap::new(),
+        None,
+        vec![node(
+            2,
+            Tag::View,
+            HashMap::from([("width".to_string(), "50%".to_string())]),
+            None,
+            vec![node(
+                3,
+                Tag::Text,
+                HashMap::new(),
+                Some("Hello"),
+                Vec::new(),
+            )],
+        )],
+    );
+    let dom = dom_with(root);
+
+    let css = build_layout_tree(&dom, 900, 650, 0.0);
+    crate::dpi::set_scale(2.0);
+    let retina = build_layout_tree(&dom, 1800, 1300, 0.0);
+    crate::dpi::set_scale(1.0);
+
+    let css_view = find(&css, 2).expect("view");
+    let retina_view = find(&retina, 2).expect("view");
+    assert!(
+        (retina_view.rect.width() - css_view.rect.width() * 2.0).abs() < 0.01,
+        "a 50% box fills half the physical viewport at 2x: {} vs {}",
+        retina_view.rect.width(),
+        css_view.rect.width()
+    );
+
+    let css_text = find(&css, 3).expect("text");
+    let retina_text = find(&retina, 3).expect("text");
+    assert!(
+        (retina_text.rect.height() - css_text.rect.height() * 2.0).abs() < 0.01,
+        "font size is rasterized at device resolution: {} vs {}",
+        retina_text.rect.height(),
+        css_text.rect.height()
+    );
+}

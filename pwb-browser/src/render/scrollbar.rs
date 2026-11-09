@@ -16,7 +16,7 @@ pub(crate) fn draw_scrollbar(
     if content_height <= inner_h + 1.0 {
         return;
     }
-    let track_w = 8.0;
+    let track_w = crate::dpi::px(8.0);
     let track_x = rect.right() - track_w;
     let track = Rect::from_xywh(track_x, rect.top(), track_w, inner_h).unwrap();
     let (track_color, thumb_color) =
@@ -38,7 +38,7 @@ pub(crate) fn draw_scrollbar(
         None,
     );
 
-    let thumb_h = (inner_h * inner_h / content_height).clamp(16.0, inner_h);
+    let thumb_h = (inner_h * inner_h / content_height).clamp(crate::dpi::px(16.0), inner_h);
     let max_scroll = (content_height - inner_h).max(0.0);
     let frac = if max_scroll > 0.0 {
         (scroll_offset / max_scroll).clamp(0.0, 1.0)

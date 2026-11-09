@@ -16,12 +16,17 @@ pub fn build_layout_tree(
 ) -> LayoutBox {
     // Theme page defaults: pixel-based fonts and spacing scaled gently with
     // the window (instead of `vh`, which made text tiny on short windows).
+    // They are CSS pixels, so the window is measured in CSS pixels too — the
+    // viewport itself stays in device pixels for percentage/% units.
+    let scale = crate::dpi::scale();
+    let css_width = (viewport_width as f32 / scale).round().max(1.0) as u32;
+    let css_height = (viewport_height as f32 / scale).round().max(1.0) as u32;
     let page = crate::theme::PageDefaults::for_window(
         &crate::theme::active_theme(),
-        viewport_width,
-        viewport_height,
+        css_width,
+        css_height,
     );
-    let margin_x = page.margin;
+    let margin_x = crate::dpi::px(page.margin);
 
     // The browser chrome is a fixed overlay painted above the page. Reserve its
     // height in the page's top flow, or the first lines of every page render
@@ -43,7 +48,7 @@ pub fn build_layout_tree(
         })
         .unwrap_or(0.0);
     let mut current_y = if chrome_height > 0.0 {
-        chrome_height + page.top_gap
+        chrome_height + crate::dpi::px(page.top_gap)
     } else {
         margin_x
     } - scroll_y;

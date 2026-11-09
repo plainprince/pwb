@@ -1,7 +1,7 @@
 //! DevTools panel state and refresh helpers.
 
 use crate::dom::Dom;
-use crate::js_runtime::{execute_script, DomHandle};
+use crate::js_runtime::{execute_script_named, DomHandle};
 use crate::layout::find_box_by_id;
 use pwb_core::wire::Bundle;
 
@@ -35,7 +35,8 @@ pub(super) fn mount_devtools(handle: &DomHandle, bundle: &Bundle, open: bool) ->
     }
     if let Some(script_bytes) = &bundle.script_payload {
         if let Ok(script) = std::str::from_utf8(script_bytes) {
-            if let Err(e) = execute_script(handle, script) {
+            // Name the script so its errors have readable stack frames.
+            if let Err(e) = execute_script_named(handle, script, "devtools.pjs") {
                 eprintln!("[DevTools JS Error] Devtools script failed: {:?}", e);
             }
         }
@@ -63,8 +64,11 @@ pub(crate) fn apply_scroll_to_bottom(
 /// (click/contextmenu handlers, resize drags). The binding itself no-ops while
 /// devtools are closed, so calling this unconditionally is cheap.
 pub(super) fn refresh_devtools(handle: &DomHandle, size: (u32, u32)) {
-    let script = format!("__pwb_refreshDevtools({}, {});", size.0, size.1);
-    if let Err(e) = execute_script(handle, &script) {
+    // Callers pass the physical window size; the devtools tree lays out in CSS
+    // pixels like every other authored tree, so convert once here.
+    let (width, height) = crate::dpi::logical_size(size.0, size.1);
+    let script = format!("__pwb_refreshDevtools({width}, {height});");
+    if let Err(e) = execute_script_named(handle, &script, "browser.js") {
         eprintln!("[DevTools] refresh failed: {:?}", e);
     }
 }

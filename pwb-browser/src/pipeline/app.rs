@@ -101,6 +101,10 @@ pub struct BrowserApp {
     pub(super) modifiers_state: winit::keyboard::ModifiersState,
     pub(super) resize_state: Option<ResizeDrag>,
     pub(super) pixmap: tiny_skia::Pixmap,
+    /// The bundle bytes of the page currently installed. `Ctrl/Cmd+S` writes
+    /// exactly what the network served rather than re-serializing the live DOM,
+    /// so the download is a faithful copy of the page.
+    pub(super) current_bundle: Vec<u8>,
     /// Resolver dependencies for in-place navigation swaps.
     pub(super) search: Arc<SearchEngine>,
     pub(super) host: Arc<ArtifactHost>,
@@ -428,7 +432,8 @@ impl BrowserApp {
     /// Rebuild the fixed chrome from the current shell state. Returns `false` when the DOM is
     /// borrowed by a running script, so callers can retry on the next tick.
     pub(super) fn refresh_chrome(&mut self) -> bool {
-        let (width, height) = self.window_size();
+        self.sync_scale();
+        let (width, height) = self.logical_window_size();
         // Preserve text typed into the address bar: a chrome rebuild (hover,
         // peer count, theme reload) must not wipe an in-progress URL.
         let editing_address = {
@@ -468,7 +473,7 @@ impl BrowserApp {
 
     /// Keep the active tab inside the visible tab window after it changes.
     fn reveal_active_tab(&mut self) {
-        let (width, height) = self.window_size();
+        let (width, height) = self.logical_window_size();
         let count = shell::visible_tab_count(&self.shell, &self.theme, width as f32, height as f32);
         self.shell.reveal_active(count);
     }
@@ -498,6 +503,13 @@ impl BrowserApp {
         } else {
             format!("search.plain?q={}", url)
         };
+        // A link to an image, PDF, or any file PlainWeb cannot render is a
+        // download, not a navigation: save it and stay on the current page so
+        // the download does not land in back/forward history.
+        if let Some(download) = crate::downloads::download_target(&canonical) {
+            self.save_download_target(download);
+            return;
+        }
         self.shell.navigate(&canonical);
         self.reveal_active_tab();
         self.refresh_chrome();
@@ -581,6 +593,15 @@ impl BrowserApp {
             );
             return;
         }
+        // Downloading copies a local file into the downloads folder. That is a
+        // user gesture, not something a page script may start on its own.
+        if scripted && crate::downloads::is_download_target(url) {
+            self.show_error_page(
+                "download needs a click",
+                "A page script cannot start a download. Click the link (or open the file from the address bar) yourself.",
+            );
+            return;
+        }
         self.go(url);
     }
 
@@ -660,6 +681,90 @@ impl BrowserApp {
                 (size.width, size.height)
             })
             .unwrap_or((800, 600))
+    }
+
+    /// The window size in CSS pixels: what the theme metrics, the chrome tree,
+    /// and devtools truncation are authored against. The surface and layout keep
+    /// using physical pixels, so nothing loses resolution.
+    pub(super) fn logical_window_size(&self) -> (u32, u32) {
+        let (width, height) = self.window_size();
+        crate::dpi::logical_size(width, height)
+    }
+
+    /// Save the current page as `<title>.pwb` plus a `<title>_files/` folder
+    /// with its images (`Ctrl/Cmd+S`). Writes the bundle exactly as served.
+    pub(super) fn save_current_page(&mut self) {
+        if self.current_bundle.is_empty() {
+            self.announce_download("Nothing to download yet");
+            return;
+        }
+        let (title, assets) = {
+            let dom = self.dom_handle_render.dom.borrow();
+            (dom.title.clone(), image_sources(&dom.root))
+        };
+        let url = self.shell.current_url().to_string();
+        match crate::downloads::save_page(&url, &title, &self.current_bundle, &assets) {
+            Ok(saved) => {
+                let images = match saved.assets.len() {
+                    0 => String::new(),
+                    1 => " + 1 image".to_string(),
+                    count => format!(" + {count} images"),
+                };
+                self.announce_download(&format!(
+                    "Saved {}{images} to {}",
+                    saved
+                        .bundle
+                        .file_name()
+                        .unwrap_or_default()
+                        .to_string_lossy(),
+                    saved
+                        .bundle
+                        .parent()
+                        .unwrap_or_else(|| std::path::Path::new("."))
+                        .display()
+                ));
+            }
+            Err(error) => self.announce_download(&format!("Download failed: {error}")),
+        }
+    }
+
+    /// Save a file the browser cannot render (an image, a PDF, any unknown
+    /// type) instead of navigating to it.
+    pub(super) fn save_download_target(&mut self, download: crate::downloads::Download) {
+        match crate::downloads::save(&download) {
+            Ok(path) => self.announce_download(&format!(
+                "Downloaded {} to {}",
+                download.name,
+                path.parent()
+                    .unwrap_or_else(|| std::path::Path::new("."))
+                    .display()
+            )),
+            Err(error) => {
+                self.announce_download(&format!("Could not download {}: {error}", download.name))
+            }
+        }
+    }
+
+    /// Download feedback that does not navigate away from the page: a log line
+    /// in the terminal and devtools console, plus a transient window title.
+    fn announce_download(&self, message: &str) {
+        println!("[Download] {message}");
+        log_console(&self.dom_handle_render, message);
+        if let Some(window) = self.window.as_ref() {
+            window.set_title(&format!("PlainWeb Browser — {message}"));
+        }
+    }
+
+    /// Adopt the display scale reported by the window/compositor (or the
+    /// `PWB_SCALE` override). Called whenever the window is (re)configured, so
+    /// a monitor change or a Wayland output-scale update re-lays out at the
+    /// right size before the next frame.
+    pub(super) fn sync_scale(&self) {
+        let Some(window) = self.window.as_ref() else {
+            return;
+        };
+        let factor = crate::dpi::env_scale().unwrap_or_else(|| window.scale_factor() as f32);
+        crate::dpi::set_scale(factor);
     }
 
     /// Focus the address input (Ctrl/Cmd+L).
@@ -824,6 +929,9 @@ impl BrowserApp {
         self.dom_handle_render.reset_page_state();
         reset_js_context();
 
+        // Keep the exact bytes so `Ctrl/Cmd+S` saves the page as served.
+        self.current_bundle = bytes.to_vec();
+
         // Replace the DOM in place (the JS context shares this DomHandle, so
         // it will see the new tree on the next script call), then mount the
         // shell chrome as a fixed overlay above the page.
@@ -838,7 +946,7 @@ impl BrowserApp {
         // recolors them so the whole window follows it. Sites written by anyone
         // else keep exactly the colors they authored.
         theme::recolor_shipped_page(&mut new_dom.root, &self.theme.page, &url);
-        let (width, height) = self.window_size();
+        let (width, height) = self.logical_window_size();
         shell::install_chrome(&mut new_dom, &self.shell, &self.theme, width, height);
         *self.dom_handle_render.dom.borrow_mut() = new_dom;
 
@@ -1006,6 +1114,10 @@ impl ApplicationHandler for BrowserApp {
         self.window = Some(window);
         self.context = Some(context);
         self.surface = Some(surface);
+
+        // Adopt the display scale before the first chrome/layout pass so a
+        // HiDPI or fractional-scaled output is correct from the first frame.
+        self.sync_scale();
 
         // The devtools tree was populated at mount time before any window existed
         // (the startup `__pwb_refreshDevtools()` call has no size, so leaf rows
@@ -1317,6 +1429,11 @@ impl ApplicationHandler for BrowserApp {
                 {
                     if let PhysicalKey::Code(code) = key_event.physical_key {
                         match code {
+                            KeyCode::KeyS => {
+                                self.save_current_page();
+                                window.request_redraw();
+                                return;
+                            }
                             KeyCode::KeyL => {
                                 if self.focus_address() {
                                     window.request_redraw();
@@ -2308,8 +2425,10 @@ impl ApplicationHandler for BrowserApp {
                     MouseScrollDelta::LineDelta(x, y) => (x, y),
                     MouseScrollDelta::PixelDelta(pos) => (pos.x as f32, pos.y as f32),
                 };
+                // Line deltas are in CSS pixels: one notch scrolls the same
+                // amount visually whatever the display density.
                 let scroll_amount = match delta {
-                    MouseScrollDelta::LineDelta(_, y) => y * 25.0,
+                    MouseScrollDelta::LineDelta(_, y) => y * crate::dpi::px(25.0),
                     MouseScrollDelta::PixelDelta(pos) => pos.y as f32,
                 };
                 let size = window.inner_size();
@@ -2571,7 +2690,54 @@ impl ApplicationHandler for BrowserApp {
                 self.refresh_chrome();
                 window.request_redraw();
             }
+            WindowEvent::ScaleFactorChanged { scale_factor, .. } => {
+                // HiDPI / Wayland output-scale change (or the user dragging the
+                // window to a monitor with a different density). Re-adopt the
+                // scale, rebuild the chrome for the new CSS size, and repaint at
+                // the new device resolution instead of upscaling a stale frame.
+                let previous = crate::dpi::scale();
+                let next = match crate::dpi::env_scale() {
+                    Some(forced) => forced,
+                    None => scale_factor as f32,
+                };
+                crate::dpi::set_scale(next);
+                // Scroll offsets live in device pixels; keep the content where
+                // the user left it instead of jumping by the density ratio.
+                let ratio = crate::dpi::scale() / previous;
+                if (ratio - 1.0).abs() > f32::EPSILON {
+                    self.scroll_y *= ratio;
+                    for offset in self.element_scrolls.values_mut() {
+                        *offset *= ratio;
+                    }
+                }
+                self.refresh_chrome();
+                let (width, height) = self.window_size();
+                refresh_devtools(&self.dom_handle_render, (width, height));
+                window.request_redraw();
+            }
             _ => {}
         }
     }
+}
+
+/// The `src` of every `<image>` in `node`'s subtree, in document order. Used
+/// by "save page" to write the page's images beside its bundle.
+fn image_sources(node: &crate::dom::DomNode) -> Vec<String> {
+    fn walk(node: &crate::dom::DomNode, out: &mut Vec<String>) {
+        if node.tag == Tag::Image {
+            if let Some(src) = node
+                .attributes
+                .get("src")
+                .filter(|src| !src.trim().is_empty())
+            {
+                out.push(src.clone());
+            }
+        }
+        for child in &node.children {
+            walk(child, out);
+        }
+    }
+    let mut out = Vec::new();
+    walk(node, &mut out);
+    out
 }
