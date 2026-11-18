@@ -5,6 +5,9 @@ Everything you need to understand how PlainWeb works, linked in one place.
 ## Start here
 
 - [Join the network](join-the-network.md) — build once, start a node, connect to a peer, serve a site, query the swarm. A handful of commands, with real output and troubleshooting.
+- [Author a site (pwb-web quickstart)](../pwb-web/docs/quickstart.md) — folder to `.pwb` to local preview, with troubleshooting for each compile error.
+- [PML, PSS, and PlainJS reference](../pwb-web/docs/language.md) — supported tags, attributes, selectors, properties, components, and script bundling.
+- [Host a site (pwb-node quickstart)](../pwb-node/docs/hosting-quickstart.md) — deploy a node, claim a name, update content, back up identity, and monitor it.
 
 ## Protocol
 

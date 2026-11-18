@@ -60,6 +60,11 @@ New here? [Join the network](docs/join-the-network.md) is the short version:
 start a node, connect to a peer, serve a site, query it, and check that it
 worked.
 
+Building a page? Start with [Author a site](pwb-web/docs/quickstart.md) and the
+[PML/PSS reference](pwb-web/docs/language.md). Running a host? The [node
+operator quickstart](pwb-node/docs/hosting-quickstart.md) covers deployment,
+systemd, claims, updates, and monitoring.
+
 ```sh
 # Layer 1 — compile a site folder into a .pwb bundle (demo_site is generated if absent)
 cargo run -p pwb-web -- demo_site demo.pwb

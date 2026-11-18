@@ -6,6 +6,18 @@ indexing, ranking, signed claim validation, and domain allocation are all done
 and mints relay credits from them, verifies peers' index proofs against the
 actual bundle bytes, and gathers/answers `k`-of-`N` balance attestations.
 
+## Quickstart: host a site
+
+```sh
+pwb-web mysite mysite.pwb     # compile once (see pwb-web/docs/quickstart.md)
+pwb-node --host mysite.pwb    # serve it; peers fetch and index the bundle
+pwb-node --status             # (second terminal) identity, credits, wallet
+```
+
+A named site is one more flag: `--claim mysite.pwb`. Hosting on a server,
+running under systemd, backups, updates, and monitoring are covered in
+**[Host a site — node operator quickstart](docs/hosting-quickstart.md)**.
+
 ## Running a node
 
 ```bash
@@ -227,6 +239,7 @@ is the [publish-a-seed runbook](../docs/runbooks/publish-a-seed.md).
 
 ## Documentation
 
+- [Host a site — node operator quickstart](docs/hosting-quickstart.md) — compile, deploy, claim, update, and monitor a hosted site.
 - [Running a public seed / rendezvous node](../docs/seed-node.md) — systemd unit, firewall, link, and anchor publication.
 - [Protocol Reference](../docs/protocol.md) — pinned network parameters and the `.plain` security rule.
 - [§1 Core Architecture](../docs/design/01-core-architecture.md) — the shared `pwb-core::net::NodeEngine` this node runs on.
