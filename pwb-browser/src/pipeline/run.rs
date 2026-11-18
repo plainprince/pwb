@@ -128,21 +128,16 @@ pub fn build_browser_app(
         is_open: devtools_start_open,
     }));
 
-    // Result channel from the (static) menu actions back to the event-loop
-    // handler: 0 = nothing, 1 = Copy, 2 = Inspect Element. The actions only
-    // record what was chosen; the actual clipboard write happens on the event
-    // loop, where the long-lived `Clipboard` handle lives.
-    let menu_result: Arc<Mutex<u8>> = Arc::new(Mutex::new(0));
+    // Result slot from the (static) native menu rows back to the event-loop
+    // handler. The callback only records the action; the actual clipboard and
+    // selection work happens on the event loop, where the long-lived
+    // `Clipboard` handle lives.
+    let menu_result: Arc<Mutex<Option<context_menu::Action>>> = Arc::new(Mutex::new(None));
 
-    let copy_result = menu_result.clone();
-    let inspect_result = menu_result.clone();
+    let action_result = menu_result.clone();
     context_menu::set_actions(ContextMenuActions {
-        on_copy: Box::new(move || {
-            *copy_result.lock().unwrap() = 1;
-        }),
-        on_inspect: Box::new(move || {
-            *inspect_result.lock().unwrap() = 2;
-            println!("[ContextMenu] Inspect Element chosen");
+        on_action: Box::new(move |action| {
+            *action_result.lock().unwrap() = Some(action);
         }),
     });
 
@@ -164,6 +159,7 @@ pub fn build_browser_app(
         menu_result,
         clipboard: arboard::Clipboard::new().ok(),
         inline_menu: None,
+        input_selection: None,
         swallow_click: false,
         devtools_root_id,
         devtools_mounted,

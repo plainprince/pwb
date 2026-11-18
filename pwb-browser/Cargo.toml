@@ -48,6 +48,15 @@ uuid = { version = "1", features = ["v4"] }
 [target.'cfg(not(target_os = "macos"))'.dependencies]
 tinyfiledialogs = "3.9"
 
+# Native Win32 popup menus (right-click) on Windows 10/11.
+[target.'cfg(target_os = "windows")'.dependencies]
+windows-sys = { version = "0.59", features = [
+    "Win32_Foundation",
+    "Win32_Graphics_Gdi",
+    "Win32_UI_WindowsAndMessaging",
+] }
+raw-window-handle = "0.6"
+
 # Native OS dialogs (alert/confirm/prompt) and context menu on macOS.
 [target.'cfg(target_os = "macos")'.dependencies]
 objc2 = "0.5.2"

@@ -6,7 +6,7 @@ use super::dom::{
     find_node_with_attr, hovered_title, node_id_attr, node_in_subtree, TOOLTIP_DELAY,
 };
 use super::resize::{resize_bounds, resize_new_dimensions, ResizeDrag};
-use crate::context_menu;
+use crate::context_menu::{self, Action, Entry, MenuContext};
 use crate::dom::Dom;
 use crate::js_runtime::{
     execute_event_handler, execute_event_handler_typed, execute_script, log_console,
@@ -18,15 +18,16 @@ use crate::layout::{
 };
 use crate::pipeline::{apply_scroll_to_bottom, tree_row_target_node};
 use crate::render::{
-    draw_hover_highlight_scrolled, draw_selected_highlight_scrolled, draw_tooltip,
-    find_scroll_container, hit_test_cursor_from_layout_scrolled, hit_test_layout_box_scrolled,
-    render_dom_into_pixmap, SelectionPoint, TextSelection,
+    draw_hover_highlight_scrolled, draw_input_selection, draw_selected_highlight_scrolled,
+    draw_tooltip, find_scroll_container, hit_test_cursor_from_layout_scrolled,
+    hit_test_layout_box_scrolled, render_dom_into_pixmap, SelectionPoint, TextSelection,
 };
 use crate::resolver::{
     content_id_of, is_blog_target, is_chat_target, is_register_target, is_system_target,
     pwb_name_of, register_claim_of, resolve_url_or_file_with_context, room_of, search_query_of,
 };
 use crate::shell::{self, ChromeAction, Shell};
+use crate::shortcuts::{self, Command};
 use crate::theme::{self, Theme, ThemeStore};
 use arboard::Clipboard;
 use pwb_core::spec::Tag;
@@ -50,7 +51,6 @@ use std::sync::{Arc, Mutex};
 use winit::application::ApplicationHandler;
 use winit::event::{ElementState, MouseButton, MouseScrollDelta, WindowEvent};
 use winit::event_loop::{ActiveEventLoop, ControlFlow};
-use winit::keyboard::{KeyCode, PhysicalKey};
 use winit::window::{CursorIcon, Window, WindowAttributes, WindowId};
 
 /// The winit application state. `window`/`context`/`surface` are created lazily in
@@ -64,15 +64,15 @@ pub struct BrowserApp {
     pub(super) surface: Option<softbuffer::Surface<Rc<Window>, Rc<Window>>>,
     pub(super) dom_handle_render: DomHandle,
     pub(super) devtools_state: Arc<Mutex<DevToolsState>>,
-    pub(super) menu_result: Arc<Mutex<u8>>,
+    pub(super) menu_result: Arc<Mutex<Option<Action>>>,
     /// Long-lived system clipboard handle. Keeping it alive (instead of
     /// creating a `Clipboard` per operation and dropping it immediately) is
     /// what lets X11/Wayland clipboard managers read the contents on Linux.
     pub(super) clipboard: Option<Clipboard>,
-    /// Open in-window context menu position (non-macOS): the menu is painted
-    /// above the page and the next left click either selects an item or closes
-    /// it.
-    pub(super) inline_menu: Option<SelectionPoint>,
+    /// Open in-window context menu position and its rows (Linux): the menu is
+    /// painted above the page and the next left click either selects an item
+    /// or closes it.
+    pub(super) inline_menu: Option<(SelectionPoint, Vec<Entry>)>,
     /// True when the press that just closed the in-window menu must not turn
     /// into a page click on release.
     pub(super) swallow_click: bool,
@@ -87,6 +87,10 @@ pub struct BrowserApp {
     /// keyed by node id.
     pub(super) element_scrolls: std::collections::HashMap<usize, f32>,
     pub(super) selection: TextSelection,
+    /// Text selected inside the focused `<input>`, stored as
+    /// `(node_id, anchor, caret)` so Shift+arrows can extend in either
+    /// direction. `None` when the focus has no selected range.
+    pub(super) input_selection: Option<(usize, usize, usize)>,
     pub(super) current_mouse_pos: SelectionPoint,
     /// The tooltip currently drawn on screen (the dwell-approved `title`), so
     /// `about_to_wait` can tell whether a fully-dwelled candidate still needs
@@ -160,16 +164,33 @@ pub struct BrowserApp {
 /// instantly from the local artifact store.
 const SEARCH_PREFETCH: usize = 10;
 
-/// Insert `text` at a character caret into a single-line value, returning the
-/// new value and caret. Control characters are ignored.
-pub(super) fn insert_text_at_caret(value: &str, caret: usize, text: &str) -> (String, usize) {
-    let mut chars: Vec<char> = value.chars().collect();
-    let mut caret = caret.min(chars.len());
-    for ch in text.chars().filter(|ch| !ch.is_control()) {
-        chars.insert(caret, ch);
-        caret += 1;
-    }
-    (chars.into_iter().collect(), caret)
+/// Replace the character range `start..end` of a single-line value, returning
+/// the new value and the caret after the inserted text. Control characters
+/// (newlines, tabs) are dropped.
+pub(super) fn replace_text_range(
+    value: &str,
+    start: usize,
+    end: usize,
+    text: &str,
+) -> (String, usize) {
+    let chars: Vec<char> = value.chars().collect();
+    let a = start.min(chars.len());
+    let b = end.min(chars.len());
+    // Accept ranges given in either direction (selection anchors can sit after
+    // the caret).
+    let (start, end) = if a <= b { (a, b) } else { (b, a) };
+    let inserted: Vec<char> = text.chars().filter(|ch| !ch.is_control()).collect();
+    let mut out: Vec<char> = chars[..start].to_vec();
+    out.extend_from_slice(&inserted);
+    out.extend_from_slice(&chars[end..]);
+    let caret = start + inserted.len();
+    (out.into_iter().collect(), caret)
+}
+
+/// Delete the character range `start..end` of a single-line value, returning
+/// the new value and the caret where the range was removed.
+pub(super) fn delete_text_range(value: &str, start: usize, end: usize) -> (String, usize) {
+    replace_text_range(value, start, end, "")
 }
 
 impl BrowserApp {
@@ -239,23 +260,47 @@ impl BrowserApp {
         }
     }
 
-    /// Copy the focused input's value, or the current text selection.
+    /// Normalized `(start, end)` of the text selected inside the focused
+    /// input, if that range is still valid for the focused node.
+    fn input_selection_range(&self) -> Option<(usize, usize)> {
+        let (node_id, _) = (*self.dom_handle_render.focused_input.borrow())?;
+        let (selected_node, anchor, caret) = self.input_selection?;
+        if selected_node != node_id {
+            return None;
+        }
+        let len = self.input_value(node_id).chars().count();
+        let anchor = anchor.min(len);
+        let caret = caret.min(len);
+        (anchor != caret).then_some((anchor.min(caret), anchor.max(caret)))
+    }
+
+    /// Copy the focused input's selected text, or the selected page text.
+    /// With no selection there is nothing to copy (Chrome behaves the same).
     fn copy_current_text(&mut self) -> bool {
-        let text = if let Some((_, value, _)) = self.focused_input_state() {
-            value
-        } else {
-            self.selection.selected_text_buffer.clone()
-        };
+        if let Some((start, end)) = self.input_selection_range() {
+            let Some((_, value, _)) = self.focused_input_state() else {
+                return false;
+            };
+            let text: String = value.chars().skip(start).take(end - start).collect();
+            return self.copy_text_to_clipboard(&text);
+        }
+        let text = self.selection.selected_text_buffer.clone();
         self.copy_text_to_clipboard(&text)
     }
 
-    /// Cut the focused input's value, or delete the selected page text.
+    /// Cut the focused input's selected text, or delete selected page text.
     fn cut_current_text(&mut self) -> bool {
-        if let Some((node_id, value, _)) = self.focused_input_state() {
-            if value.is_empty() || !self.copy_text_to_clipboard(&value) {
+        if let Some((start, end)) = self.input_selection_range() {
+            let Some((node_id, value, _)) = self.focused_input_state() else {
+                return false;
+            };
+            let text: String = value.chars().skip(start).take(end - start).collect();
+            if !self.copy_text_to_clipboard(&text) {
                 return false;
             }
-            self.set_input_value(node_id, String::new(), 0);
+            let (new_value, caret) = delete_text_range(&value, start, end);
+            self.input_selection = None;
+            self.set_input_value(node_id, new_value, caret);
             return true;
         }
 
@@ -282,52 +327,103 @@ impl BrowserApp {
         true
     }
 
-    /// Paste clipboard text into the focused `<input>` at the caret.
+    /// Paste clipboard text into the focused `<input>`, replacing the selected
+    /// range when there is one.
     fn paste_into_focused_input(&mut self) -> bool {
-        if self.focused_input_state().is_none() {
+        let Some((node_id, value, caret)) = self.focused_input_state() else {
             return false;
-        }
+        };
         let Some(text) = self.clipboard_text() else {
             return false;
         };
         // `<input>` is single-line: flatten pasted newlines to spaces.
         let text = text.replace(['\r', '\n'], " ");
-        let Some((node_id, value, caret)) = self.focused_input_state() else {
-            return false;
-        };
-        let (new_value, new_caret) = insert_text_at_caret(&value, caret, &text);
+        let (start, end) = self
+            .input_selection_range()
+            .unwrap_or((caret.min(value.chars().count()), caret));
+        let (new_value, new_caret) = replace_text_range(&value, start, end, &text);
+        self.input_selection = None;
         self.set_input_value(node_id, new_value, new_caret);
         true
     }
 
-    /// Apply the action recorded by the context menu: `1` = Copy, `2` =
-    /// Inspect Element (opens devtools and turns on pick mode). Called after
-    /// the native menu closes and after an in-window menu item is clicked.
-    fn apply_context_menu_choice(&mut self) {
-        let choice = *self.menu_result.lock().unwrap();
-        *self.menu_result.lock().unwrap() = 0;
-        match choice {
-            1 => {
+    /// `Ctrl/Cmd+A`: select the focused input's whole value, else all page
+    /// text (browser chrome and devtools excluded).
+    fn select_all(&mut self) -> bool {
+        if let Some((node_id, value, _)) = self.focused_input_state() {
+            let len = value.chars().count();
+            *self.dom_handle_render.focused_input.borrow_mut() = Some((node_id, len));
+            self.input_selection = Some((node_id, 0, len));
+            self.selection = TextSelection::default();
+            return true;
+        }
+
+        let range = {
+            let dom = self.dom_handle_render.dom.borrow();
+            super::dom::select_all_page_range(&dom.root)
+        };
+        let Some((sn, sc, en, ec)) = range else {
+            return false;
+        };
+        let text = {
+            let dom = self.dom_handle_render.dom.borrow();
+            compute_selected_text(&dom.root, sn, sc, en, ec)
+        };
+        self.selection = TextSelection {
+            start_node_id: Some(sn),
+            start_char_pos: Some(sc),
+            end_node_id: Some(en),
+            end_char_pos: Some(ec),
+            is_selecting: false,
+            selected_text_buffer: text,
+        };
+        true
+    }
+
+    /// Perform a context-menu action. Native menus record the choice while
+    /// their nested event loop runs; the event loop applies it afterwards.
+    fn apply_menu_action(&mut self, action: Action) {
+        match action {
+            Action::Copy => {
                 self.copy_current_text();
             }
-            2 => {
-                let mut dev = self.devtools_state.lock().unwrap();
-                dev.is_open = true;
-                drop(dev);
-                if let Some(root_id) = self.devtools_root_id {
-                    if let Ok(mut dom) = self.dom_handle_render.dom.try_borrow_mut() {
-                        if let Some(node) = find_node_by_id(&mut dom.root, &root_id.to_string()) {
-                            node.attributes.remove("display");
-                        }
-                    }
-                }
-                self.dom_handle_render
-                    .inspect_mode
-                    .store(true, Ordering::Relaxed);
-                println!("[ContextMenu] DevTools opened, pick mode on");
+            Action::Cut => {
+                self.cut_current_text();
             }
-            _ => {}
+            Action::Paste => {
+                self.paste_into_focused_input();
+            }
+            Action::SelectAll => {
+                self.select_all();
+            }
+            Action::Inspect => self.open_inspector(),
         }
+    }
+
+    /// Take the action recorded by a native menu, if any, and perform it.
+    fn apply_pending_menu_action(&mut self) {
+        let action = self.menu_result.lock().unwrap().take();
+        if let Some(action) = action {
+            self.apply_menu_action(action);
+        }
+    }
+
+    /// Open devtools with element-pick mode on (context menu / `Ctrl+Shift+C`).
+    fn open_inspector(&mut self) {
+        let mut dev = self.devtools_state.lock().unwrap();
+        dev.is_open = true;
+        drop(dev);
+        if let Some(root_id) = self.devtools_root_id {
+            if let Ok(mut dom) = self.dom_handle_render.dom.try_borrow_mut() {
+                if let Some(node) = find_node_by_id(&mut dom.root, &root_id.to_string()) {
+                    node.attributes.remove("display");
+                }
+            }
+        }
+        self.dom_handle_render
+            .inspect_mode
+            .store(true, Ordering::Relaxed);
+        println!("[ContextMenu] DevTools opened, pick mode on");
     }
 
     /// Hot-swap the DOM bundle for `url` within the same event loop: resolve
@@ -785,7 +881,188 @@ impl BrowserApp {
                 .count()
         };
         *self.dom_handle_render.focused_input.borrow_mut() = Some((node_id, len));
+        // Like Chrome's omnibox: focusing the address bar selects the URL, so
+        // typing replaces it and Paste/Copy operate on the whole value.
+        self.input_selection = (len > 0).then_some((node_id, 0, len));
         true
+    }
+
+    /// The fixed end of an input selection while Shift extends it: the stored
+    /// anchor when one exists, else the current caret.
+    fn input_selection_anchor(&self, node_id: usize, caret: usize) -> usize {
+        match self.input_selection {
+            Some((selected, anchor, _)) if selected == node_id => anchor,
+            _ => caret,
+        }
+    }
+
+    /// Execute a resolved browser shortcut. Returns `true` when the key was
+    /// consumed (the page and the focused input must not see it).
+    fn run_command(&mut self, command: Command, window: &Window) -> bool {
+        let input_focused = self.focused_input_state().is_some();
+        match command {
+            Command::Back | Command::Forward => {
+                // On macOS Option+Left/Right moves by word inside a text field,
+                // so leave the key to the input. Windows/Linux browsers still
+                // navigate from a focused field.
+                if input_focused && cfg!(target_os = "macos") {
+                    return false;
+                }
+                let url = if command == Command::Back {
+                    self.shell.back()
+                } else {
+                    self.shell.forward()
+                };
+                if let Some(url) = url {
+                    self.refresh_chrome();
+                    self.load_url(&url);
+                }
+            }
+            Command::Reload => {
+                let url = self.shell.current_url().to_string();
+                self.load_url(&url);
+            }
+            Command::FocusAddress => {
+                self.focus_address();
+            }
+            Command::NewTab => {
+                self.shell.new_tab(shell::NEW_TAB_URL);
+                self.reveal_active_tab();
+                self.refresh_chrome();
+                self.load_url(shell::NEW_TAB_URL);
+            }
+            Command::CloseTab => {
+                if let Some(url) = self.shell.close_active() {
+                    self.reveal_active_tab();
+                    self.refresh_chrome();
+                    self.load_url(&url);
+                }
+            }
+            Command::ReopenTab => {
+                if let Some(url) = self.shell.reopen_closed() {
+                    self.reveal_active_tab();
+                    self.refresh_chrome();
+                    self.load_url(&url);
+                }
+            }
+            Command::NextTab | Command::PrevTab => {
+                let count = self.shell.tabs.len();
+                if count > 1 {
+                    let step = if command == Command::NextTab {
+                        1
+                    } else {
+                        count - 1
+                    };
+                    let index = (self.shell.active + step) % count;
+                    if let Some(url) = self.shell.select(index) {
+                        self.reveal_active_tab();
+                        self.refresh_chrome();
+                        self.load_url(&url);
+                    }
+                }
+            }
+            Command::SelectTab(index) => {
+                let index = if index == usize::MAX {
+                    self.shell.tabs.len().saturating_sub(1)
+                } else {
+                    index
+                };
+                if let Some(url) = self.shell.select(index) {
+                    self.reveal_active_tab();
+                    self.refresh_chrome();
+                    self.load_url(&url);
+                }
+            }
+            Command::ToggleBookmark => {
+                let bookmarked = self.shell.toggle_bookmark();
+                println!(
+                    "[Shell] {} {}",
+                    if bookmarked {
+                        "Bookmarked"
+                    } else {
+                        "Removed bookmark for"
+                    },
+                    self.shell.current_url()
+                );
+                self.refresh_chrome();
+            }
+            Command::SavePage => self.save_current_page(),
+            Command::SelectAll => {
+                self.select_all();
+                let size = window.inner_size();
+                refresh_devtools(&self.dom_handle_render, (size.width, size.height));
+            }
+            Command::Copy => {
+                self.copy_current_text();
+            }
+            Command::Cut => {
+                self.cut_current_text();
+                let size = window.inner_size();
+                refresh_devtools(&self.dom_handle_render, (size.width, size.height));
+            }
+            Command::Paste => {
+                self.paste_into_focused_input();
+                let size = window.inner_size();
+                refresh_devtools(&self.dom_handle_render, (size.width, size.height));
+            }
+            Command::DevTools => self.toggle_devtools(),
+            Command::Inspect => self.open_inspector(),
+            Command::Home => self.go(shell::NEW_TAB_URL),
+        }
+        window.request_redraw();
+        true
+    }
+
+    /// Toggle the devtools panel (F12, `Ctrl/Cmd+Shift+I/J`).
+    fn toggle_devtools(&mut self) {
+        let mut devtools = self.devtools_state.lock().unwrap();
+        let mut will_open = !devtools.is_open;
+
+        // When devtools are mounted as DOM, the DOM display attribute is the
+        // source of truth (the close button may have hidden them).
+        if let Some(root_id) = self.devtools_root_id {
+            if let Ok(mut dom) = self.dom_handle_render.dom.try_borrow_mut() {
+                if let Some(root) = find_node_by_id(&mut dom.root, &root_id.to_string()) {
+                    let hidden = root
+                        .attributes
+                        .get("display")
+                        .map(|d| d == "none")
+                        .unwrap_or(false);
+                    will_open = hidden;
+                    if hidden {
+                        root.attributes.remove("display");
+                    } else {
+                        root.attributes
+                            .insert("display".to_string(), "none".to_string());
+                    }
+                }
+                // Closing devtools also ends pick mode and deactivates the
+                // Pick button.
+                if !will_open {
+                    self.dom_handle_render
+                        .inspect_mode
+                        .store(false, Ordering::Relaxed);
+                    if let Some(btn) = find_node_by_id(&mut dom.root, "select-element") {
+                        btn.attributes
+                            .insert("background-color".to_string(), "#2d2d2d".to_string());
+                        btn.attributes
+                            .insert("color".to_string(), "#cccccc".to_string());
+                    }
+                }
+            }
+        }
+        devtools.is_open = will_open;
+        println!(
+            "\n[DevTools] Keyboard shortcut triggered! DevTools {}",
+            if will_open { "opened" } else { "closed" }
+        );
+        // When opening, the tree was never built while the panel was hidden
+        // (`__pwb_refreshDevtools` no-ops on `display: none`), so rebuild it
+        // now that it is visible.
+        if will_open {
+            let (width, height) = self.window_size();
+            refresh_devtools(&self.dom_handle_render, (width, height));
+        }
     }
 
     /// Read the value of an `<input>` node.
@@ -917,6 +1194,8 @@ impl BrowserApp {
     /// its author signature is invalid, so the caller can render a readable page.
     pub(super) fn install_bundle(&mut self, bytes: &[u8]) -> Result<(), String> {
         self.inline_menu = None;
+        self.input_selection = None;
+        self.selection = TextSelection::default();
         let bundle = pwb_core::wire::Bundle::deserialize(bytes).map_err(|e| {
             eprintln!("[Browser] Failed to deserialize bundle: {e}");
             e.to_string()
@@ -1385,218 +1664,113 @@ impl ApplicationHandler for BrowserApp {
                 // The in-window menu is modal: Escape closes it before any
                 // page/input handling. (This must live in the first keyboard
                 // arm; later arms for pressed keys are unreachable.)
-                if self.inline_menu.is_some()
-                    && matches!(
+                if self.inline_menu.is_some() {
+                    if matches!(
                         &key_event.logical_key,
                         winit::keyboard::Key::Named(winit::keyboard::NamedKey::Escape)
-                    )
-                {
-                    self.inline_menu = None;
-                    window.request_redraw();
+                    ) {
+                        self.inline_menu = None;
+                        window.request_redraw();
+                    }
+                    // The menu is modal: no typing or shortcuts reach the page
+                    // while it is open.
                     return;
                 }
 
-                // Browser shell shortcuts: tabs, address bar, history, and
-                // bookmarks. These run before page input/JS handling so a
-                // focused page input cannot swallow Ctrl+L or Ctrl+T.
-                if self.modifiers_state.alt_key()
-                    && !(self.modifiers_state.control_key() || self.modifiers_state.super_key())
-                {
-                    if let PhysicalKey::Code(code) = key_event.physical_key {
-                        match code {
-                            KeyCode::ArrowLeft => {
-                                if let Some(url) = self.shell.back() {
-                                    self.refresh_chrome();
-                                    self.load_url(&url);
-                                }
-                                window.request_redraw();
-                                return;
-                            }
-                            KeyCode::ArrowRight => {
-                                if let Some(url) = self.shell.forward() {
-                                    self.refresh_chrome();
-                                    self.load_url(&url);
-                                }
-                                window.request_redraw();
-                                return;
-                            }
-                            _ => {}
-                        }
-                    }
-                }
-                if (self.modifiers_state.control_key() || self.modifiers_state.super_key())
-                    && !self.modifiers_state.alt_key()
-                {
-                    if let PhysicalKey::Code(code) = key_event.physical_key {
-                        match code {
-                            KeyCode::KeyS => {
-                                self.save_current_page();
-                                window.request_redraw();
-                                return;
-                            }
-                            KeyCode::KeyL => {
-                                if self.focus_address() {
-                                    window.request_redraw();
-                                }
-                                return;
-                            }
-                            KeyCode::KeyT => {
-                                self.shell.new_tab(shell::NEW_TAB_URL);
-                                self.reveal_active_tab();
-                                self.refresh_chrome();
-                                self.load_url(shell::NEW_TAB_URL);
-                                window.request_redraw();
-                                return;
-                            }
-                            KeyCode::KeyW => {
-                                if let Some(url) = self.shell.close_active() {
-                                    self.refresh_chrome();
-                                    self.load_url(&url);
-                                }
-                                window.request_redraw();
-                                return;
-                            }
-                            KeyCode::KeyD => {
-                                let bookmarked = self.shell.toggle_bookmark();
-                                println!(
-                                    "[Shell] {} {}",
-                                    if bookmarked {
-                                        "Bookmarked"
-                                    } else {
-                                        "Removed bookmark for"
-                                    },
-                                    self.shell.current_url()
-                                );
-                                self.refresh_chrome();
-                                window.request_redraw();
-                                return;
-                            }
-                            KeyCode::KeyR => {
-                                let url = self.shell.current_url().to_string();
-                                self.load_url(&url);
-                                window.request_redraw();
-                                return;
-                            }
-                            _ => {}
-                        }
-                    }
-                }
-
-                // Clipboard shortcuts: Ctrl on Linux/Windows, Cmd on macOS.
-                // Handled before the typing block (which intentionally skips
-                // modifier combos) and before the F12/devtools combos, which
-                // are matched below on their own key codes.
-                if (self.modifiers_state.control_key() || self.modifiers_state.super_key())
-                    && !self.modifiers_state.alt_key()
-                {
-                    // Match the physical key as well as the logical character:
-                    // some backends report Ctrl+C/V/X as control characters.
-                    let matches_key = |code: KeyCode, letter: &str| {
-                        matches!(key_event.physical_key, PhysicalKey::Code(c) if c == code)
-                            || matches!(
-                                &key_event.logical_key,
-                                winit::keyboard::Key::Character(c)
-                                    if c.eq_ignore_ascii_case(letter)
-                            )
-                    };
-                    let handled = if matches_key(KeyCode::KeyC, "c") {
-                        self.copy_current_text()
-                    } else if matches_key(KeyCode::KeyX, "x") {
-                        self.cut_current_text()
-                    } else if matches_key(KeyCode::KeyV, "v") {
-                        self.paste_into_focused_input()
-                    } else {
-                        false
-                    };
-                    if handled {
-                        let size = window.inner_size();
-                        refresh_devtools(&self.dom_handle_render, (size.width, size.height));
-                        window.request_redraw();
+                // Browser shortcuts, resolved by one cross-platform table
+                // (Ctrl on Linux/Windows, Cmd on macOS, either accepted on
+                // both). This runs before page input so a focused input cannot
+                // swallow Ctrl/Cmd+L, A, T, W, …
+                if let Some(command) = shortcuts::command(
+                    key_event.physical_key,
+                    &key_event.logical_key,
+                    self.modifiers_state,
+                ) {
+                    if self.run_command(command, &window) {
                         return;
                     }
                 }
 
-                // Typing into a focused `<input>`: characters insert at the
-                // caret, Backspace deletes before it, arrows move it, Enter
-                // submits (dispatches an "enter" DOM event) and Escape blurs.
-                // Cmd/Ctrl shortcuts are left alone (F12 / devtools combo etc.).
+                // Typing/editing in a focused `<input>`. Modifier combos are
+                // browser shortcuts; Shift extends the text selection, and
+                // typing/Backspace/Delete replace or delete it.
+                // Alt is allowed here: it carries Option-key characters on
+                // macOS, and Alt+Left/Right that were not consumed as history
+                // navigation move the input caret.
                 if !self.modifiers_state.control_key() && !self.modifiers_state.super_key() {
                     let focused = *self.dom_handle_render.focused_input.borrow();
-                    if let Some((node_id, mut caret)) = focused {
+                    if let Some((node_id, caret)) = focused {
+                        let shift = self.modifiers_state.shift_key();
+                        let value = self.input_value(node_id);
+                        let value_len = value.chars().count();
+                        let mut caret = caret.min(value_len);
+                        let selection = self.input_selection_range();
                         let mut submit = false;
                         let mut blur = false;
-                        let mut changed = false;
                         let mut consumed = false;
-                        let mut new_value: Option<String> = None;
-                        let value_len = {
-                            let dom = self.dom_handle_render.dom.borrow();
-                            crate::dom::find_node_by_id_ref(&dom.root, &node_id.to_string())
-                                .and_then(|n| n.attributes.get("value").map(|v| v.chars().count()))
-                                .unwrap_or(0)
-                        };
+                        // `Some((start, end, text))`: replace that range.
+                        let mut edit: Option<(usize, usize, String)> = None;
+                        // Shift+movement extends from the existing anchor.
+                        let mut extend: Option<(usize, usize)> = None;
                         match &key_event.logical_key {
                             winit::keyboard::Key::Character(c) if !c.is_empty() => {
-                                let chars: Vec<char> =
+                                let text: String =
                                     c.chars().filter(|ch| !ch.is_control()).collect();
-                                if !chars.is_empty() {
-                                    let mut value: Vec<char> = {
-                                        let dom = self.dom_handle_render.dom.borrow();
-                                        crate::dom::find_node_by_id_ref(
-                                            &dom.root,
-                                            &node_id.to_string(),
-                                        )
-                                        .and_then(|n| n.attributes.get("value").cloned())
-                                        .unwrap_or_default()
-                                        .chars()
-                                        .collect()
-                                    };
-                                    caret = caret.min(value.len());
-                                    for ch in &chars {
-                                        value.insert(caret, *ch);
-                                        caret += 1;
-                                    }
-                                    new_value = Some(value.into_iter().collect());
-                                    changed = true;
+                                if !text.is_empty() {
+                                    let (start, end) = selection.unwrap_or((caret, caret));
+                                    edit = Some((start, end, text));
                                 }
                             }
                             winit::keyboard::Key::Named(winit::keyboard::NamedKey::Space) => {
-                                let mut value: Vec<char> = {
-                                    let dom = self.dom_handle_render.dom.borrow();
-                                    crate::dom::find_node_by_id_ref(&dom.root, &node_id.to_string())
-                                        .and_then(|n| n.attributes.get("value").cloned())
-                                        .unwrap_or_default()
-                                        .chars()
-                                        .collect()
-                                };
-                                caret = caret.min(value.len());
-                                value.insert(caret, ' ');
-                                caret += 1;
-                                new_value = Some(value.into_iter().collect());
-                                changed = true;
+                                let (start, end) = selection.unwrap_or((caret, caret));
+                                edit = Some((start, end, " ".to_string()));
                             }
                             winit::keyboard::Key::Named(winit::keyboard::NamedKey::Backspace) => {
-                                let mut value: Vec<char> = {
-                                    let dom = self.dom_handle_render.dom.borrow();
-                                    crate::dom::find_node_by_id_ref(&dom.root, &node_id.to_string())
-                                        .and_then(|n| n.attributes.get("value").cloned())
-                                        .unwrap_or_default()
-                                        .chars()
-                                        .collect()
-                                };
-                                caret = caret.min(value.len());
-                                if caret > 0 && !value.is_empty() {
-                                    value.remove(caret - 1);
-                                    caret -= 1;
-                                    new_value = Some(value.into_iter().collect());
-                                    changed = true;
+                                if let Some((start, end)) = selection {
+                                    edit = Some((start, end, String::new()));
+                                } else if caret > 0 {
+                                    edit = Some((caret - 1, caret, String::new()));
+                                }
+                            }
+                            winit::keyboard::Key::Named(winit::keyboard::NamedKey::Delete) => {
+                                if let Some((start, end)) = selection {
+                                    edit = Some((start, end, String::new()));
+                                } else if caret < value_len {
+                                    edit = Some((caret, caret + 1, String::new()));
                                 }
                             }
                             winit::keyboard::Key::Named(winit::keyboard::NamedKey::ArrowLeft) => {
-                                caret = caret.saturating_sub(1);
+                                let next = caret.saturating_sub(1);
+                                if shift {
+                                    let anchor = self.input_selection_anchor(node_id, caret);
+                                    extend = Some((anchor, next));
+                                }
+                                caret = next;
                                 consumed = true;
                             }
                             winit::keyboard::Key::Named(winit::keyboard::NamedKey::ArrowRight) => {
-                                caret = (caret + 1).min(value_len);
+                                let next = (caret + 1).min(value_len);
+                                if shift {
+                                    let anchor = self.input_selection_anchor(node_id, caret);
+                                    extend = Some((anchor, next));
+                                }
+                                caret = next;
+                                consumed = true;
+                            }
+                            winit::keyboard::Key::Named(winit::keyboard::NamedKey::Home) => {
+                                if shift {
+                                    let anchor = self.input_selection_anchor(node_id, caret);
+                                    extend = Some((anchor, 0));
+                                }
+                                caret = 0;
+                                consumed = true;
+                            }
+                            winit::keyboard::Key::Named(winit::keyboard::NamedKey::End) => {
+                                if shift {
+                                    let anchor = self.input_selection_anchor(node_id, caret);
+                                    extend = Some((anchor, value_len));
+                                }
+                                caret = value_len;
                                 consumed = true;
                             }
                             winit::keyboard::Key::Named(winit::keyboard::NamedKey::Enter) => {
@@ -1643,25 +1817,28 @@ impl ApplicationHandler for BrowserApp {
                             }
                             _ => {}
                         }
-                        if changed {
-                            if let Some(v) = new_value {
-                                let mut dom = self.dom_handle_render.dom.borrow_mut();
-                                if let Some(node) =
-                                    find_node_by_id(&mut dom.root, &node_id.to_string())
-                                {
-                                    if v.is_empty() {
-                                        node.attributes.remove("value");
-                                    } else {
-                                        node.attributes.insert("value".to_string(), v);
-                                    }
-                                }
-                            }
+
+                        if !shift {
+                            self.input_selection = None;
+                        }
+                        if let Some((anchor, focus)) = extend {
+                            self.input_selection =
+                                (anchor != focus).then_some((node_id, anchor, focus));
+                        }
+                        if let Some((start, end, text)) = edit {
+                            let (new_value, new_caret) =
+                                replace_text_range(&value, start, end, &text);
+                            self.input_selection = None;
+                            self.set_input_value(node_id, new_value, new_caret);
+                            caret = new_caret;
                             consumed = true;
                         }
+
                         if submit {
                             // The address bar is shell chrome, not a page
                             // form: Enter navigates instead of dispatching a
                             // page "enter" handler.
+                            self.input_selection = None;
                             let is_address = {
                                 let dom = self.dom_handle_render.dom.borrow();
                                 crate::dom::find_node_by_id_ref(&dom.root, &node_id.to_string())
@@ -1694,8 +1871,9 @@ impl ApplicationHandler for BrowserApp {
                             }
                             *self.dom_handle_render.focused_input.borrow_mut() = None;
                         } else if blur {
+                            self.input_selection = None;
                             *self.dom_handle_render.focused_input.borrow_mut() = None;
-                        } else {
+                        } else if consumed {
                             *self.dom_handle_render.focused_input.borrow_mut() =
                                 Some((node_id, caret));
                         }
@@ -1712,75 +1890,7 @@ impl ApplicationHandler for BrowserApp {
                             let size = window.inner_size();
                             refresh_devtools(&self.dom_handle_render, (size.width, size.height));
                             window.request_redraw();
-                            return;
                         }
-                    }
-                }
-                if let PhysicalKey::Code(code) = key_event.physical_key {
-                    let is_f12 = code == KeyCode::F12;
-                    let is_dev_combo = (code == KeyCode::KeyI || code == KeyCode::KeyJ)
-                        && (self.modifiers_state.control_key() || self.modifiers_state.super_key())
-                        && self.modifiers_state.shift_key();
-
-                    if is_f12 || is_dev_combo {
-                        let mut devtools = self.devtools_state.lock().unwrap();
-                        let mut will_open = !devtools.is_open;
-
-                        // When devtools are mounted as DOM, the DOM display attribute is the
-                        // source of truth (the close button may have hidden them).
-                        if let Some(root_id) = self.devtools_root_id {
-                            if let Ok(mut dom) = self.dom_handle_render.dom.try_borrow_mut() {
-                                if let Some(root) =
-                                    find_node_by_id(&mut dom.root, &root_id.to_string())
-                                {
-                                    let hidden = root
-                                        .attributes
-                                        .get("display")
-                                        .map(|d| d == "none")
-                                        .unwrap_or(false);
-                                    will_open = hidden;
-                                    if hidden {
-                                        root.attributes.remove("display");
-                                    } else {
-                                        root.attributes
-                                            .insert("display".to_string(), "none".to_string());
-                                    }
-                                }
-                                // Closing devtools also ends pick mode and deactivates
-                                // the Pick button.
-                                if !will_open {
-                                    self.dom_handle_render
-                                        .inspect_mode
-                                        .store(false, Ordering::Relaxed);
-                                    if let Some(btn) =
-                                        find_node_by_id(&mut dom.root, "select-element")
-                                    {
-                                        btn.attributes.insert(
-                                            "background-color".to_string(),
-                                            "#2d2d2d".to_string(),
-                                        );
-                                        btn.attributes
-                                            .insert("color".to_string(), "#cccccc".to_string());
-                                    }
-                                }
-                            }
-                        }
-                        devtools.is_open = will_open;
-                        println!(
-                            "\n[DevTools] Keyboard shortcut triggered! DevTools {}",
-                            if will_open { "opened" } else { "closed" }
-                        );
-                        // When opening, the tree was never built while the panel
-                        // was hidden (`__pwb_refreshDevtools` no-ops on
-                        // `display: none`), so rebuild it now that it is visible
-                        // — otherwise the Elements tree stays empty until the
-                        // next click/hover event. The size is irrelevant when
-                        // closing (the binding no-ops), so pass it either way.
-                        if will_open {
-                            let size = window.inner_size();
-                            refresh_devtools(&self.dom_handle_render, (size.width, size.height));
-                        }
-                        window.request_redraw();
                     }
                 }
             }
@@ -1945,21 +2055,23 @@ impl ApplicationHandler for BrowserApp {
 
                         // In-window context menu: a click selects an item or
                         // dismisses the menu, and never reaches the page.
-                        if let Some(pos) = self.inline_menu.take() {
+                        if let Some((pos, entries)) = self.inline_menu.take() {
                             self.swallow_click = true;
                             let rect = context_menu::inline::menu_rect(
                                 pos.x,
                                 pos.y,
                                 width as f32,
                                 height as f32,
+                                &entries,
                             );
-                            if let Some(item) = context_menu::inline::hit(rect, mx, my) {
-                                match item {
-                                    0 => context_menu::perform_copy(),
-                                    1 => context_menu::perform_inspect(),
-                                    _ => {}
-                                }
-                                self.apply_context_menu_choice();
+                            if let Some(action) = context_menu::inline::hit(rect, mx, my, &entries)
+                            {
+                                self.apply_menu_action(action);
+                                let size = window.inner_size();
+                                refresh_devtools(
+                                    &self.dom_handle_render,
+                                    (size.width, size.height),
+                                );
                             }
                             window.request_redraw();
                             return;
@@ -2045,6 +2157,7 @@ impl ApplicationHandler for BrowserApp {
                             };
                             *self.dom_handle_render.focused_input.borrow_mut() =
                                 Some((input_box.node_id, caret));
+                            self.input_selection = None;
                             self.selection = TextSelection::default();
                             println!(
                                 "[Input] Focused node {} at caret {}",
@@ -2055,6 +2168,7 @@ impl ApplicationHandler for BrowserApp {
                             //     anchors a text selection at the character under the
                             //     cursor (layout only — frame rasterized on redraw).
                             *self.dom_handle_render.focused_input.borrow_mut() = None;
+                            self.input_selection = None;
                             // Chrome text (a tab label, the peer count) is UI, not
                             // page content: clicking it must not start a text
                             // selection or the click reads as a drag.
@@ -2352,24 +2466,38 @@ impl ApplicationHandler for BrowserApp {
             } => {
                 // Right-click: dispatch a `contextmenu` DOM event to the element
                 // under the cursor. If any handler calls `preventDefault()` the
-                // native menu is suppressed; otherwise the OS context menu shows.
+                // menu is suppressed; otherwise it shows, scoped to what was
+                // clicked (input vs. page).
+                self.inline_menu = None;
                 let size = window.inner_size();
+                let width = size.width.max(1);
+                let height = size.height.max(1);
+                let mx = self.current_mouse_pos.x;
+                let my = self.current_mouse_pos.y;
                 let layout_root = {
                     let dom = self.dom_handle_render.dom.borrow();
-                    build_layout_tree(&dom, size.width.max(1), size.height.max(1), self.scroll_y)
+                    build_layout_tree(&dom, width, height, self.scroll_y)
                 };
                 // Reset once for the whole dispatch: any handler calling
-                // `preventDefault()` suppresses the native menu.
+                // `preventDefault()` suppresses the menu.
                 self.dom_handle_render
                     .suppress_context_menu
                     .store(false, Ordering::Relaxed);
-                if let Some(target_box) = hit_test_layout_box_scrolled(
-                    &layout_root,
-                    self.current_mouse_pos.x,
-                    self.current_mouse_pos.y,
-                    &self.element_scrolls,
-                ) {
-                    let node_id = target_box.node_id;
+                let target =
+                    hit_test_layout_box_scrolled(&layout_root, mx, my, &self.element_scrolls).map(
+                        |hit| {
+                            (
+                                hit.node_id,
+                                hit.tag,
+                                hit.element_id.clone(),
+                                hit.value.clone(),
+                                hit.rect,
+                                hit.style.font_size,
+                                hit.style.padding,
+                            )
+                        },
+                    );
+                if let Some((node_id, ..)) = target {
                     let handlers = self
                         .dom_handle_render
                         .event_registry
@@ -2393,23 +2521,84 @@ impl ApplicationHandler for BrowserApp {
                     .suppress_context_menu
                     .store(false, Ordering::Relaxed);
                 if !suppressed {
-                    #[cfg(target_os = "macos")]
+                    let mut menu_ctx = MenuContext {
+                        editable: false,
+                        has_selection: !self.selection.selected_text_buffer.is_empty(),
+                        can_inspect: self.devtools_root_id.is_some(),
+                    };
+                    // Right-clicking an input focuses it (Chrome does), so
+                    // Paste and Select All target the field under the pointer.
+                    if let Some((node_id, tag, element_id, value, rect, font_size, padding)) =
+                        target
                     {
-                        *self.menu_result.lock().unwrap() = 0;
-                        context_menu::show_context_menu(
-                            &window,
-                            self.current_mouse_pos.x,
-                            self.current_mouse_pos.y,
-                        );
+                        if tag == Tag::Input {
+                            let already = (*self.dom_handle_render.focused_input.borrow())
+                                .map(|(focused, _)| focused == node_id)
+                                .unwrap_or(false);
+                            if !already {
+                                let is_address = element_id.as_deref() == Some("__pwb_address");
+                                let len = value.as_deref().unwrap_or("").chars().count();
+                                let caret = if is_address {
+                                    len
+                                } else {
+                                    let font_size = font_size
+                                        .and_then(|uv| {
+                                            resolve_unit(
+                                                uv,
+                                                rect.width(),
+                                                width as f32,
+                                                height as f32,
+                                            )
+                                        })
+                                        .unwrap_or(0.025 * height as f32);
+                                    let pad = padding
+                                        .and_then(|uv| {
+                                            resolve_unit(
+                                                uv,
+                                                rect.width(),
+                                                width as f32,
+                                                height as f32,
+                                            )
+                                        })
+                                        .unwrap_or(0.012 * height as f32);
+                                    caret_index_at_x(
+                                        value.as_deref().unwrap_or(""),
+                                        font_size,
+                                        mx - (rect.left() + pad + 1.0),
+                                    )
+                                };
+                                *self.dom_handle_render.focused_input.borrow_mut() =
+                                    Some((node_id, caret));
+                                // The URL bar selects its URL on focus, like
+                                // Ctrl/Cmd+L; a regular field places the caret.
+                                self.input_selection =
+                                    (is_address && len > 0).then_some((node_id, 0, len));
+                                self.selection = TextSelection::default();
+                            }
+                            menu_ctx.editable = true;
+                            menu_ctx.has_selection = self.input_selection_range().is_some();
+                        } else {
+                            // A page menu acts on the page: drop input focus so
+                            // Select All copies page text, not a field that was
+                            // focused before the right-click.
+                            *self.dom_handle_render.focused_input.borrow_mut() = None;
+                            self.input_selection = None;
+                        }
+                    }
+                    let entries = context_menu::entries(&menu_ctx);
+                    #[cfg(any(target_os = "macos", target_os = "windows"))]
+                    {
+                        *self.menu_result.lock().unwrap() = None;
+                        context_menu::show_context_menu(&window, mx, my, &entries);
                         // The native menu runs a nested event loop; once it
                         // closes, apply the chosen action.
-                        self.apply_context_menu_choice();
+                        self.apply_pending_menu_action();
                     }
-                    #[cfg(not(target_os = "macos"))]
+                    #[cfg(not(any(target_os = "macos", target_os = "windows")))]
                     {
-                        // winit has no portable native popup: paint the menu in
-                        // the window and resolve the next click ourselves.
-                        self.inline_menu = Some(self.current_mouse_pos);
+                        // No popup-menu API on Linux/Wayland: paint the menu
+                        // in the window and resolve the next click ourselves.
+                        self.inline_menu = Some((self.current_mouse_pos, entries));
                         println!("[ContextMenu] In-window menu opened");
                     }
                 } else {
@@ -2558,6 +2747,26 @@ impl ApplicationHandler for BrowserApp {
                         input_focus,
                     );
 
+                    // Input text selection paints over the input's single text
+                    // run (the renderer draws the value, then this overlay).
+                    if let (Some((focused_id, _)), Some((selected_node, anchor, caret))) =
+                        (input_focus, self.input_selection)
+                    {
+                        if selected_node == focused_id {
+                            let (start, end) = (anchor.min(caret), anchor.max(caret));
+                            draw_input_selection(
+                                &mut self.pixmap,
+                                &layout_root,
+                                focused_id,
+                                start,
+                                end,
+                                width as f32,
+                                height as f32,
+                                &self.element_scrolls,
+                            );
+                        }
+                    }
+
                     // Re-hit-test the cursor against the freshly laid-out tree: a click
                     // handler may have resized/moved the element under the pointer, so
                     // the old icon (e.g. pointer over a now-shrunk button) must update.
@@ -2644,18 +2853,20 @@ impl ApplicationHandler for BrowserApp {
                     self.last_tooltip = tooltip_title;
 
                     // In-window context menu paints last, above page content.
-                    if let Some(pos) = self.inline_menu {
+                    if let Some((pos, entries)) = &self.inline_menu {
                         let rect = context_menu::inline::menu_rect(
                             pos.x,
                             pos.y,
                             width as f32,
                             height as f32,
+                            entries,
                         );
                         context_menu::inline::draw(
                             &mut self.pixmap,
                             rect,
                             self.current_mouse_pos.x,
                             self.current_mouse_pos.y,
+                            entries,
                         );
                     }
 

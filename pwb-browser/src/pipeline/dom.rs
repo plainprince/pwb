@@ -244,6 +244,53 @@ pub(super) fn compute_selected_text(
     out
 }
 
+/// The document range `Ctrl/Cmd+A` should select: the first and last text
+/// node of page content, as `(start_node, start_char, end_node, end_char)`.
+///
+/// Browser chrome and devtools are skipped, so select-all copies the page, not
+/// the tab strip or the inspector. Missing/empty page text returns `None`.
+pub(super) fn select_all_page_range(
+    root: &crate::dom::DomNode,
+) -> Option<(usize, usize, usize, usize)> {
+    fn walk(
+        node: &crate::dom::DomNode,
+        first: &mut Option<(usize, usize)>,
+        last: &mut Option<(usize, usize)>,
+    ) {
+        let skipped = node.attributes.contains_key("data-devtools")
+            || node
+                .attributes
+                .get("id")
+                .map(|id| id.starts_with(crate::shell::CHROME_PREFIX))
+                .unwrap_or(false)
+            || node
+                .attributes
+                .get("display")
+                .map(|display| display == "none")
+                .unwrap_or(false);
+        if skipped {
+            return;
+        }
+        if let Some(text) = &node.text {
+            let len = text.chars().count();
+            if len > 0 {
+                first.get_or_insert((node.id, 0));
+                *last = Some((node.id, len));
+            }
+        }
+        for child in &node.children {
+            walk(child, first, last);
+        }
+    }
+
+    let (mut first, mut last) = (None, None);
+    walk(root, &mut first, &mut last);
+    let (start_node, start_char) = first?;
+    let (end_node, end_char) = last?;
+    (start_node != end_node || start_char != end_char)
+        .then_some((start_node, start_char, end_node, end_char))
+}
+
 /// Delete the text between `(start_node, start_char)` and
 /// `(end_node, end_char)`, walking the DOM in document order (the same range
 /// [`compute_selected_text`] reads). Empty text nodes are removed. Returns

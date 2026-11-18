@@ -18,7 +18,8 @@ mod tests;
 pub use core::{child_render_state, RenderState, SelectionPoint, TextSelection};
 pub use entry::{render_dom_into_pixmap, render_dom_to_pixmap, ScrollbarInfo};
 pub use highlight::{
-    draw_hover_highlight, draw_hover_highlight_scrolled, draw_selected_highlight_scrolled,
+    draw_hover_highlight, draw_hover_highlight_scrolled, draw_input_selection,
+    draw_selected_highlight_scrolled,
 };
 pub use hit::{
     find_scroll_container, hit_test_cursor_from_layout, hit_test_cursor_from_layout_scrolled,

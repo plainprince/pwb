@@ -18,6 +18,7 @@ pub mod pipeline;
 pub mod render;
 pub mod resolver;
 pub mod shell;
+pub mod shortcuts;
 pub mod style;
 pub mod theme;
 pub mod webapi;

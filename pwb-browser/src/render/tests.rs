@@ -608,6 +608,52 @@ fn test_input_renders_border_value_and_caret() {
 }
 
 #[test]
+fn test_input_selection_overlays_the_selected_range() {
+    use crate::style::ComputedStyle;
+    use pwb_core::spec::Tag;
+    let style = ComputedStyle {
+        background_color: pwb_core::spec::Color::WHITE,
+        text_color: pwb_core::spec::Color::BLACK,
+        ..ComputedStyle::default()
+    };
+    let input = crate::layout::LayoutBox {
+        node_id: 5,
+        tag: Tag::Input,
+        element_id: None,
+        rect: Rect::from_xywh(10.0, 10.0, 200.0, 30.0).unwrap(),
+        style,
+        text: None,
+        value: Some("Hi".to_string()),
+        display_value: None,
+        placeholder: None,
+        icon: None,
+        image_src: None,
+        children: vec![],
+        overflow: pwb_core::spec::OverflowStyle::Visible,
+        content_height: 30.0,
+    };
+    let mut pixmap = Pixmap::new(300, 60).unwrap();
+    pixmap.fill(SkiaColor::WHITE);
+
+    // Select "Hi" (chars 0..2) over the rendered text run.
+    crate::render::draw_input_selection(&mut pixmap, &input, 5, 0, 2, 300.0, 60.0, &HashMap::new());
+    let text_left = 10.0 + 7.0 + 1.0;
+    let tinted = pixmap.pixel(text_left as u32 + 2, 22).unwrap();
+    assert!(
+        tinted.blue() > tinted.red(),
+        "selected input text is tinted by the theme selection color, got {:?}",
+        tinted
+    );
+    // A point after the value stays white.
+    let plain = pixmap.pixel(150, 22).unwrap();
+    assert!(
+        plain.red() > 240 && plain.green() > 240 && plain.blue() > 240,
+        "unselected area is untouched, got {:?}",
+        plain
+    );
+}
+
+#[test]
 fn test_input_caret_moves_to_index_not_pinned_at_zero() {
     use crate::dom::{Dom, DomNode};
     use pwb_core::spec::Tag as SpecTag;

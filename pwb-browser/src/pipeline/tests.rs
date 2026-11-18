@@ -1,8 +1,8 @@
-use super::app::insert_text_at_caret;
+use super::app::{delete_text_range, replace_text_range};
 use super::devtools::apply_scroll_to_bottom;
 use super::dom::{
     ancestor_node_ids, compute_selected_text, delete_selected_text, element_node_id,
-    find_title_for_node, link_href, node_in_subtree, tree_row_target_node,
+    find_title_for_node, link_href, node_in_subtree, select_all_page_range, tree_row_target_node,
 };
 use super::resize::{resize_bounds, resize_new_dimensions};
 use crate::dom::DomNode;
@@ -272,15 +272,64 @@ fn test_compute_selected_text_unknown_node() {
 #[test]
 fn test_insert_text_at_caret() {
     assert_eq!(
-        insert_text_at_caret("hello", 5, " world"),
+        replace_text_range("hello", 5, 5, " world"),
         ("hello world".to_string(), 11)
     );
     // Caret is clamped and control characters are dropped.
     assert_eq!(
-        insert_text_at_caret("ab", 99, "\nX\t"),
+        replace_text_range("ab", 99, 99, "\nX\t"),
         ("abX".to_string(), 3)
     );
-    assert_eq!(insert_text_at_caret("ab", 1, "Z"), ("aZb".to_string(), 2));
+    assert_eq!(replace_text_range("ab", 1, 1, "Z"), ("aZb".to_string(), 2));
+}
+
+#[test]
+fn test_replace_and_delete_selected_ranges() {
+    // Typing over a selection replaces it and leaves the caret after the text.
+    assert_eq!(
+        replace_text_range("hello world", 6, 11, "there"),
+        ("hello there".to_string(), 11)
+    );
+    // Deleting a selection leaves the caret where the range started.
+    assert_eq!(
+        delete_text_range("hello world", 5, 11),
+        ("hello".to_string(), 5)
+    );
+    // Reversed/clamped ranges are normalized.
+    assert_eq!(delete_text_range("abc", 3, 1), ("a".to_string(), 1));
+}
+
+#[test]
+fn test_select_all_page_range_skips_chrome_and_devtools() {
+    let mut chrome_attrs = HashMap::new();
+    chrome_attrs.insert("id".to_string(), "__pwb_chrome".to_string());
+    let chrome = DomNode {
+        id: 6,
+        tag: Tag::View,
+        attributes: chrome_attrs,
+        text: None,
+        children: vec![tn(7, "PlainWeb")],
+    };
+    let mut dev_attrs = HashMap::new();
+    dev_attrs.insert("data-devtools".to_string(), "root".to_string());
+    let devtools = DomNode {
+        id: 5,
+        tag: Tag::View,
+        attributes: dev_attrs,
+        text: None,
+        children: vec![tn(8, "Elements")],
+    };
+    let page = root_with(vec![
+        tn(2, "hello"),
+        chrome.clone(),
+        tn(3, "world"),
+        devtools,
+    ]);
+    assert_eq!(select_all_page_range(&page), Some((2, 0, 3, 5)));
+
+    // A page with no text (only chrome) has nothing to select.
+    let empty = root_with(vec![chrome]);
+    assert_eq!(select_all_page_range(&empty), None);
 }
 
 #[test]

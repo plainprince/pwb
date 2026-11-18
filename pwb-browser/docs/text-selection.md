@@ -7,7 +7,7 @@ The PlainWeb Browser needs to support **text selection** with:
 - Visual feedback during selection
 - `Ctrl+C`/`Cmd+C` copy, `Ctrl+X`/`Cmd+X` cut, `Ctrl+V`/`Cmd+V` paste
 - Cross-platform clipboard support (including Linux clipboard managers)
-- Right-click context menu with Copy
+- Right-click context menu with Cut/Copy/Paste/Select All/Inspect
 
 ## Solution
 
@@ -18,33 +18,33 @@ The browser tracks selection state in a `TextSelection` struct:
 ```rust
 #[derive(Debug, Clone, PartialEq, Default)]
 pub struct TextSelection {
-    pub start: Option<SelectionPoint>,
-    pub current: Option<SelectionPoint>,
+    pub start_node_id: Option<usize>,
+    pub start_char_pos: Option<usize>,
+    pub end_node_id: Option<usize>,
+    pub end_char_pos: Option<usize>,
     pub is_selecting: bool,
     pub selected_text_buffer: String,
 }
 ```
 
+Inputs have a separate selection: `BrowserApp::input_selection` stores
+`(node_id, anchor, caret)` for the focused field. The anchor stays fixed while
+Shift+Left/Right/Home/End moves the caret, so the range can extend in either
+direction; the selected range is stored in the DOM `value` only as text, and
+the renderer paints the highlight over the input's text run.
+
 ### Selection Flow
 
-1. **Mouse Down**: Set selection start and begin tracking
-   ```rust
-   selection.start = Some(current_mouse_pos);
-   selection.current = Some(current_mouse_pos);
-   selection.is_selecting = true;
-   ```
+1. **Mouse Down**: Anchor the selection at the character under the cursor
+   (`hit_test_text_char_scrolled` gives the text node id and character index)
+   and set `is_selecting`.
 
-2. **Mouse Move**: Update selection end and redraw
-   ```rust
-   selection.current = Some(current_mouse_pos);
-   window.request_redraw();
-   ```
+2. **Mouse Move**: Update the end node/character and redraw; Shift+click
+   extends from the existing anchor.
 
-3. **Mouse Up**: Finalize the selected text buffer
-   ```rust
-   selection.is_selecting = false;
-   selection.selected_text_buffer = compute_selected_text(...);
-   ```
+3. **Mouse Up**: Finalize `selected_text_buffer` with
+   `compute_selected_text`, so Copy has the exact text without re-walking the
+   DOM.
 
 ### Clipboard Integration
 
@@ -66,18 +66,27 @@ fn clipboard(&mut self) -> Option<&mut Clipboard> {
 }
 ```
 
-Keyboard shortcuts are handled in the first `KeyboardInput` arm (later arms
-for pressed keys are unreachable):
+Keyboard shortcuts are resolved by `shortcuts::command` and handled before
+the page/input sees the key:
 
-- **Copy** (`Ctrl+C` / `Cmd+C`): copies page text selection, or the focused
-  input's value.
-- **Cut** (`Ctrl+X` / `Cmd+X`): copies then deletes the selection (or clears the
-  focused input).
-- **Paste** (`Ctrl+V` / `Cmd+V`): inserts clipboard text at the focused input's
-  caret.
+- **Select all** (`Ctrl/Cmd+A`): selects the whole focused input value, else
+  all page text (browser chrome and devtools excluded).
+- **Copy** (`Ctrl+C` / `Cmd+C`): copies the selected input range or page text.
+  With nothing selected it copies nothing, matching browsers.
+- **Cut** (`Ctrl+X` / `Cmd+X`): copies then deletes the selected input range or
+  page text.
+- **Paste** (`Ctrl+V` / `Cmd+V`): replaces the selected input range (or inserts
+  at the caret) with clipboard text.
+- **Editing**: typing, Backspace, and Delete replace/delete an input selection;
+  Shift+Left/Right/Home/End extend or shrink it.
 
-The same long-lived handle backs the right-click **Copy** action. The in-window
-menu repaints on every pointer move, so the row under the cursor is highlighted.
+Browser shortcuts accept either primary modifier (`Ctrl` on Linux/Windows,
+`Cmd` on macOS — both work on either platform), plus `Alt` history/navigation
+bindings. See `pwb-browser/src/shortcuts.rs` for the full table.
+
+The same long-lived handle backs the right-click menu actions. The in-window
+Linux menu repaints on every pointer move, so the row under the cursor is
+highlighted.
 
 ### Visual Feedback
 
@@ -102,6 +111,9 @@ The renderer highlights selected text by:
 ## Future Directions
 
 1. **Double-click word selection**: Extend to support word-level selection
-2. **Drag-to-select**: Add mouse drag support for selection
-3. **Touch support**: Implement touch-based selection for mobile
-4. ~~**Context menu**: Add right-click context menu with copy option~~ — implemented (native on macOS, in-window elsewhere)
+2. **Touch support**: Implement touch-based selection for mobile
+3. **Input selection by mouse drag**: Extend a range inside an input with the
+   pointer, not only with Shift+arrows
+4. ~~**Context menu**: Add right-click context menu with copy option~~ — implemented:
+   native AppKit (macOS) and Win32 (Windows 10/11), in-window on Linux
+   (Wayland/X11 expose no popup-menu API without a desktop toolkit)

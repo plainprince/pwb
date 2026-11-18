@@ -103,6 +103,9 @@ pub struct Shell {
     /// Chrome control currently under the pointer (`tab_2`, `back`, …); the
     /// tab strip shows its close button for hovered tabs.
     pub chrome_hover: Option<String>,
+    /// Recently closed tab URLs, newest last (`Ctrl/Cmd+Shift+T`). Session
+    /// state only — not persisted, so a restart starts with an empty stack.
+    pub closed: Vec<String>,
     path: Option<PathBuf>,
 }
 
@@ -116,6 +119,7 @@ impl Default for Shell {
             theme: "default-dark".to_string(),
             tab_scroll: 0,
             chrome_hover: None,
+            closed: Vec::new(),
             path: None,
         }
     }
@@ -218,18 +222,40 @@ impl Shell {
     /// tab replaces it with a fresh new tab (a browser always has a page).
     pub fn close_active(&mut self) -> Option<String> {
         if self.tabs.len() <= 1 {
+            let old = self.tabs[0].url.clone();
+            self.remember_closed(&old);
             let url = NEW_TAB_URL.to_string();
             self.tabs[0] = Tab::new(&url);
             self.active = 0;
             self.save();
             return Some(url);
         }
+        let removed = self.tabs[self.active].url.clone();
         self.tabs.remove(self.active);
+        self.remember_closed(&removed);
         if self.active >= self.tabs.len() {
             self.active = self.tabs.len() - 1;
         }
         self.save();
         Some(self.current_url().to_string())
+    }
+
+    /// Remember a closed tab for `Ctrl/Cmd+Shift+T`, keeping the last 10.
+    fn remember_closed(&mut self, url: &str) {
+        if url == NEW_TAB_URL {
+            return;
+        }
+        self.closed.push(url.to_string());
+        if self.closed.len() > 10 {
+            self.closed.remove(0);
+        }
+    }
+
+    /// Reopen the most recently closed tab. Returns the URL to load.
+    pub fn reopen_closed(&mut self) -> Option<String> {
+        let url = self.closed.pop()?;
+        self.new_tab(&url);
+        Some(url)
     }
 
     pub fn select(&mut self, index: usize) -> Option<String> {
@@ -1310,6 +1336,7 @@ mod tests {
             theme: "default-dark".to_string(),
             tab_scroll: 0,
             chrome_hover: None,
+            closed: Vec::new(),
             path: None,
         }
     }
@@ -1379,6 +1406,18 @@ mod tests {
         // window.
         assert_eq!(shell.close_tab(0).as_deref(), Some(NEW_TAB_URL));
         assert_eq!(shell.current_url(), NEW_TAB_URL);
+    }
+
+    #[test]
+    fn closing_then_reopening_a_tab_restores_it() {
+        let mut shell = shell();
+        shell.new_tab("second.plain");
+        assert_eq!(shell.close_active().as_deref(), Some("welcome.plain"));
+        assert_eq!(shell.tabs.len(), 1);
+        assert_eq!(shell.reopen_closed().as_deref(), Some("second.plain"));
+        assert_eq!(shell.current_url(), "second.plain");
+        // Reopening only walks the stack once.
+        assert_eq!(shell.reopen_closed(), None);
     }
 
     #[test]

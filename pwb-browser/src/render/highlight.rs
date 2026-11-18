@@ -51,7 +51,7 @@ pub fn draw_hover_highlight_scrolled(
 /// by walking from the root down to `b`. Used to draw highlights on boxes that
 /// were located by id (e.g. a devtools-selected element) rather than by
 /// hit-testing, where the scroll state is already folded in.
-fn box_screen_translation(
+pub(crate) fn box_screen_translation(
     b: &LayoutBox,
     root: &LayoutBox,
     scrolls: &HashMap<usize, f32>,
@@ -75,6 +75,84 @@ fn box_screen_translation(
         None
     }
     walk(root, b.node_id, 0.0, 0.0, scrolls).unwrap_or((0.0, 0.0))
+}
+
+/// Paint the selected character range of a focused `<input>`.
+///
+/// Inputs are rendered as a single text run, so selection is drawn as an
+/// overlay over that run (theme selection color) after the frame is
+/// rasterized. The geometry mirrors the input renderer: a 1px border plus the
+/// style's padding, with the value vertically centered.
+#[allow(clippy::too_many_arguments)]
+pub fn draw_input_selection(
+    pixmap: &mut tiny_skia::Pixmap,
+    layout_root: &LayoutBox,
+    node_id: usize,
+    start: usize,
+    end: usize,
+    vw: f32,
+    vh: f32,
+    scrolls: &HashMap<usize, f32>,
+) {
+    let Some(b) = crate::layout::find_box_by_id(layout_root, node_id) else {
+        return;
+    };
+    if b.tag != Tag::Input || start >= end {
+        return;
+    }
+    let value = b.value.as_deref().unwrap_or("");
+    let font_size = crate::layout::resolve_unit(
+        b.style
+            .font_size
+            .unwrap_or(pwb_core::spec::UnitValue::Px(15.0)),
+        b.rect.width(),
+        vw,
+        vh,
+    )
+    .unwrap_or(15.0);
+    let pad = crate::layout::resolve_unit(
+        b.style
+            .padding
+            .unwrap_or(pwb_core::spec::UnitValue::Px(7.0)),
+        b.rect.width(),
+        vw,
+        vh,
+    )
+    .unwrap_or(7.0);
+    let (tx, ty) = box_screen_translation(b, layout_root, scrolls);
+    let box_rect = Rect::from_xywh(
+        b.rect.left() + tx,
+        b.rect.top() + ty,
+        b.rect.width(),
+        b.rect.height(),
+    );
+    let Some(box_rect) = box_rect else { return };
+
+    let text_left = b.rect.left() + tx + pad + 1.0;
+    let x1 = text_left + super::text::caret_text_width(value, font_size, start);
+    let x2 = text_left + super::text::caret_text_width(value, font_size, end);
+    let height = (font_size * 1.2).max(8.0);
+    let top = b.rect.top() + ((b.rect.height() - height) / 2.0).max(0.0) + ty;
+    let Some(rect) = Rect::from_xywh(x1, top, (x2 - x1).max(1.0), height) else {
+        return;
+    };
+    let Some(rect) = crate::render::core::intersect_opt(Some(box_rect), rect) else {
+        return;
+    };
+
+    let color = crate::theme::with_active(|theme| theme.page.selection);
+    let mut paint = Paint::default();
+    // Translucent: the glyphs stay legible while the range reads as selected
+    // (the overlay is painted after the text).
+    paint.set_color(tiny_skia::Color::from_rgba8(color.r, color.g, color.b, 150));
+    let path = PathBuilder::from_rect(rect);
+    pixmap.fill_path(
+        &path,
+        &paint,
+        tiny_skia::FillRule::Winding,
+        Transform::identity(),
+        None,
+    );
 }
 
 /// Draw the inspect highlight (optional translucent fill + 2px blue outline)

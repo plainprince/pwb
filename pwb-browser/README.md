@@ -11,8 +11,8 @@
 - **HiDPI / OS scaling**: Layout runs in CSS pixels and rasterizes into the window's physical pixel buffer, so on Retina, Wayland fractional scaling, or a Windows monitor with 125–200% scaling the page is the right size *and* drawn at full device resolution (vector text, borders, and images are not upscaled). The compositor's scale factor is followed live when the window changes monitors; `PWB_SCALE=<factor>` forces one when a compositor reports something unexpected.
 - **PlainJS runtime (`.pjs`)**: QuickJS-NG embedded engine executing `.pjs` scripts with custom `document` DOM manipulation APIs.
 - **Content-bound scrolling**: Scroll position capped to content height with a visual scrollbar.
-- **Text selection & clipboard**: Text selection with `Ctrl+C`/`Cmd+C` copy, `Ctrl+X`/`Cmd+X` cut, and `Ctrl+V`/`Cmd+V` paste into focused inputs via one long-lived `arboard` handle (so X11/Wayland clipboard managers keep the contents).
-- **Context menu**: Right-click selects "Copy" or "Inspect Element"; native AppKit menu on macOS, an in-window menu on Linux/Windows with a live hover highlight (click outside or press Escape to dismiss).
+- **Text selection & clipboard**: Page and input text selection, `Ctrl/Cmd+A` select all, `Shift+arrows`/`Home`/`End` input selection, `Ctrl/Cmd+C/X/V` copy/cut/paste (Copy needs a selection, Paste replaces it), all through one long-lived `arboard` handle (so X11/Wayland clipboard managers keep the contents).
+- **Context menu**: Right-click shows native menus on macOS (AppKit) and Windows 10/11 (Win32), and an in-window menu on Linux (X11/Wayland expose no popup-menu API to winit apps without a desktop toolkit). The items are context-sensitive: Cut/Copy only with a selection, Paste inside inputs and the URL bar, Select All, and Inspect Element (disabled when devtools are unavailable). Click outside or press Escape to dismiss.
 - **PNG images**: `<image>`/`<img>` decodes PNGs (file paths, `file://`, or `data:image/png;base64,…`), caches them, and scales them to the layout box; unreadable sources show a placeholder.
 - **Native links**: Clicking `<link href="…">`/`<a href="…">` (or text inside it) follows the target through the normal navigation path, with no JavaScript required.
 - **Downloads**: `Ctrl/Cmd+S` saves the current page as a `.pwb` bundle plus a `<name>_files/` folder with its images (inline `data:` images and on-disk assets). Links and addresses pointing at a file PlainWeb cannot render — images, PDFs, or any unknown extension — download to disk instead of failing, with the type detected from the extension or the file's leading bytes. Files go to `PWB_DOWNLOADS`, else `~/Downloads`, else `~/.pwb/downloads`, and never overwrite an existing file.
@@ -71,7 +71,7 @@ The page script (and devtools) get these globals, backed by Rust:
 - `fetch(url, {method, headers, body})` — async HTTP on a background thread; returns a Promise with `ok`, `status`, `statusText`, `headers`, `text()`, `json()`, `arrayBuffer()`. CORS is enforced by default: cross-origin http(s) responses must send `Access-Control-Allow-Origin: *` (same-origin file/relative requests are always allowed). Build with `--features permissive-cors` to opt out for local development.
 - `setTimeout` / `setInterval` / `clearTimeout` / `clearInterval` — driven by the winit event loop.
 - `localStorage` / `sessionStorage` — `getItem`/`setItem`/`removeItem`/`clear`/`key`/`length`. `localStorage` persists per bundle to `~/.pwb/<bundle-hash>.json` (override with `PWB_STORAGE_DIR`).
-- `alert` / `confirm` / `prompt` — native dialogs on macOS (NSAlert), Linux (zenity/kdialog/yad via `tinyfiledialogs`), and Windows (task dialogs), with console fallbacks when no GUI backend is available (`PWB_HEADLESS` forces the fallback). Right-click menus are native on macOS and painted in-window on other platforms.
+- `alert` / `confirm` / `prompt` — native dialogs on macOS (NSAlert), Linux (zenity/kdialog/yad via `tinyfiledialogs`), and Windows (task dialogs), with console fallbacks when no GUI backend is available (`PWB_HEADLESS` forces the fallback). Right-click menus are native on macOS and Windows, and painted in-window on Linux.
 - `crypto.getRandomValues()` / `crypto.randomUUID()` and `btoa` / `atob` (Latin-1 binary strings).
 - `performance.now()` — monotonic milliseconds.
 - DOM building: `document.createElement(tag)`, `el.appendChild` / `removeChild` / `remove`, `el.setAttribute` / `getAttribute` / `removeAttribute`, plus `document.body`.
@@ -136,17 +136,23 @@ Detailed design decisions and architecture documentation live in the [`docs/`](.
 Every page is rendered under a fixed browser chrome:
 
 - **Tabs** — click a tab to switch, `+` opens a new one. `Ctrl/Cmd+T` opens a
-  tab; `Ctrl/Cmd+W` closes the active tab (the last tab becomes
-  `welcome.plain`).
-- **Address bar** — `Ctrl/Cmd+L` focuses it, Enter navigates, and a bare word
-  becomes `search.plain?q=…`. The current URL is always visible.
-- **History** — `Alt+Left` / `Alt+Right` and the `Back` / `Fwd` buttons walk
-  each tab's history. `history.plain` lists the session.
-- **Reload** — `Ctrl/Cmd+R` or the `Reload` button.
+  tab, `Ctrl/Cmd+W` closes the active tab (the last tab becomes
+  `welcome.plain`), `Ctrl/Cmd+Shift+T` reopens the last closed tab,
+  `Ctrl+Tab` / `Ctrl+Shift+Tab` (and `Ctrl/Cmd+PageDown`/`PageUp`) cycle tabs,
+  and `Ctrl/Cmd+1…8` / `Ctrl/Cmd+9` jump to a tab / the last tab.
+- **Address bar** — `Ctrl/Cmd+L` (or `Alt+D`, `F6`) focuses and selects the
+  URL, Enter navigates, and a bare word becomes `search.plain?q=…`. The
+  current URL is always visible.
+- **History** — `Alt+Left` / `Alt+Right`, `Ctrl/Cmd+[` / `Ctrl/Cmd+]`, and the
+  `Back` / `Fwd` buttons walk each tab's history. `history.plain` lists the
+  session.
+- **Reload** — `Ctrl/Cmd+R`, `F5`, or the `Reload` button.
 - **Save page** — `Ctrl/Cmd+S` writes the page bundle and its images to the
   downloads directory (see above).
 - **Bookmarks** — `Ctrl/Cmd+D` or the `Save` button toggles the current page;
   `bookmarks.plain` lists saved pages as native links.
+- **DevTools** — `F12`, `Ctrl/Cmd+Shift+I/J`, or `Cmd+Option+I/J` on macOS;
+  `Ctrl/Cmd+Shift+C` (and `Cmd+Option+C`) opens the inspector in pick mode.
 - **Connection badge** — `● N peers` (green) or `● offline` (red) mirrors the
   live peer table; clicking it opens `network.plain`.
 
