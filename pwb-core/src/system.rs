@@ -17,6 +17,7 @@
 //! - `nodes.plain`   — peer node routing, health registry, and connection links.
 //! - `network.plain` — this node's addresses, peer table, and local services.
 //! - `help.plain`    — system-domain index plus namespace and credit rules.
+//! - `shortcuts.plain` — keyboard and mouse shortcuts.
 //! - `chat.plain`    — direct end-to-end-encrypted chat with another node.
 //! - `blog.plain`    — the global feed of blog entries, received live.
 //!
@@ -37,6 +38,7 @@ pub const RESERVED_SYSTEM_DOMAINS: &[&str] = &[
     "nodes.plain",
     "network.plain",
     "help.plain",
+    "shortcuts.plain",
     "chat.plain",
     "blog.plain",
     // Internal browser tools: no TLD, blocked so user sites cannot claim them.
@@ -60,6 +62,8 @@ pub enum SystemDomain {
     Network,
     /// `help.plain` — usage help and the system-domain index.
     Help,
+    /// `shortcuts.plain` — keyboard and mouse shortcuts.
+    Shortcuts,
     /// `chat.plain` — direct end-to-end-encrypted peer chat.
     Chat,
     /// `blog.plain` — the single global feed of blog entries.
@@ -77,6 +81,7 @@ impl SystemDomain {
             SystemDomain::Nodes => "nodes.plain",
             SystemDomain::Network => "network.plain",
             SystemDomain::Help => "help.plain",
+            SystemDomain::Shortcuts => "shortcuts.plain",
             SystemDomain::Chat => "chat.plain",
             SystemDomain::Blog => "blog.plain",
         }
@@ -95,6 +100,7 @@ impl SystemDomain {
             "nodes.plain" => Some(SystemDomain::Nodes),
             "network.plain" => Some(SystemDomain::Network),
             "help.plain" => Some(SystemDomain::Help),
+            "shortcuts.plain" => Some(SystemDomain::Shortcuts),
             "chat.plain" => Some(SystemDomain::Chat),
             "blog.plain" => Some(SystemDomain::Blog),
             _ => None,
@@ -472,6 +478,7 @@ mod tests {
             ("nodes.plain", SystemDomain::Nodes),
             ("network.plain", SystemDomain::Network),
             ("help.plain", SystemDomain::Help),
+            ("shortcuts.plain", SystemDomain::Shortcuts),
             ("chat.plain", SystemDomain::Chat),
             ("blog.plain", SystemDomain::Blog),
         ] {

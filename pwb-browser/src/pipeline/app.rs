@@ -72,7 +72,9 @@ pub struct BrowserApp {
     /// Open in-window context menu position and its rows (Linux): the menu is
     /// painted above the page and the next left click either selects an item
     /// or closes it.
-    pub(super) inline_menu: Option<(SelectionPoint, Vec<Entry>)>,
+    pub(super) inline_menu: Option<(SelectionPoint, Vec<Entry>, Option<usize>)>,
+    /// URL of the link the open menu was invoked on, backing its link actions.
+    pub(super) menu_link: Option<String>,
     /// True when the press that just closed the in-window menu must not turn
     /// into a page click on release.
     pub(super) swallow_click: bool,
@@ -91,6 +93,11 @@ pub struct BrowserApp {
     /// `(node_id, anchor, caret)` so Shift+arrows can extend in either
     /// direction. `None` when the focus has no selected range.
     pub(super) input_selection: Option<(usize, usize, usize)>,
+    /// Active click-drag inside an `<input>`: `(node_id, anchor char)`.
+    pub(super) input_drag: Option<(usize, usize)>,
+    /// Previous press inside an input, for double/triple-click detection:
+    /// `(time, node_id, x, y, click count)`.
+    pub(super) last_input_click: Option<(std::time::Instant, usize, f32, f32, u8)>,
     pub(super) current_mouse_pos: SelectionPoint,
     /// The tooltip currently drawn on screen (the dwell-approved `title`), so
     /// `about_to_wait` can tell whether a fully-dwelled candidate still needs
@@ -191,6 +198,67 @@ pub(super) fn replace_text_range(
 /// the new value and the caret where the range was removed.
 pub(super) fn delete_text_range(value: &str, start: usize, end: usize) -> (String, usize) {
     replace_text_range(value, start, end, "")
+}
+
+/// Map a horizontal position to a caret index inside an input, using the same
+/// font size and padding the input renderer uses.
+pub(super) fn input_caret_at_box(
+    input: &crate::layout::LayoutBox,
+    mx: f32,
+    width: f32,
+    height: f32,
+) -> usize {
+    let font_size = input
+        .style
+        .font_size
+        .and_then(|uv| resolve_unit(uv, input.rect.width(), width, height))
+        .unwrap_or(0.025 * height);
+    let pad = input
+        .style
+        .padding
+        .and_then(|uv| resolve_unit(uv, input.rect.width(), width, height))
+        .unwrap_or(0.012 * height);
+    caret_index_at_x(
+        input.value.as_deref().unwrap_or(""),
+        font_size,
+        mx - (input.rect.left() + pad + 1.0),
+    )
+}
+
+/// The character range of the word at `caret` (an insertion point between
+/// characters). A run of punctuation or whitespace counts as its own word, so
+/// double-clicking a separator selects that run rather than nothing.
+pub(super) fn word_range_at(value: &str, caret: usize) -> (usize, usize) {
+    let chars: Vec<char> = value.chars().collect();
+    if chars.is_empty() {
+        return (0, 0);
+    }
+    let word = |ch: char| ch.is_alphanumeric() || ch == '_';
+    let class = |ch: char| {
+        if word(ch) {
+            0u8
+        } else if ch.is_whitespace() {
+            1
+        } else {
+            2
+        }
+    };
+    // The caret sits between characters: at whitespace, prefer the word on the
+    // left (a double-click just after a word should select that word).
+    let mut index = caret.min(chars.len() - 1);
+    if chars[index].is_whitespace() && index > 0 && word(chars[index - 1]) {
+        index -= 1;
+    }
+    let kind = class(chars[index]);
+    let mut start = index;
+    while start > 0 && class(chars[start - 1]) == kind {
+        start -= 1;
+    }
+    let mut end = index + 1;
+    while end < chars.len() && class(chars[end]) == kind {
+        end += 1;
+    }
+    (start, end)
 }
 
 impl BrowserApp {
@@ -383,6 +451,7 @@ impl BrowserApp {
     /// Perform a context-menu action. Native menus record the choice while
     /// their nested event loop runs; the event loop applies it afterwards.
     fn apply_menu_action(&mut self, action: Action) {
+        let link = self.menu_link.clone();
         match action {
             Action::Copy => {
                 self.copy_current_text();
@@ -397,7 +466,21 @@ impl BrowserApp {
                 self.select_all();
             }
             Action::Inspect => self.open_inspector(),
+            Action::OpenLinkNewTab => {
+                if let Some(href) = link {
+                    self.shell.new_tab(&href);
+                    self.reveal_active_tab();
+                    self.refresh_chrome();
+                    self.load_url(&href);
+                }
+            }
+            Action::CopyLinkAddress => {
+                if let Some(href) = link {
+                    self.copy_text_to_clipboard(&href);
+                }
+            }
         }
+        self.menu_link = None;
     }
 
     /// Take the action recorded by a native menu, if any, and perform it.
@@ -405,6 +488,8 @@ impl BrowserApp {
         let action = self.menu_result.lock().unwrap().take();
         if let Some(action) = action {
             self.apply_menu_action(action);
+        } else {
+            self.menu_link = None;
         }
     }
 
@@ -1661,19 +1746,39 @@ impl ApplicationHandler for BrowserApp {
             WindowEvent::KeyboardInput {
                 event: key_event, ..
             } if key_event.state == ElementState::Pressed => {
-                // The in-window menu is modal: Escape closes it before any
-                // page/input handling. (This must live in the first keyboard
+                // The in-window menu is modal: arrows move its highlight,
+                // Enter runs the selected row, Escape closes it, and nothing
+                // else reaches the page. (This must live in the first keyboard
                 // arm; later arms for pressed keys are unreachable.)
                 if self.inline_menu.is_some() {
-                    if matches!(
-                        &key_event.logical_key,
-                        winit::keyboard::Key::Named(winit::keyboard::NamedKey::Escape)
-                    ) {
-                        self.inline_menu = None;
-                        window.request_redraw();
+                    use winit::keyboard::{Key, NamedKey};
+                    let mut close = false;
+                    let mut chosen = None;
+                    if let Some((_, entries, selected)) = &mut self.inline_menu {
+                        match &key_event.logical_key {
+                            Key::Named(NamedKey::Escape) => close = true,
+                            Key::Named(NamedKey::ArrowDown) => {
+                                *selected = context_menu::inline::step(entries, *selected, true);
+                            }
+                            Key::Named(NamedKey::ArrowUp) => {
+                                *selected = context_menu::inline::step(entries, *selected, false);
+                            }
+                            Key::Named(NamedKey::Enter) => {
+                                chosen = context_menu::inline::selected_action(entries, *selected);
+                                close = chosen.is_some();
+                            }
+                            _ => {}
+                        }
                     }
-                    // The menu is modal: no typing or shortcuts reach the page
-                    // while it is open.
+                    if close {
+                        self.inline_menu = None;
+                    }
+                    if let Some(action) = chosen {
+                        self.apply_menu_action(action);
+                        let size = window.inner_size();
+                        refresh_devtools(&self.dom_handle_render, (size.width, size.height));
+                    }
+                    window.request_redraw();
                     return;
                 }
 
@@ -1906,7 +2011,10 @@ impl ApplicationHandler for BrowserApp {
                 // pointer, so every move over it needs a repaint. Page hover
                 // state (tooltips, cursors, inspect tint) stays frozen while
                 // the menu owns the pointer.
-                if self.inline_menu.is_some() {
+                if let Some((_, _, selected)) = &mut self.inline_menu {
+                    // Moving the pointer returns the highlight to the row
+                    // under it, taking over from keyboard selection.
+                    *selected = None;
                     window.set_cursor(CursorIcon::Default);
                     window.request_redraw();
                     return;
@@ -1920,6 +2028,25 @@ impl ApplicationHandler for BrowserApp {
                     let dom = self.dom_handle_render.dom.borrow();
                     build_layout_tree(&dom, size.width.max(1), size.height.max(1), self.scroll_y)
                 };
+
+                // Dragging inside an input extends its text selection. The
+                // caret follows the pointer even outside the field, clamping
+                // at either end of the value.
+                if let Some((drag_node, anchor)) = self.input_drag {
+                    if let Some(input_box) = find_box_by_id(&layout_root, drag_node) {
+                        let caret = input_caret_at_box(
+                            input_box,
+                            mx,
+                            size.width as f32,
+                            size.height as f32,
+                        );
+                        *self.dom_handle_render.focused_input.borrow_mut() =
+                            Some((drag_node, caret));
+                        self.input_selection =
+                            (anchor != caret).then_some((drag_node, anchor, caret));
+                        window.request_redraw();
+                    }
+                }
 
                 // Chrome hover state: tabs show their ×, and controls get a
                 // hover background. Rebuild only when the hovered control
@@ -2055,7 +2182,7 @@ impl ApplicationHandler for BrowserApp {
 
                         // In-window context menu: a click selects an item or
                         // dismisses the menu, and never reaches the page.
-                        if let Some((pos, entries)) = self.inline_menu.take() {
+                        if let Some((pos, entries, _)) = self.inline_menu.take() {
                             self.swallow_click = true;
                             let rect = context_menu::inline::menu_rect(
                                 pos.x,
@@ -2085,6 +2212,8 @@ impl ApplicationHandler for BrowserApp {
                         // 1. Grab a resize handle first (highest priority).
                         if let Some((node_id, edge)) = hit_test_resize_handle(&layout_root, mx, my)
                         {
+                            self.last_input_click = None;
+                            self.input_drag = None;
                             if let Some(b) = find_box_by_id(&layout_root, node_id) {
                                 let (min_w, max_w) = resize_bounds(
                                     &self.dom_handle_render,
@@ -2113,55 +2242,52 @@ impl ApplicationHandler for BrowserApp {
                         )
                         .filter(|b| b.tag == Tag::Input)
                         {
-                            // 2. Clicking an `<input>` focuses it and places the
-                            //    caret at the click (no text selection).
-                            let font_size = input_box
-                                .style
-                                .font_size
-                                .and_then(|uv| {
-                                    resolve_unit(
-                                        uv,
-                                        input_box.rect.width(),
-                                        width as f32,
-                                        height as f32,
-                                    )
-                                })
-                                .unwrap_or(0.025 * height as f32);
-                            let pad = input_box
-                                .style
-                                .padding
-                                .and_then(|uv| {
-                                    resolve_unit(
-                                        uv,
-                                        input_box.rect.width(),
-                                        width as f32,
-                                        height as f32,
-                                    )
-                                })
-                                .unwrap_or(0.012 * height as f32);
+                            // 2. Clicking an `<input>` focuses it: the first
+                            //    click places the caret, a double-click selects
+                            //    the word, a triple-click selects everything.
+                            //    A press also starts a drag selection.
                             let value = input_box.value.as_deref().unwrap_or("");
+                            let value_len = value.chars().count();
+                            let click_caret =
+                                input_caret_at_box(input_box, mx, width as f32, height as f32);
+                            let now = std::time::Instant::now();
+                            let count = match self.last_input_click {
+                                Some((at, node, x, y, count))
+                                    if node == input_box.node_id
+                                        && now.duration_since(at)
+                                            <= std::time::Duration::from_millis(450)
+                                        && (mx - x).abs() <= 6.0
+                                        && (my - y).abs() <= 6.0 =>
+                                {
+                                    (count + 1).min(3)
+                                }
+                                _ => 1,
+                            };
+                            self.last_input_click = Some((now, input_box.node_id, mx, my, count));
                             // The unfocused address bar shows a shortened URL;
-                            // clicking it expands to the full one with the caret
-                            // at the end (select-all-like), so the caret index
-                            // never points into the wrong string.
+                            // a single click expands to the full one with the
+                            // caret at the end (select-all-like), so the caret
+                            // index never points into the wrong string.
                             let is_address =
                                 input_box.element_id.as_deref() == Some("__pwb_address");
-                            let caret = if is_address {
-                                value.chars().count()
-                            } else {
-                                caret_index_at_x(
-                                    value,
-                                    font_size,
-                                    mx - (input_box.rect.left() + pad + 1.0),
-                                )
+                            let (anchor, caret, selected) = match count {
+                                2 => {
+                                    let (start, end) = word_range_at(value, click_caret);
+                                    (start, end, Some((start, end)))
+                                }
+                                3 => (0, value_len, Some((0, value_len))),
+                                _ if is_address => (value_len, value_len, None),
+                                _ => (click_caret, click_caret, None),
                             };
                             *self.dom_handle_render.focused_input.borrow_mut() =
                                 Some((input_box.node_id, caret));
-                            self.input_selection = None;
+                            self.input_selection =
+                                selected.map(|(start, end)| (input_box.node_id, start, end));
+                            self.input_drag = Some((input_box.node_id, anchor));
                             self.selection = TextSelection::default();
                             println!(
-                                "[Input] Focused node {} at caret {}",
-                                input_box.node_id, caret
+                                "[Input] Focused node {} at caret {} (click {})",
+                                input_box.node_id, caret, count
                             );
                         } else {
                             // 2b. Clicking anywhere else blurs the focused input and
@@ -2169,6 +2295,8 @@ impl ApplicationHandler for BrowserApp {
                             //     cursor (layout only — frame rasterized on redraw).
                             *self.dom_handle_render.focused_input.borrow_mut() = None;
                             self.input_selection = None;
+                            self.input_drag = None;
+                            self.last_input_click = None;
                             // Chrome text (a tab label, the peer count) is UI, not
                             // page content: clicking it must not start a text
                             // selection or the click reads as a drag.
@@ -2234,6 +2362,13 @@ impl ApplicationHandler for BrowserApp {
                         }
 
                         self.selection.is_selecting = false;
+                        let dragged_input = self.input_drag.take().is_some();
+                        // A selection drag inside an input must not also click
+                        // whatever the pointer ended over (e.g. a link).
+                        if dragged_input && self.input_selection_range().is_some() {
+                            window.request_redraw();
+                            return;
+                        }
 
                         // Finalize the copied-text buffer from the finalized range.
                         if let (Some(sn), Some(sc)) =
@@ -2469,6 +2604,7 @@ impl ApplicationHandler for BrowserApp {
                 // menu is suppressed; otherwise it shows, scoped to what was
                 // clicked (input vs. page).
                 self.inline_menu = None;
+                self.menu_link = None;
                 let size = window.inner_size();
                 let width = size.width.max(1);
                 let height = size.height.max(1);
@@ -2491,12 +2627,17 @@ impl ApplicationHandler for BrowserApp {
                                 hit.tag,
                                 hit.element_id.clone(),
                                 hit.value.clone(),
-                                hit.rect,
-                                hit.style.font_size,
-                                hit.style.padding,
                             )
                         },
                     );
+                // Link actions need the resolved URL, not just the flag.
+                self.menu_link = target.as_ref().and_then(|(node_id, tag, ..)| {
+                    if *tag == Tag::Input {
+                        return None;
+                    }
+                    let dom = self.dom_handle_render.dom.borrow();
+                    super::dom::link_href(&dom.root, *node_id)
+                });
                 if let Some((node_id, ..)) = target {
                     let handlers = self
                         .dom_handle_render
@@ -2525,12 +2666,15 @@ impl ApplicationHandler for BrowserApp {
                         editable: false,
                         has_selection: !self.selection.selected_text_buffer.is_empty(),
                         can_inspect: self.devtools_root_id.is_some(),
+                        link: self.menu_link.is_some(),
                     };
+                    // A right-click is not part of a double-click sequence and
+                    // never starts an input drag.
+                    self.last_input_click = None;
+                    self.input_drag = None;
                     // Right-clicking an input focuses it (Chrome does), so
                     // Paste and Select All target the field under the pointer.
-                    if let Some((node_id, tag, element_id, value, rect, font_size, padding)) =
-                        target
-                    {
+                    if let Some((node_id, tag, element_id, value)) = target {
                         if tag == Tag::Input {
                             let already = (*self.dom_handle_render.focused_input.borrow())
                                 .map(|(focused, _)| focused == node_id)
@@ -2538,34 +2682,14 @@ impl ApplicationHandler for BrowserApp {
                             if !already {
                                 let is_address = element_id.as_deref() == Some("__pwb_address");
                                 let len = value.as_deref().unwrap_or("").chars().count();
-                                let caret = if is_address {
-                                    len
-                                } else {
-                                    let font_size = font_size
-                                        .and_then(|uv| {
-                                            resolve_unit(
-                                                uv,
-                                                rect.width(),
-                                                width as f32,
-                                                height as f32,
-                                            )
-                                        })
-                                        .unwrap_or(0.025 * height as f32);
-                                    let pad = padding
-                                        .and_then(|uv| {
-                                            resolve_unit(
-                                                uv,
-                                                rect.width(),
-                                                width as f32,
-                                                height as f32,
-                                            )
-                                        })
-                                        .unwrap_or(0.012 * height as f32);
-                                    caret_index_at_x(
-                                        value.as_deref().unwrap_or(""),
-                                        font_size,
-                                        mx - (rect.left() + pad + 1.0),
-                                    )
+                                let caret = match find_box_by_id(&layout_root, node_id) {
+                                    Some(input_box) if !is_address => input_caret_at_box(
+                                        input_box,
+                                        mx,
+                                        width as f32,
+                                        height as f32,
+                                    ),
+                                    _ => len,
                                 };
                                 *self.dom_handle_render.focused_input.borrow_mut() =
                                     Some((node_id, caret));
@@ -2598,7 +2722,7 @@ impl ApplicationHandler for BrowserApp {
                     {
                         // No popup-menu API on Linux/Wayland: paint the menu
                         // in the window and resolve the next click ourselves.
-                        self.inline_menu = Some((self.current_mouse_pos, entries));
+                        self.inline_menu = Some((self.current_mouse_pos, entries, None));
                         println!("[ContextMenu] In-window menu opened");
                     }
                 } else {
@@ -2853,7 +2977,7 @@ impl ApplicationHandler for BrowserApp {
                     self.last_tooltip = tooltip_title;
 
                     // In-window context menu paints last, above page content.
-                    if let Some((pos, entries)) = &self.inline_menu {
+                    if let Some((pos, entries, selected)) = &self.inline_menu {
                         let rect = context_menu::inline::menu_rect(
                             pos.x,
                             pos.y,
@@ -2867,6 +2991,7 @@ impl ApplicationHandler for BrowserApp {
                             self.current_mouse_pos.x,
                             self.current_mouse_pos.y,
                             entries,
+                            *selected,
                         );
                     }
 

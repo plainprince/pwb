@@ -228,6 +228,7 @@ pub fn resolve_url_or_file_with_context(
                 })
                 .render_system_network_page(),
             SystemDomain::Help => handler.render_system_help_page(),
+            SystemDomain::Shortcuts => handler.render_system_shortcuts_page(),
             // `chat.plain` renders the peer picker; `chat.plain?peer=<hex>`
             // renders that peer's transcript plus the composer, and
             // `chat.plain?room=<name>` the public room.
@@ -354,6 +355,7 @@ mod tests {
             "nodes.plain",
             "network.plain",
             "help.plain",
+            "shortcuts.plain",
             "blog.plain",
             "devtools.plain",
             // bare aliases and the nodes.plain connection-link form
@@ -382,6 +384,7 @@ mod tests {
         for (target, expected_title) in [
             ("network.plain", "network.plain — Network Status"),
             ("help.plain", "help.plain — PlainWeb Help"),
+            ("shortcuts.plain", "shortcuts.plain — Keyboard Shortcuts"),
             ("blog.plain", "blog.plain — The Global Feed"),
         ] {
             let bytes = resolve_url_or_file(target, &search, &host, &registry, &identity, 0)

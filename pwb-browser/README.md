@@ -12,7 +12,7 @@
 - **PlainJS runtime (`.pjs`)**: QuickJS-NG embedded engine executing `.pjs` scripts with custom `document` DOM manipulation APIs.
 - **Content-bound scrolling**: Scroll position capped to content height with a visual scrollbar.
 - **Text selection & clipboard**: Page and input text selection, `Ctrl/Cmd+A` select all, `Shift+arrows`/`Home`/`End` input selection, `Ctrl/Cmd+C/X/V` copy/cut/paste (Copy needs a selection, Paste replaces it), all through one long-lived `arboard` handle (so X11/Wayland clipboard managers keep the contents).
-- **Context menu**: Right-click shows native menus on macOS (AppKit) and Windows 10/11 (Win32), and an in-window menu on Linux (X11/Wayland expose no popup-menu API to winit apps without a desktop toolkit). The items are context-sensitive: Cut/Copy only with a selection, Paste inside inputs and the URL bar, Select All, and Inspect Element (disabled when devtools are unavailable). Click outside or press Escape to dismiss.
+- **Context menu**: Right-click shows native menus on macOS (AppKit) and Windows 10/11 (Win32), and an in-window menu on Linux (X11/Wayland expose no popup-menu API to winit apps without a desktop toolkit). The items are context-sensitive: Cut/Copy only with a selection, Paste inside inputs and the URL bar, Select All, Inspect Element (disabled when devtools are unavailable), and Open Link in New Tab / Copy Link Address on links. The painted Linux menu also supports ArrowUp/ArrowDown plus Enter. Click outside or press Escape to dismiss.
 - **PNG images**: `<image>`/`<img>` decodes PNGs (file paths, `file://`, or `data:image/png;base64,…`), caches them, and scales them to the layout box; unreadable sources show a placeholder.
 - **Native links**: Clicking `<link href="…">`/`<a href="…">` (or text inside it) follows the target through the normal navigation path, with no JavaScript required.
 - **Downloads**: `Ctrl/Cmd+S` saves the current page as a `.pwb` bundle plus a `<name>_files/` folder with its images (inline `data:` images and on-disk assets). Links and addresses pointing at a file PlainWeb cannot render — images, PDFs, or any unknown extension — download to disk instead of failing, with the type detected from the extension or the file's leading bytes. Files go to `PWB_DOWNLOADS`, else `~/Downloads`, else `~/.pwb/downloads`, and never overwrite an existing file.
@@ -29,10 +29,11 @@
 | **`nodes.plain`** | Decentralized peer routing table and health discovery. |
 | **`network.plain`** | Live node status: listen/discovery/STUN addresses, peer table, and local index/store/registry counts. |
 | **`help.plain`** | Help index linking every system domain, plus namespace, hosting, and credit rules. |
+| **`shortcuts.plain`** | Keyboard and mouse shortcut reference, linked from `help.plain`. |
 
 ## Official (`.plain`) vs unofficial (TLD list) sites
 
-`.plain` is the **official** namespace. It is strictly reserved for the browser's built-in pages: the system protocols (`search.plain`, `devtools.plain`, `register.plain`, `gossip.plain`, `nodes.plain`, `network.plain`, `help.plain`) and the shipped content pages (`welcome.plain`, `demo.plain`). No user, miner, or node can claim or register a `.plain` domain — registration attempts are rejected by `pwb-node::domain`.
+`.plain` is the **official** namespace. It is strictly reserved for the browser's built-in pages: the system protocols (`search.plain`, `devtools.plain`, `register.plain`, `gossip.plain`, `nodes.plain`, `network.plain`, `help.plain`, `shortcuts.plain`) and the shipped content pages (`welcome.plain`, `demo.plain`). No user, miner, or node can claim or register a `.plain` domain — registration attempts are rejected by `pwb-node::domain`.
 
 The **unofficial** namespace is the claimable TLD list `.pwb`, `.non`, `.yep`, `.lam`, `.arch`, `.vio`, `.meh`, `.son`, `.isuearchbtw`, `.org`, `.net`, `.com`: any site created and claimed by network participants (e.g. `mysite.pwb`, `club.non`). Names outside the list are refused. See [docs/tlds.md](../docs/tlds.md).
 

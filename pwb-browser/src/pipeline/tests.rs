@@ -1,4 +1,4 @@
-use super::app::{delete_text_range, replace_text_range};
+use super::app::{delete_text_range, replace_text_range, word_range_at};
 use super::devtools::apply_scroll_to_bottom;
 use super::dom::{
     ancestor_node_ids, compute_selected_text, delete_selected_text, element_node_id,
@@ -297,6 +297,21 @@ fn test_replace_and_delete_selected_ranges() {
     );
     // Reversed/clamped ranges are normalized.
     assert_eq!(delete_text_range("abc", 3, 1), ("a".to_string(), 1));
+}
+
+#[test]
+fn test_word_range_at_selects_the_word_under_the_caret() {
+    assert_eq!(word_range_at("hello world", 2), (0, 5));
+    // A caret at the end of a word belongs to that word, not the space.
+    assert_eq!(word_range_at("hello world", 5), (0, 5));
+    assert_eq!(word_range_at("hello world", 6), (6, 11));
+    assert_eq!(word_range_at("hello world", 99), (6, 11));
+    assert_eq!(word_range_at("hello", 0), (0, 5));
+    assert_eq!(word_range_at("", 3), (0, 0));
+    // Separators are their own run, and non-ASCII words stay whole.
+    assert_eq!(word_range_at("a+b", 1), (1, 2));
+    assert_eq!(word_range_at("a  b", 2), (1, 3));
+    assert_eq!(word_range_at("héllo wörld", 8), (6, 11));
 }
 
 #[test]

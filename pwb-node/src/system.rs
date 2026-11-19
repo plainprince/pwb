@@ -8,6 +8,7 @@
 //! - `register.plain`: Domain registration interface powered by sparse credit ledger.
 //! - `network.plain`: Live addresses, peer table, and local-service counts.
 //! - `help.plain`: System-domain index with namespace, hosting, and credit rules.
+//! - `shortcuts.plain`: Keyboard and mouse shortcuts.
 //! - `chat.plain`: Direct end-to-end-encrypted peer chat, plus the public
 //!   rooms at `chat.plain?room=<name>`.
 //! - `blog.plain`: The global feed of signed entries, received live.
@@ -20,6 +21,7 @@ mod network_page;
 mod registry_page;
 mod room_page;
 mod search_page;
+mod shortcuts_page;
 
 #[cfg(test)]
 mod tests;
@@ -34,3 +36,4 @@ pub use search_page::{
     render_search_pending_bundle, render_search_results_bundle,
     render_search_results_bundle_with_status,
 };
+pub use shortcuts_page::render_shortcuts_page_bundle;

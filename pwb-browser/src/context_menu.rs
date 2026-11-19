@@ -23,6 +23,8 @@ pub enum Action {
     Paste,
     SelectAll,
     Inspect,
+    OpenLinkNewTab,
+    CopyLinkAddress,
 }
 
 impl Action {
@@ -33,6 +35,8 @@ impl Action {
             Action::Paste => "Paste",
             Action::SelectAll => "Select All",
             Action::Inspect => "Inspect Element",
+            Action::OpenLinkNewTab => "Open Link in New Tab",
+            Action::CopyLinkAddress => "Copy Link Address",
         }
     }
 }
@@ -61,6 +65,8 @@ pub struct MenuContext {
     pub has_selection: bool,
     /// Devtools are mounted, so Inspect Element can open them.
     pub can_inspect: bool,
+    /// The click landed on a link, so its URL-specific actions apply.
+    pub link: bool,
 }
 
 /// Build the menu for `ctx`. Copy/Cut are omitted (not merely disabled) when
@@ -68,6 +74,11 @@ pub struct MenuContext {
 pub fn entries(ctx: &MenuContext) -> Vec<Entry> {
     let item = |action: Action, enabled: bool| Entry::Item(MenuItem { action, enabled });
     let mut rows = Vec::new();
+    if ctx.link {
+        rows.push(item(Action::OpenLinkNewTab, true));
+        rows.push(item(Action::CopyLinkAddress, true));
+        rows.push(Entry::Separator);
+    }
     if ctx.editable {
         if ctx.has_selection {
             rows.push(item(Action::Cut, true));
@@ -130,7 +141,7 @@ pub fn show_context_menu(
 /// invokes the matching action; a click anywhere else closes it without
 /// activating the page.
 pub(crate) mod inline {
-    use super::{Action, Entry};
+    use super::{Action, Entry, MenuItem};
     use crate::render::{draw_text_ab_glyph, RenderState, TextSelection};
     use pwb_core::spec::Color;
     use tiny_skia::{Paint, Pixmap, Rect, Transform};
@@ -204,6 +215,36 @@ pub(crate) mod inline {
             .collect()
     }
 
+    /// The next keyboard-selectable row in `entries`, skipping separators and
+    /// disabled rows and wrapping at the ends. `None` selects the first
+    /// (forward) or last (backward) row.
+    pub(crate) fn step(entries: &[Entry], current: Option<usize>, forward: bool) -> Option<usize> {
+        let len = entries.len();
+        if len == 0 {
+            return None;
+        }
+        let delta = if forward { 1 } else { len - 1 };
+        let mut index = current.unwrap_or(if forward { len - 1 } else { 0 });
+        for _ in 0..len {
+            index = (index + delta) % len;
+            if matches!(entries[index], Entry::Item(MenuItem { enabled: true, .. })) {
+                return Some(index);
+            }
+        }
+        None
+    }
+
+    /// The action of the keyboard-selected row, if it is one that can run.
+    pub(crate) fn selected_action(entries: &[Entry], selected: Option<usize>) -> Option<Action> {
+        match entries.get(selected?)? {
+            Entry::Item(MenuItem {
+                action,
+                enabled: true,
+            }) => Some(*action),
+            _ => None,
+        }
+    }
+
     /// Which enabled action (if any) the point hits.
     pub(crate) fn hit(rect: Rect, x: f32, y: f32, entries: &[Entry]) -> Option<Action> {
         if x < rect.left() || x >= rect.right() || y < rect.top() || y >= rect.bottom() {
@@ -223,13 +264,15 @@ pub(crate) mod inline {
         None
     }
 
-    /// Paint the menu, highlighting the row under the cursor.
+    /// Paint the menu, highlighting the row under the cursor or the row chosen
+    /// with the arrow keys.
     pub(crate) fn draw(
         pixmap: &mut Pixmap,
         rect: Rect,
         mouse_x: f32,
         mouse_y: f32,
         entries: &[Entry],
+        selected: Option<usize>,
     ) {
         let (_, item_h, _, padding) = metrics();
         let mut paint = Paint::default();
@@ -264,7 +307,15 @@ pub(crate) mod inline {
                     }
                 }
                 Entry::Item(item) => {
-                    let active = item.enabled && hovered == Some(item.action);
+                    // Arrow-key selection wins until the pointer moves; a
+                    // menu with no keyboard selection highlights the hovered
+                    // row instead.
+                    let active = item.enabled
+                        && if selected.is_some() {
+                            selected == Some(index)
+                        } else {
+                            hovered == Some(item.action)
+                        };
                     if active {
                         if let Some(row) = Rect::from_xywh(
                             rect.left() + 1.0,
@@ -356,6 +407,16 @@ mod macos {
             fn inspect_action(&self, _sender: &AnyObject) {
                 perform(Action::Inspect);
             }
+
+            #[method(openLinkNewTabAction:)]
+            fn open_link_new_tab_action(&self, _sender: &AnyObject) {
+                perform(Action::OpenLinkNewTab);
+            }
+
+            #[method(copyLinkAddressAction:)]
+            fn copy_link_address_action(&self, _sender: &AnyObject) {
+                perform(Action::CopyLinkAddress);
+            }
         }
     );
 
@@ -366,6 +427,8 @@ mod macos {
             Action::Paste => "pasteAction:",
             Action::SelectAll => "selectAllAction:",
             Action::Inspect => "inspectAction:",
+            Action::OpenLinkNewTab => "openLinkNewTabAction:",
+            Action::CopyLinkAddress => "copyLinkAddressAction:",
         }
     }
 
@@ -522,6 +585,7 @@ mod tests {
             editable: false,
             has_selection: false,
             can_inspect: true,
+            link: false,
         });
         assert_eq!(actions(&idle), vec![Action::SelectAll, Action::Inspect]);
         assert!(!actions(&idle).contains(&Action::Paste));
@@ -530,6 +594,7 @@ mod tests {
             editable: false,
             has_selection: true,
             can_inspect: true,
+            link: false,
         });
         assert_eq!(
             actions(&selected),
@@ -543,6 +608,7 @@ mod tests {
             editable: true,
             has_selection: false,
             can_inspect: true,
+            link: false,
         });
         assert_eq!(
             actions(&idle),
@@ -553,6 +619,7 @@ mod tests {
             editable: true,
             has_selection: true,
             can_inspect: true,
+            link: false,
         });
         assert_eq!(
             actions(&selected),
@@ -567,11 +634,32 @@ mod tests {
     }
 
     #[test]
+    fn link_menu_offers_url_actions_before_page_actions() {
+        let rows = entries(&MenuContext {
+            editable: false,
+            has_selection: false,
+            can_inspect: true,
+            link: true,
+        });
+        assert_eq!(
+            actions(&rows),
+            vec![
+                Action::OpenLinkNewTab,
+                Action::CopyLinkAddress,
+                Action::SelectAll,
+                Action::Inspect
+            ]
+        );
+        assert!(matches!(rows[2], Entry::Separator));
+    }
+
+    #[test]
     fn inspect_is_disabled_when_devtools_are_missing() {
         let rows = entries(&MenuContext {
             editable: false,
             has_selection: false,
             can_inspect: false,
+            link: false,
         });
         assert!(matches!(
             rows.last(),
@@ -595,6 +683,7 @@ mod tests {
             editable: true,
             has_selection: true,
             can_inspect: true,
+            link: false,
         });
         // Opening at the bottom-right keeps the whole menu on screen.
         let rect = inline::menu_rect(790.0, 590.0, 800.0, 600.0, &rows);
@@ -613,6 +702,7 @@ mod tests {
             editable: true,
             has_selection: true,
             can_inspect: true,
+            link: false,
         });
         let mut pixmap = tiny_skia::Pixmap::new(400, 300).unwrap();
         let rect = inline::menu_rect(20.0, 20.0, 400.0, 300.0, &rows);
@@ -631,6 +721,7 @@ mod tests {
             rect.left() + 5.0,
             row_top(0) + 5.0,
             &rows,
+            None,
         );
         let hover = (69, 71, 90);
         let body = (49, 50, 68);
@@ -643,9 +734,50 @@ mod tests {
             rect.left() + 5.0,
             row_top(1) + 5.0,
             &rows,
+            None,
         );
         assert_eq!(sample(&pixmap, 0), body, "highlight moved away from row 0");
         assert_eq!(sample(&pixmap, 1), hover, "row 1 is now highlighted");
+    }
+
+    #[test]
+    fn inline_menu_keyboard_selection_skips_separators_and_disabled_rows() {
+        let rows = entries(&MenuContext {
+            editable: false,
+            has_selection: false,
+            can_inspect: false,
+            link: false,
+        });
+        // Rows: Select All, separator, disabled Inspect.
+        assert_eq!(inline::step(&rows, None, true), Some(0));
+        assert_eq!(inline::step(&rows, Some(0), true), Some(0), "wraps");
+        assert_eq!(inline::step(&rows, None, false), Some(0));
+        assert_eq!(
+            inline::selected_action(&rows, Some(0)),
+            Some(Action::SelectAll)
+        );
+        assert_eq!(inline::selected_action(&rows, Some(2)), None);
+        assert_eq!(inline::selected_action(&rows, Some(1)), None);
+    }
+
+    #[test]
+    fn inline_menu_draws_the_keyboard_selected_row() {
+        let rows = entries(&MenuContext {
+            editable: false,
+            has_selection: false,
+            can_inspect: true,
+            link: false,
+        });
+        // Rows: Select All, separator, Inspect.
+        let mut pixmap = tiny_skia::Pixmap::new(400, 300).unwrap();
+        let rect = inline::menu_rect(20.0, 20.0, 400.0, 300.0, &rows);
+        let inspect_top =
+            rect.top() + inline::PADDING + inline::ITEM_HEIGHT + inline::SEPARATOR_HEIGHT;
+        inline::draw(&mut pixmap, rect, -1.0, -1.0, &rows, Some(2));
+        let pixel = pixmap
+            .pixel((rect.left() + 5.0) as u32, (inspect_top + 5.0) as u32)
+            .unwrap();
+        assert_eq!((pixel.red(), pixel.green(), pixel.blue()), (69, 71, 90));
     }
 
     #[test]
@@ -654,6 +786,7 @@ mod tests {
             editable: true,
             has_selection: false,
             can_inspect: true,
+            link: false,
         });
         let rect = inline::menu_rect(100.0, 100.0, 800.0, 600.0, &rows);
         // Rows are Paste, separator, Select All, separator, Inspect.

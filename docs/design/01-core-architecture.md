@@ -32,7 +32,7 @@ two crates.
 
 Centralize native `.plain` system domain handlers inside `pwb-core::system`:
 
-- `search.plain`, `devtools.plain`, `register.plain`, `gossip.plain`, `nodes.plain`, `network.plain`, `help.plain`, `chat.plain`
+- `search.plain`, `devtools.plain`, `register.plain`, `gossip.plain`, `nodes.plain`, `network.plain`, `help.plain`, `shortcuts.plain`, `chat.plain`
 - Single source of truth for:
   - Reserved-domain list
   - `.plain` = official namespace rule (system protocols + shipped content pages); `.pwb` = unofficial user namespace

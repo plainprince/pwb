@@ -58,7 +58,7 @@ const NETWORK_STYLES: &str = r#"
 }
 "#;
 
-const HELP_STYLES: &str = r#"
+pub(super) const HELP_STYLES: &str = r#"
 .help-container {
     background-color: #1e1e2e;
     padding: 25px;
@@ -198,6 +198,7 @@ pub fn render_help_page_bundle() -> Bundle {
                 <link class="help-link" href="chat.plain">chat.plain — private peer chat and public rooms</link>
                 <link class="help-link" href="blog.plain">blog.plain — the global feed of signed entries</link>
                 <link class="help-link" href="settings.plain">settings.plain — installed themes and appearance</link>
+                <link class="help-link" href="shortcuts.plain">shortcuts.plain — keyboard and mouse shortcuts</link>
                 <link class="help-link" href="devtools">devtools — inspect the current page's DOM and layout</link>
             </view>
 
@@ -268,6 +269,11 @@ impl SystemDomainHandler<'_> {
     /// Generate the native `help.plain` index.
     pub fn render_system_help_page(&self) -> Bundle {
         render_help_page_bundle()
+    }
+
+    /// Generate the native `shortcuts.plain` reference.
+    pub fn render_system_shortcuts_page(&self) -> Bundle {
+        super::render_shortcuts_page_bundle()
     }
 }
 
@@ -352,6 +358,29 @@ mod tests {
     }
 
     #[test]
+    fn shortcuts_page_renders_the_shortcut_reference() {
+        let search = SearchEngine::new();
+        let host = ArtifactHost::new();
+        let registry = DomainRegistry::new();
+        let identity = IdentityManager::new();
+        let bundle = handler(&search, &host, &registry, &identity).render_system_shortcuts_page();
+
+        assert_eq!(bundle.title, "shortcuts.plain — Keyboard Shortcuts");
+        let text = format!("{:?}", bundle.root_node);
+        for needle in [
+            "Ctrl/Cmd+A",
+            "Ctrl/Cmd+Shift+T",
+            "Double-click",
+            "help.plain",
+        ] {
+            assert!(
+                text.contains(needle),
+                "shortcuts page must mention {needle}"
+            );
+        }
+    }
+
+    #[test]
     fn help_page_links_every_native_domain() {
         let search = SearchEngine::new();
         let host = ArtifactHost::new();
@@ -370,6 +399,7 @@ mod tests {
             "chat.plain",
             "blog.plain",
             "settings.plain",
+            "shortcuts.plain",
             "devtools",
         ] {
             assert!(text.contains(href), "help page must link {href}");

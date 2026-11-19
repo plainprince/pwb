@@ -7,7 +7,9 @@ The PlainWeb Browser needs to support **text selection** with:
 - Visual feedback during selection
 - `Ctrl+C`/`Cmd+C` copy, `Ctrl+X`/`Cmd+X` cut, `Ctrl+V`/`Cmd+V` paste
 - Cross-platform clipboard support (including Linux clipboard managers)
-- Right-click context menu with Cut/Copy/Paste/Select All/Inspect
+- Right-click context menu with Cut/Copy/Paste/Select All/Inspect, link
+  actions, and keyboard navigation on Linux
+- Mouse selection inside inputs: drag, double-click a word, triple-click all
 
 ## Solution
 
@@ -110,10 +112,9 @@ The renderer highlights selected text by:
 
 ## Future Directions
 
-1. **Double-click word selection**: Extend to support word-level selection
-2. **Touch support**: Implement touch-based selection for mobile
-3. **Input selection by mouse drag**: Extend a range inside an input with the
-   pointer, not only with Shift+arrows
+1. **Touch support**: Implement touch-based selection for mobile
+2. **Double-click selection in page text**: Word-level selection currently
+   applies to inputs; page text still selects by character/line
 4. ~~**Context menu**: Add right-click context menu with copy option~~ — implemented:
    native AppKit (macOS) and Win32 (Windows 10/11), in-window on Linux
    (Wayland/X11 expose no popup-menu API without a desktop toolkit)

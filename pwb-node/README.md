@@ -213,6 +213,7 @@ is the [publish-a-seed runbook](../docs/runbooks/publish-a-seed.md).
 - **`nodes.plain`**: Peer routing table and network health.
 - **`network.plain`**: Live listen/discovery/STUN addresses, the peer table, and this node's index/store/registry counts, claim price, and balance.
 - **`help.plain`**: System-domain index plus the namespace, hosting, and credit rules.
+- **`shortcuts.plain`**: Keyboard and mouse shortcut reference, linked from `help.plain`.
 - **`chat.plain`**: Direct E2EE peer conversations, plus the public rooms at
   `chat.plain?room=<name>` — backed by `room::RoomService`: author-signed
   posts flood the network hop by hop, memberships are announced one hop at a
