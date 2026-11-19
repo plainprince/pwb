@@ -64,6 +64,9 @@ pub struct BrowserApp {
     pub(super) surface: Option<softbuffer::Surface<Rc<Window>, Rc<Window>>>,
     pub(super) dom_handle_render: DomHandle,
     pub(super) devtools_state: Arc<Mutex<DevToolsState>>,
+    /// Result slot for native (macOS/Windows) menus. Linux paints its menu in
+    /// the window, so there is no callback to route back through here.
+    #[cfg(any(target_os = "macos", target_os = "windows"))]
     pub(super) menu_result: Arc<Mutex<Option<Action>>>,
     /// Long-lived system clipboard handle. Keeping it alive (instead of
     /// creating a `Clipboard` per operation and dropping it immediately) is
@@ -484,6 +487,7 @@ impl BrowserApp {
     }
 
     /// Take the action recorded by a native menu, if any, and perform it.
+    #[cfg(any(target_os = "macos", target_os = "windows"))]
     fn apply_pending_menu_action(&mut self) {
         let action = self.menu_result.lock().unwrap().take();
         if let Some(action) = action {

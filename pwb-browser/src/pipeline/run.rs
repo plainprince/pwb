@@ -8,6 +8,7 @@
 use crate::bundler;
 use std::path::Path;
 
+#[cfg(any(target_os = "macos", target_os = "windows"))]
 use crate::context_menu::{self, ContextMenuActions};
 use crate::dom::Dom;
 use crate::js_runtime::{execute_script, DomHandle};
@@ -131,15 +132,19 @@ pub fn build_browser_app(
     // Result slot from the (static) native menu rows back to the event-loop
     // handler. The callback only records the action; the actual clipboard and
     // selection work happens on the event loop, where the long-lived
-    // `Clipboard` handle lives.
-    let menu_result: Arc<Mutex<Option<context_menu::Action>>> = Arc::new(Mutex::new(None));
-
-    let action_result = menu_result.clone();
-    context_menu::set_actions(ContextMenuActions {
-        on_action: Box::new(move |action| {
-            *action_result.lock().unwrap() = Some(action);
-        }),
-    });
+    // `Clipboard` handle lives. Linux has no native menu rows: it paints the
+    // menu itself, so the slot and callback only exist on macOS/Windows.
+    #[cfg(any(target_os = "macos", target_os = "windows"))]
+    let menu_result = {
+        let menu_result: Arc<Mutex<Option<context_menu::Action>>> = Arc::new(Mutex::new(None));
+        let action_result = menu_result.clone();
+        context_menu::set_actions(ContextMenuActions {
+            on_action: Box::new(move |action| {
+                *action_result.lock().unwrap() = Some(action);
+            }),
+        });
+        menu_result
+    };
 
     if let Some(script_bytes) = &bundle.script_payload {
         if let Ok(script_str) = std::str::from_utf8(script_bytes) {
@@ -156,6 +161,7 @@ pub fn build_browser_app(
         surface: None,
         dom_handle_render: dom_handle,
         devtools_state,
+        #[cfg(any(target_os = "macos", target_os = "windows"))]
         menu_result,
         clipboard: arboard::Clipboard::new().ok(),
         inline_menu: None,
