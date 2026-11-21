@@ -49,6 +49,26 @@ cargo clippy --workspace --all-targets
 The CI gate is **zero warnings**. Fix every clippy diagnostic rather than
 suppressing it.
 
+### Platform-only code
+
+Clippy only reports `dead_code` for the host target. A private helper used
+only under `#[cfg(target_os = "macos")]` or `#[cfg(target_os = "windows")]`
+is therefore invisible to a macOS/Windows lint but an error on Linux, where
+CI sets `RUSTFLAGS=-D warnings`. Gate every reference, including struct
+fields and initializers, and run the Linux gate before pushing
+platform-specific changes. On a non-Linux host with Docker:
+
+```sh
+docker run --rm -v "$PWD":/work -w /work \
+  -e RUSTFLAGS="-D warnings" rust:1-bookworm \
+  bash -lc 'apt-get update && apt-get install -y --no-install-recommends \
+    build-essential pkg-config libwayland-dev libxkbcommon-dev \
+    libx11-dev libxcb1-dev && \
+    cargo clippy --workspace --all-targets -- -D warnings'
+```
+
+If Docker is unavailable, rely on the Linux CI job.
+
 ## 4. Test
 
 ```sh

@@ -132,6 +132,17 @@ Detailed design decisions and architecture documentation live in the [`docs/`](.
 - [§2 Onion Routing & Encryption](../docs/design/02-onion-routing.md) — fixed-size cells, path rules, and cover traffic.
 - [§3 Decentralized Node Discovery](../docs/design/03-node-discovery.md) — beacons, `plain://nodes.plain?connect=...` links, and QR pairing.
 
+## Platform-specific code
+
+Native popup menus exist only on macOS and Windows; Linux paints its menu in
+the window. Anything used solely by the native path — the menu callback,
+its result slot, and the helper that drains it — must be gated with
+`#[cfg(any(target_os = "macos", target_os = "windows"))]`, including struct
+fields and initializers. Shared menu data and actions (`entries`, `perform`,
+and `Action`) stay cross-platform. CI builds with `RUSTFLAGS=-D warnings`, so
+an ungated private native-only item becomes a Linux `dead_code` error even
+though macOS and Windows builds pass.
+
 ## Browser shell (2026-10-22)
 
 Every page is rendered under a fixed browser chrome:
