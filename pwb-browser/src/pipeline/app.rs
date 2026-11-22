@@ -18,9 +18,10 @@ use crate::layout::{
 };
 use crate::pipeline::{apply_scroll_to_bottom, tree_row_target_node};
 use crate::render::{
-    draw_hover_highlight_scrolled, draw_input_selection, draw_selected_highlight_scrolled,
-    draw_tooltip, find_scroll_container, hit_test_cursor_from_layout_scrolled,
-    hit_test_layout_box_scrolled, render_dom_into_pixmap, SelectionPoint, TextSelection,
+    draw_error_banner, draw_hover_highlight_scrolled, draw_input_selection,
+    draw_selected_highlight_scrolled, draw_tooltip, find_scroll_container,
+    hit_test_cursor_from_layout_scrolled, hit_test_layout_box_scrolled, render_dom_into_pixmap,
+    SelectionPoint, TextSelection,
 };
 use crate::resolver::{
     content_id_of, is_blog_target, is_chat_target, is_register_target, is_system_target,
@@ -2956,6 +2957,23 @@ impl ApplicationHandler for BrowserApp {
                                 &self.element_scrolls,
                             );
                         }
+                    }
+
+                    // Uncaught script and handler errors paint as a banner
+                    // below the chrome, above page content but under tooltips
+                    // and context menus. The message is page-scoped state, so
+                    // navigating to a new page clears it.
+                    if let Some(message) = self.dom_handle_render.script_error.borrow().clone() {
+                        let (logical_w, logical_h) = self.logical_window_size();
+                        let chrome =
+                            crate::theme::Metrics::for_window(&self.theme, logical_w, logical_h);
+                        draw_error_banner(
+                            &mut self.pixmap,
+                            &message,
+                            width,
+                            height,
+                            chrome.chrome_height,
+                        );
                     }
 
                     // Tooltip: draw the hovered element's `title` once the

@@ -324,6 +324,7 @@ fn test_reset_page_state_clears_handlers_and_pending_actions() {
     *handle.pending_navigate.borrow_mut() = Some("stale.plain".to_string());
     *handle.focused_input.borrow_mut() = Some((2, 0));
     handle.scroll_to_bottom.borrow_mut().push(2);
+    *handle.script_error.borrow_mut() = Some("old page error".to_string());
 
     handle.reset_page_state();
 
@@ -334,16 +335,64 @@ fn test_reset_page_state_clears_handlers_and_pending_actions() {
     assert!(handle.pending_navigate.borrow().is_none());
     assert!(handle.focused_input.borrow().is_none());
     assert!(handle.scroll_to_bottom.borrow().is_empty());
+    assert!(
+        handle.script_error.borrow().is_none(),
+        "a new page must not inherit the previous page's error banner"
+    );
 }
 
 #[test]
-fn test_js_error_reports_message() {
+fn test_js_error_reports_message_and_sets_the_banner() {
     let handle = test_handle();
     let err = execute_script(&handle, "throw new Error('boom');").unwrap_err();
     assert!(
         err.to_string().contains("boom"),
         "error should contain message: {:?}",
         err
+    );
+    // The pipeline paints this summary below the chrome, so an error is
+    // visible even when devtools are closed.
+    assert_eq!(
+        handle.script_error.borrow().as_deref(),
+        Some("Uncaught Error: boom")
+    );
+}
+
+#[test]
+fn test_event_handler_error_surfaces_instead_of_being_silent() {
+    let handle = test_handle();
+    handle
+        .event_registry
+        .add_handler(2, "click", "throw new Error('handler boom');".to_string());
+    let handlers = handle.event_registry.get_handlers(2, "click");
+    let error = execute_event_handler(&handle, 2, &handlers[0]).unwrap_err();
+    assert!(error.to_string().contains("handler boom"), "{error}");
+    assert!(
+        handle
+            .script_error
+            .borrow()
+            .as_deref()
+            .unwrap_or_default()
+            .contains("handler boom"),
+        "a throwing click handler must reach the banner: {:?}",
+        handle.script_error.borrow()
+    );
+}
+
+#[test]
+fn test_unhandled_rejection_sets_the_banner() {
+    let handle = test_handle();
+    execute_script(&handle, "Promise.reject(new Error('reject boom'));")
+        .expect("the page script itself runs");
+    assert!(
+        handle
+            .script_error
+            .borrow()
+            .as_deref()
+            .unwrap_or_default()
+            .contains("reject boom"),
+        "an unhandled promise rejection must not be silent: {:?}",
+        handle.script_error.borrow()
     );
 }
 

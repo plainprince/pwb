@@ -50,23 +50,30 @@ pub(crate) fn clear_rejections() {
     UNHANDLED_REJECTIONS.with(|queue| queue.borrow_mut().clear());
 }
 
+/// Record a diagnostic everywhere the user can see it: stderr, the devtools
+/// console, and the in-window error banner.
+fn publish(dom_handle: &DomHandle, diagnostic: &JsDiagnostic) {
+    eprintln!("[JS] {}", diagnostic.summary);
+    for frame in &diagnostic.frames {
+        eprintln!("[JS] {frame}");
+    }
+    let mut lines = vec![(diagnostic.summary.clone(), "error")];
+    lines.extend(
+        diagnostic
+            .frames
+            .iter()
+            .map(|frame| (frame.clone(), "trace")),
+    );
+    append_console_lines(dom_handle, &lines);
+    *dom_handle.script_error.borrow_mut() = Some(diagnostic.summary.clone());
+}
+
 /// Flush recorded unhandled rejections to the devtools console.
 fn report_rejections(dom_handle: &DomHandle) {
     let pending: Vec<JsDiagnostic> =
         UNHANDLED_REJECTIONS.with(|queue| queue.borrow_mut().drain(..).collect());
     for diagnostic in pending {
-        eprintln!("[JS] {}", diagnostic.summary);
-        for frame in &diagnostic.frames {
-            eprintln!("[JS] {frame}");
-        }
-        let mut lines = vec![(diagnostic.summary.clone(), "error")];
-        lines.extend(
-            diagnostic
-                .frames
-                .iter()
-                .map(|frame| (frame.clone(), "trace")),
-        );
-        append_console_lines(dom_handle, &lines);
+        publish(dom_handle, &diagnostic);
     }
 }
 
@@ -184,19 +191,7 @@ fn stack_frames(stack: &str) -> Vec<String> {
 /// devtools panel (a hidden panel still records it, so opening devtools later
 /// shows what failed).
 pub(crate) fn report_error(dom_handle: &DomHandle, caught: &CaughtError<'_>) {
-    let diagnostic = describe(caught);
-    eprintln!("[JS] {}", diagnostic.summary);
-    for frame in &diagnostic.frames {
-        eprintln!("[JS] {frame}");
-    }
-    let mut lines = vec![(diagnostic.summary.clone(), "error")];
-    lines.extend(
-        diagnostic
-            .frames
-            .iter()
-            .map(|frame| (frame.clone(), "trace")),
-    );
-    append_console_lines(dom_handle, &lines);
+    publish(dom_handle, &describe(caught));
 }
 
 /// Run queued promise reactions / jobs, reporting any exception they throw.
