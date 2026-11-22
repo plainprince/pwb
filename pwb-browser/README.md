@@ -17,6 +17,7 @@
 - **Native links**: Clicking `<link href="…">`/`<a href="…">` (or text inside it) follows the target through the normal navigation path, with no JavaScript required.
 - **Downloads**: `Ctrl/Cmd+S` saves the current page as a `.pwb` bundle plus a `<name>_files/` folder with its images (inline `data:` images and on-disk assets). Links and addresses pointing at a file PlainWeb cannot render — images, PDFs, or any unknown extension — download to disk instead of failing, with the type detected from the extension or the file's leading bytes. Files go to `PWB_DOWNLOADS`, else `~/Downloads`, else `~/.pwb/downloads`, and never overwrite an existing file.
 - **Verified authorship & page isolation**: signed artifacts are verified on decode (a tampered or missing author signature is rejected with a readable error page), and every top-level navigation gets a fresh QuickJS context and DOM/async state so one page cannot leave globals or handlers behind. Unsigned bundles remain supported.
+- **Visible script errors**: an uncaught page script, event handler, timer, fetch/WebSocket callback, or unhandled promise rejection paints a danger-colored banner below the chrome with the error summary, so a broken handler is not silent before devtools are opened. The full name/message/stack still goes to the console panel and stderr; the banner clears on the next top-level navigation.
 
 ## Native system domains
 
