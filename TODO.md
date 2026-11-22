@@ -413,11 +413,19 @@ is not mistaken for a missing local feature. Check items off as they land.
   broken handler is not silent.
 - [ ] **Browser downloads.** Links marked `download` are followed as ordinary
   navigations; there is no save path or download state.
-- [ ] **PlainJS modules are not silently mangled.** `strip_esm_syntax` is a
-  line filter: multi-line imports, `export default`, and strings that start
-  with `import` are not handled correctly, and `pwb.import` re-evaluates the
-  original (untransformed) module source. Either compile a well-defined
-  script-mode subset or reject unsupported ESM with a clear build error.
+- [x] **PlainJS modules are rewritten, not silently mangled.** The bundler now
+  classifies ESM from a code mask (so strings, template literals, and comments
+  are never touched) and consumes statements through their semicolon, which
+  handles multi-line `import { ... } from` and `export { ... }` lists. Import
+  statements and export lists are removed, and `export const`/`let`/`var`/
+  `function`/`class`/`async` keep the declaration with only the keyword
+  dropped. `export default` and other unsupported exports fail the build with
+  a `file:line` error instead of producing a silently broken script. The
+  `pwb.import` module map now stores the same script-mode source the bundle
+  runs, so importing a module that used `export` works. Unit tests cover
+  multi-line imports, declarations, data that looks like ESM, same-line code
+  after a stripped import, and the error path; `tests/esm_bundling.rs` drives
+  the public `parse_site_directory` entry point.
 - [ ] **`bundle.toml` is honored or removed.** The manifest exists in
   `pwb-browser/webpages/devtools/` but no crate reads it. Define its role
   (title/author/assets) and implement it, or delete the stale format.
