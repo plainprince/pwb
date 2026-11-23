@@ -523,10 +523,12 @@ Production gaps:
   fresh context. JS still runs in script mode: ESM is not executed.
 - *(Fixed)* The window has tabs, per-tab history, bookmarks, an editable address bar, and reload/back/forward; the remaining gap is downloads.
 - *(Fixed)* `SystemDomain::Network` renders the live address/peer/service page and `Help` renders the system-domain index with namespace and credit rules.
-- *(Partial 2026-10-31)* Artifact decode failures (including an invalid author
-  signature) now render a native error page with the reason. Page-script and
-  event-handler failures still print to stderr, so a broken handler can remain
-  silent.
+- *(Fixed 2026-11-22)* Artifact decode failures (including an invalid author
+  signature) render a native error page with the reason, and uncaught page
+  scripts, event handlers, timers, async callbacks, and promise rejections now
+  paint a danger-colored banner below the chrome. The banner carries the
+  one-line error summary, is cleared by the next top-level navigation, and
+  lives outside the page DOM; devtools still show the full stack.
 
 ### `pwb-web` / wire format
 
@@ -726,7 +728,6 @@ Closed in code:
   from the previous page cannot run against the next page's reused node ids.
 
 Not closed by this pass: browser downloads, true ESM execution (the subset is
-now rewritten and the rest rejected), script/event-handler error surfacing,
-`bundle.toml`, the site-directory fuzz target, a CI coverage threshold,
-distributed tracing, and the remaining async `unwrap`/`expect` cleanup. The
-operator/external items above are unchanged.
+now rewritten and the rest rejected), `bundle.toml`, the site-directory fuzz
+target, a CI coverage threshold, distributed tracing, and the remaining async
+`unwrap`/`expect` cleanup. The operator/external items above are unchanged.
