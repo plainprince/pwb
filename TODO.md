@@ -272,11 +272,13 @@ a loopback test cluster.
   shim in `pwb-core/tests/packet_loss.rs` drops the first two probes in each
   direction and proves the dial still succeeds.
 - **Fuzzing runs in CI.** `.github/workflows/fuzz.yml` runs the onion-cell,
-  JSON-message, bundle, and PML/PSS parser targets for 30 seconds per target on
-  relevant pull requests and five minutes each weekly (plus manual dispatch).
-  The workflow caches corpora under `fuzz/corpus/` and uploads crash artifacts.
-  The local limitation remains: this environment has no C++ toolchain, so the
-  targets were not executed here.
+  JSON-message, bundle, PML/PSS parser, and site-directory targets for 30
+  seconds per target on relevant pull requests and five minutes each weekly
+  (plus manual dispatch). The workflow caches corpora under `fuzz/corpus/` and
+  uploads crash artifacts. The local limitation remains: this environment has
+  no C++ toolchain, so instrumented cargo-fuzz runs were not performed here;
+  the site-directory target was smoke-run uninstrumented with `cargo run`
+  against a seed corpus (exit 0, no panic).
 
 ### Open after the 2026-10-23 public-network audit
 
@@ -322,9 +324,10 @@ descriptors with the existing release key. A flagless node now joins the
   one circuit carried a message. These limits are stated in
   `docs/security.md`, not hidden claims.
 - **Fuzzing coverage is still narrow.** `fuzz/` targets the onion-cell, JSON
-  message, `.pwb` bundle, and PML/PSS parsers, and `.github/workflows/fuzz.yml`
-  runs them on relevant pull requests and weekly. There is still no target for
-  the `.pwb` site-directory builder (which touches the filesystem).
+  message, `.pwb` bundle, PML/PSS parsers, and the site-directory builder, and
+  `.github/workflows/fuzz.yml` runs them on relevant pull requests and weekly.
+  The site target is bounded and hermetic (one per-process temp directory
+  tree, `src` paths that escape it are skipped).
 
 Residual (accepted, not blocking local/public use): a node that does not pin
 `--trust-anchor` still trusts its live peer view during bootstrap; see the
@@ -438,9 +441,16 @@ is not mistaken for a missing local feature. Check items off as they land.
 - [ ] **`bundle.toml` is honored or removed.** The manifest exists in
   `pwb-browser/webpages/devtools/` but no crate reads it. Define its role
   (title/author/assets) and implement it, or delete the stale format.
-- [ ] **Site-directory fuzz target.** `fuzz/` covers the parsers but not the
-  filesystem-facing site builder; add a bounded target and wire it into the
-  fuzz workflow.
+- [x] **Site-directory fuzz target.** `fuzz/fuzz_targets/site_directory.rs`
+  runs each corpus entry through the public `parse_site_directory` →
+  `create_bundle` → `compress_bundle` → `decompress_bundle` path three times:
+  as `index.pml`, as the `app.pjs` entry beside a fixed valid page, and as
+  `style.pss` beside that page, using one temp directory tree per process.
+  Input is capped at 64 KiB, and `src` references that are absolute or contain
+  `..` are skipped so the harness cannot read a device or a file outside its
+  corpus. Wired into the workflow matrix and the `pwb-web/src/bundler.rs`,
+  `bundle.rs`, and `compress.rs` path filters. (Instrumented runs still need
+  cargo-fuzz and clang; see "Fuzzing runs in CI".)
 - [ ] **CI coverage threshold.** Coverage is uploaded but never enforced, so
   a change can delete tested paths without failing CI.
 - [ ] **Distributed tracing.** Structured logs, metrics, and health endpoints

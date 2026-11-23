@@ -12,6 +12,9 @@ on:
       - "pwb-core/src/net/**"
       - "pwb-core/src/wire/**"
       - "pwb-web/src/parse/**"
+      - "pwb-web/src/bundler.rs"
+      - "pwb-web/src/bundle.rs"
+      - "pwb-web/src/compress.rs"
       - ".github/workflows/fuzz.yml"
 
 permissions:
@@ -24,7 +27,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        target: [onion_cell, network_message, bundle, pml]
+        target: [onion_cell, network_message, bundle, pml, site_directory]
     env:
       # PRs get a quick smoke run; scheduled/manual runs explore longer.
       FUZZ_SECONDS: ${{ github.event_name == 'pull_request' && '30' || '300' }}
