@@ -13,21 +13,47 @@ use crate::render::text::draw_text_ab_glyph;
 use pwb_core::spec::Color;
 use tiny_skia::{Color as SkiaColor, Paint, Pixmap, Rect};
 
-/// Longest prefix kept before the message is truncated with an ellipsis.
+/// Longest summary kept before layout. A page can throw an error whose message
+/// is megabytes long; measuring every character prefix of that (each measure
+/// walks the text) would freeze the UI.
+const MAX_MESSAGE_CHARS: usize = 512;
+
+/// Flatten a diagnostic summary onto one line and bound its length. Error
+/// messages may contain newlines and tabs (`throw new Error("a\nb")`), which a
+/// single-line banner cannot lay out.
+fn banner_label(message: &str) -> String {
+    let mut label = String::from("JavaScript error: ");
+    let normalized = message.split_whitespace().collect::<Vec<_>>().join(" ");
+    if normalized.chars().count() > MAX_MESSAGE_CHARS {
+        label.extend(normalized.chars().take(MAX_MESSAGE_CHARS));
+        label.push('…');
+    } else {
+        label.push_str(&normalized);
+    }
+    label
+}
+
+/// Longest prefix of `text` that fits `max_width` with an ellipsis. Binary
+/// search keeps the number of `measure_text` calls logarithmic in the label
+/// length instead of measuring every prefix.
 fn fit_text(text: &str, font_size: f32, max_width: f32) -> String {
     if measure_text(text, font_size) <= max_width {
         return text.to_string();
     }
-    let mut out = String::new();
-    for ch in text.chars() {
-        let mut candidate = out.clone();
-        candidate.push(ch);
+    let chars: Vec<char> = text.chars().collect();
+    let mut low = 0usize;
+    let mut high = chars.len();
+    while low < high {
+        let mid = (low + high).div_ceil(2);
+        let mut candidate: String = chars[..mid].iter().collect();
         candidate.push('…');
-        if measure_text(&candidate, font_size) > max_width {
-            break;
+        if measure_text(&candidate, font_size) <= max_width {
+            low = mid;
+        } else {
+            high = mid - 1;
         }
-        out.push(ch);
     }
+    let mut out: String = chars[..low].iter().collect();
     out.push('…');
     out
 }
@@ -77,7 +103,7 @@ pub fn draw_error_banner(
         pixmap.fill_rect(rule, &edge, tiny_skia::Transform::identity(), None);
     }
 
-    let label = format!("JavaScript error: {message}");
+    let label = banner_label(message);
     let fitted = fit_text(&label, font_size, viewport_w as f32 - pad * 2.0);
     draw_text_ab_glyph(
         pixmap,
@@ -162,5 +188,27 @@ mod tests {
     fn empty_messages_draw_nothing() {
         let mut pixmap = tiny_skia::Pixmap::new(200, 100).unwrap();
         assert!(draw_error_banner(&mut pixmap, "   ", 200, 100, 30.0).is_none());
+    }
+
+    #[test]
+    fn multiline_messages_are_flattened_to_one_line() {
+        assert_eq!(
+            banner_label("Uncaught Error: first\n\tsecond  line"),
+            "JavaScript error: Uncaught Error: first second line"
+        );
+    }
+
+    #[test]
+    fn huge_messages_are_capped_before_layout() {
+        let message = "x".repeat(100_000);
+        let label = banner_label(&message);
+        assert_eq!(
+            label.chars().count(),
+            "JavaScript error: ".chars().count() + MAX_MESSAGE_CHARS + 1,
+            "the label is capped and ellipsized"
+        );
+        assert!(label.ends_with('…'));
+        // The fit pass still runs on the bounded label.
+        assert!(fit_text(&label, 14.0, 300.0).ends_with('…'));
     }
 }
