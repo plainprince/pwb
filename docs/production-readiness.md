@@ -568,11 +568,13 @@ Production gaps:
 - *(Fixed)* Inbound, outbound, and per-subscriber queues are bounded. A slow
   consumer drops messages (UDP is lossy by design) instead of growing memory;
   closed subscribers are pruned. Inbound is still per-peer rate-limited.
-- *(Partial)* `fuzz/` has cargo-fuzz targets for the onion-cell, JSON message,
-  `.pwb` bundle, and PML/PSS parsers, and `.github/workflows/fuzz.yml` runs
-  them for 30 seconds per target on relevant pull requests and five minutes
-  weekly. There is still no target for the site-directory builder (which
-  touches the filesystem).
+- *(Fixed 2026-11-22)* `fuzz/` has cargo-fuzz targets for the onion-cell, JSON
+  message, `.pwb` bundle, PML/PSS parsers, and the filesystem-facing
+  site-directory builder, and `.github/workflows/fuzz.yml` runs them for 30
+  seconds per target on relevant pull requests and five minutes weekly. The
+  site target caps input at 64 KiB, runs each entry as page markup, script
+  entry, and stylesheet in one per-process temp directory tree, and skips
+  absolute/parent `src` paths so it cannot read outside the corpus.
 - CI runs fmt, clippy, tests (including the two-process
   `public_network_smoke` test), and coverage, but enforces no coverage
   threshold. `pwb-core/tests/packet_loss.rs` now exercises retry-on-loss with a
@@ -692,10 +694,11 @@ Not closed by this pass, and not to be mistaken for done:
   trustworthy publication-time protocol; local heuristics would be gameable.
 - Browser downloads, ESM execution, and consistent in-UI error surfacing remain
   separate features. Per-page JS/dom isolation is closed (2026-10-31).
-- `bundle.toml`, the line-based `strip_esm_syntax` limitation, a
-  site-directory fuzz target, a CI coverage threshold, distributed tracing,
-  and the remaining async `unwrap`/`expect` cleanup remain engineering work
-  outside this pass. Bundle author signatures are closed (2026-10-31).
+- `bundle.toml`, the line-based `strip_esm_syntax` limitation, a CI coverage
+  threshold, distributed tracing, and the remaining async `unwrap`/`expect`
+  cleanup remain engineering work outside this pass. Bundle author signatures
+  are closed (2026-10-31) and the site-directory fuzz target is closed
+  (2026-11-22).
 - Seed/anchor publication, real multi-node topology and large-swarm
   validation, open-network sybil economics, and an independent security
   review are operator/design/external work, not code that a local checkout can
@@ -719,6 +722,5 @@ Closed in code:
 
 Not closed by this pass: browser downloads, ESM execution and the
 `strip_esm_syntax` text hack, script/event-handler error surfacing, `bundle.toml`,
-the site-directory fuzz target, a CI coverage threshold, distributed tracing,
-and the remaining async `unwrap`/`expect` cleanup. The operator/external items
-above are unchanged.
+a CI coverage threshold, distributed tracing, and the remaining async
+`unwrap`/`expect` cleanup. The operator/external items above are unchanged.

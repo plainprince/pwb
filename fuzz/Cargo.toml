@@ -41,6 +41,13 @@ test = false
 doc = false
 bench = false
 
+[[bin]]
+name = "site_directory"
+path = "fuzz_targets/site_directory.rs"
+test = false
+doc = false
+bench = false
+
 # Keep the fuzzers out of the main workspace; they need a nightly toolchain and
 # cargo-fuzz, while ordinary builds stay on stable.
 [workspace]
