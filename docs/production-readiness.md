@@ -732,5 +732,5 @@ Closed in code:
 
 Not closed by this pass: browser downloads, true ESM execution (the subset is
 now rewritten and the rest rejected), `bundle.toml`, a CI coverage threshold,
-distributed tracing, and the remaining async
-`unwrap`/`expect` cleanup. The operator/external items above are unchanged.
+distributed tracing, and the remaining async `unwrap`/`expect` cleanup. The
+operator/external items above are unchanged.
