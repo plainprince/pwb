@@ -38,12 +38,20 @@ pub fn parse_site_directory<P: AsRef<Path>>(dir_path: P) -> Result<ParsedSite, P
         let dir = path.parent().unwrap_or(Path::new("."));
         extract_bundlables(&mut root, dir, &mut components, &mut js_entries)?;
         resolve_imports(&mut root, &components, 0);
+        // A single `.pml` file can still define inline scripts and
+        // `<script src>` entries; bundle them like the directory path does
+        // instead of extracting and then dropping them.
+        let (script_payload, modules) = crate::bundler::bundle_js_files(&js_entries, None)?;
         return Ok(ParsedSite {
             title: extract_title(&root),
             root_node: root,
-            script_payload: None,
+            script_payload: if script_payload.is_empty() {
+                None
+            } else {
+                Some(script_payload)
+            },
             components,
-            modules: HashMap::new(),
+            modules,
         });
     }
 

@@ -58,6 +58,24 @@ fn multiline_esm_module_bundles_and_is_importable_at_runtime() {
 }
 
 #[test]
+fn single_pml_file_bundles_its_inline_script() {
+    let dir = site_dir("single");
+    let path = dir.join("page.pml");
+    fs::write(
+        &path,
+        "<plain><view><text>x</text><script>export const answer = 42;</script></view></plain>",
+    )
+    .unwrap();
+
+    let site = pwb_web::parse::parse_site_directory(&path).expect("single file parses");
+    let payload = String::from_utf8(site.script_payload.expect("inline script payload")).unwrap();
+    assert!(!payload.contains("export"), "{payload}");
+    assert!(payload.contains("const answer = 42;"), "{payload}");
+
+    let _ = fs::remove_dir_all(&dir);
+}
+
+#[test]
 fn export_default_fails_the_build_with_file_and_line() {
     let dir = site_dir("default");
     fs::write(dir.join("index.pml"), INDEX).unwrap();

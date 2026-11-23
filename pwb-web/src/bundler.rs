@@ -122,7 +122,7 @@ fn strip_esm_syntax(source: &str, file: &str) -> Result<String, ParseError> {
             // on a line).
             match classify_esm(&source[statement..]) {
                 Some(kind @ (Esm::Import | Esm::ExportList | Esm::ExportAll)) => {
-                    let end = statement_end(source, &code, statement, kind == Esm::ExportList);
+                    let end = statement_end(source, &code, statement, kind);
                     let removed = &source[statement..end];
                     out.push_str(&source[pos..statement]);
                     // Keep line numbers stable for later diagnostics while
@@ -228,27 +228,45 @@ fn word_start(text: &str, word: &str) -> bool {
 /// list, after its closing brace — so `import`/`export` on a line by themselves
 /// continue to the next line. Strings, comments, and templates are ignored
 /// through `code`.
-fn statement_end(source: &str, code: &[bool], start: usize, export_list: bool) -> usize {
+fn statement_end(source: &str, code: &[bool], start: usize, kind: Esm) -> usize {
     let bytes = source.as_bytes();
+    let export_list = kind == Esm::ExportList;
+    let is_import = kind == Esm::Import;
     let mut depth = 0i32;
     let mut opened_brace = false;
     let mut closed_brace = false;
+    let mut saw_from = false;
     let mut saw_module_string = false;
     let mut index = start;
     while index < bytes.len() {
         let is_code = code.get(index).copied().unwrap_or(false);
         // A quote at a string/template start is masked, but the code byte just
         // before it is not; comment quotes are preceded by masked bytes.
+        //
+        // Only the module specifier ends the statement. A string at bracket
+        // depth zero is the specifier for an import, but for an export it can
+        // also be a string export name (`export * as "x" from "y"`), so it
+        // only counts after the `from` keyword.
         if !is_code
             && matches!(bytes[index], b'"' | b'\'')
             && index > start
+            && depth <= 0
             && code.get(index - 1).copied().unwrap_or(false)
+            && (is_import || saw_from)
         {
             saw_module_string = true;
         }
         if !is_code {
             index += 1;
             continue;
+        }
+        if depth <= 0
+            && !saw_from
+            && bytes[index..].starts_with(b"from")
+            && (index == start || !ident_byte(bytes[index - 1]))
+            && !bytes.get(index + 4).copied().is_some_and(ident_byte)
+        {
+            saw_from = true;
         }
         match bytes[index] {
             b'{' | b'[' | b'(' => {
@@ -264,12 +282,67 @@ fn statement_end(source: &str, code: &[bool], start: usize, export_list: bool) -
                 }
             }
             b';' if depth <= 0 => return index + 1,
-            b'\n' if depth <= 0 && (saw_module_string || closed_brace) => return index + 1,
+            b'\n' if depth <= 0 => {
+                if saw_module_string {
+                    return index + 1;
+                }
+                // `export { ... }` may put its `from "..."` clause on a later
+                // line; only end at the newline when no clause follows.
+                if export_list
+                    && closed_brace
+                    && !saw_from
+                    && !starts_from_clause(source, code, index + 1)
+                {
+                    return index + 1;
+                }
+            }
             _ => {}
         }
         index += 1;
     }
     bytes.len()
+}
+
+fn ident_byte(byte: u8) -> bool {
+    byte.is_ascii_alphanumeric() || byte == b'_' || byte == b'$'
+}
+
+/// Byte index of the next token after `index`, skipping whitespace and
+/// comments. A string/template start is a token (its body is masked, so the
+/// quote itself is the only visible byte).
+fn next_token(source: &str, code: &[bool], mut index: usize) -> Option<usize> {
+    let bytes = source.as_bytes();
+    loop {
+        while index < bytes.len() && bytes[index].is_ascii_whitespace() {
+            index += 1;
+        }
+        let current = *bytes.get(index)?;
+        if code.get(index).copied().unwrap_or(false) || matches!(current, b'"' | b'\'' | b'`') {
+            return Some(index);
+        }
+        // A comment: skip its masked run (quotes inside must not count).
+        while index < bytes.len() && !code.get(index).copied().unwrap_or(false) {
+            index += 1;
+        }
+    }
+}
+
+/// True when the next tokens are `from` followed by a module specifier
+/// string, possibly split across lines and comments.
+fn starts_from_clause(source: &str, code: &[bool], index: usize) -> bool {
+    let Some(start) = next_token(source, code, index) else {
+        return false;
+    };
+    let Some(after) = source[start..].strip_prefix("from") else {
+        return false;
+    };
+    if keyword_boundary(after) {
+        let specifier = start + "from".len();
+        if let Some(quote) = next_token(source, code, specifier) {
+            return matches!(source.as_bytes()[quote], b'"' | b'\'' | b'`');
+        }
+    }
+    false
 }
 
 /// Mark every source byte that is real code — not inside a string, template
@@ -551,6 +624,63 @@ const meta = import.meta;
         // Both specifier lists are gone; only the call survives.
         assert_eq!(text.matches("greet").count(), 1, "{text}");
         assert!(text.contains("greet();"), "{text}");
+    }
+
+    #[test]
+    fn test_export_list_from_clause_on_a_later_line_is_stripped() {
+        // Valid ESM formatting: the `from` clause is not required to sit on the
+        // same line as the closing brace.
+        for source in [
+            b"export {\n    greet,\n}\nfrom \"./lib.js\";\ngreet();\n" as &[u8],
+            b"export { greet } // re-export\nfrom \"./lib.js\";\ngreet();\n",
+            b"export { greet }\nfrom\n\"./lib.js\";\ngreet();\n",
+        ] {
+            let files = vec![("app.pjs".to_string(), source.to_vec())];
+            let (payload, _) = bundle_js_files(&files, Some("app.pjs")).unwrap();
+            let text = String::from_utf8(payload).unwrap();
+            assert!(!text.contains("export"), "{text}");
+            assert!(!text.contains("from"), "{text}");
+            assert!(!text.contains("./lib.js"), "{text}");
+            assert!(text.contains("greet();"), "{text}");
+        }
+    }
+
+    #[test]
+    fn test_export_all_string_name_does_not_end_before_its_from_clause() {
+        // `export * as "x" from` has a string export name before the module
+        // specifier; only the specifier may terminate the statement.
+        let source = b"export * as \"x\" from\n    \"./all.js\";\nnext();\n";
+        let files = vec![("app.pjs".to_string(), source.to_vec())];
+        let (payload, _) = bundle_js_files(&files, Some("app.pjs")).unwrap();
+        let text = String::from_utf8(payload).unwrap();
+        assert!(!text.contains("export"), "{text}");
+        assert!(!text.contains("from"), "{text}");
+        assert!(!text.contains("./all.js"), "{text}");
+        assert!(text.contains("next();"), "{text}");
+    }
+
+    #[test]
+    fn test_export_list_without_from_ends_at_the_newline() {
+        // The lookahead must not swallow the next statement when there is no
+        // `from` clause.
+        let source = b"export { greet }\ngreet();\n";
+        let files = vec![("app.pjs".to_string(), source.to_vec())];
+        let (payload, _) = bundle_js_files(&files, Some("app.pjs")).unwrap();
+        let text = String::from_utf8(payload).unwrap();
+        assert!(!text.contains("export"), "{text}");
+        assert!(text.contains("greet();"), "{text}");
+    }
+
+    #[test]
+    fn test_string_export_name_does_not_end_the_statement_early() {
+        // A string inside the braces is an export name, not a module specifier.
+        let source = b"export { \"a\" as b }\nfrom \"./lib.js\";\nb;\n";
+        let files = vec![("app.pjs".to_string(), source.to_vec())];
+        let (payload, _) = bundle_js_files(&files, Some("app.pjs")).unwrap();
+        let text = String::from_utf8(payload).unwrap();
+        assert!(!text.contains("export"), "{text}");
+        assert!(!text.contains("./lib.js"), "{text}");
+        assert!(text.contains("b;"), "{text}");
     }
 
     #[test]

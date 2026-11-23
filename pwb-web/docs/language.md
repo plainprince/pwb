@@ -271,7 +271,8 @@ script mode:
   file and line; script mode has no module object to receive the value.
 
 Strings, template literals, and comments are not touched, and multi-line
-`import { ... } from` statements are consumed correctly. Each file is also
+`import { ... } from` statements are consumed correctly, including a `from`
+clause placed on the line after the closing brace. Each file is also
 available as a script-mode module for the bundle's named-module map, so a file
 that used `export` loads without further changes:
 
