@@ -66,8 +66,9 @@ pub const FETCH_TIMEOUT: Duration = Duration::from_millis(600);
 /// How long a private (onion-routed) shard query waits for one exit.
 pub const PRIVATE_QUERY_TIMEOUT: Duration = Duration::from_secs(4);
 
-/// How long a private artifact fetch waits for one exit. A large bundle is
-/// hundreds of cells, so this is deliberately longer than a direct fetch.
+/// How long a private artifact fetch waits for one exit. Each request and
+/// reply is a short 4 KiB-class onion message, but both legs cross three relays,
+/// so this is deliberately longer than a direct fetch.
 pub const PRIVATE_FETCH_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// How many peers a private fetch tries in parallel. Each attempt is an
@@ -77,6 +78,20 @@ pub const MAX_PRIVATE_FETCH_PEERS: usize = 8;
 /// Chunk requests kept in flight while fetching one large artifact. Four
 /// circuits balance latency against the entry relays' per-source cell budget.
 pub const MAX_PRIVATE_CHUNKS_IN_FLIGHT: usize = 4;
+
+/// Bytes requested per private (onion) chunk request.
+///
+/// An onion message is padded to one of two envelope classes, 4 KiB or 48 KiB,
+/// and each class is carried as a burst of 512-byte cells (about 45 or 535
+/// fragments). A reply that lands in the 48 KiB class is a multi-hundred-cell
+/// burst, and the onion transport has no per-fragment repair: one fragment
+/// dropped by a busy or slow relay destroys the whole reply and with it the
+/// chunk. Base64 inflates a payload by 4/3, so 2 KiB of artifact plus framing
+/// stays inside the 4 KiB class, where a reply is a handful of cells that any
+/// receiver can buffer. That is why this is deliberately *not*
+/// [`MAX_ARTIFACT_CHUNK`]: a direct fetch can move 16 KiB per reply because TCP
+/// repairs loss, an onion fetch cannot.
+pub const PRIVATE_CHUNK_LEN: usize = 2 * 1024;
 
 /// Largest artifact accepted over private chunked fetch. Larger content needs
 /// a streaming protocol; refusing is safer than assembling unbounded memory.
@@ -659,6 +674,9 @@ impl DistributedSearch {
     /// Answer one base64-encoded artifact chunk from the local host. A missing
     /// content id or an offset past the end yields an empty slice; the
     /// requester reassembles and verifies the whole bundle by content id.
+    ///
+    /// The reply is sized by the request's `len`, which private fetches keep
+    /// inside the small onion envelope class (see [`PRIVATE_CHUNK_LEN`]).
     pub fn answer_private_fetch_chunk(&self, message: &NetworkMessage) -> Option<NetworkMessage> {
         let NetworkMessage::FetchArtifactChunk {
             content_id,
@@ -1081,10 +1099,10 @@ impl DistributedSearch {
     /// candidate exit is asked in its own circuit, so no peer sees both the
     /// requester and the content id. The first content-addressed answer wins.
     ///
-    /// Artifacts larger than one chunk are pulled chunk by chunk from the same
-    /// holder over fresh circuits and verified against the requested content
-    /// id, so the bytes never travel in the clear. Anything over
-    /// [`MAX_PRIVATE_BUNDLE`] is refused rather than assembled unbounded.
+    /// Artifacts larger than [`PRIVATE_CHUNK_LEN`] are pulled chunk by chunk
+    /// from the same holder over fresh circuits and verified against the
+    /// requested content id, so the bytes never travel in the clear. Anything
+    /// over [`MAX_PRIVATE_BUNDLE`] is refused rather than assembled unbounded.
     pub async fn fetch_private(&self, content_id: &ContentId) -> Result<Vec<u8>, PrivacyError> {
         if let Some(bytes) = self.host.get(content_id) {
             return Ok(bytes);
@@ -1102,11 +1120,15 @@ impl DistributedSearch {
 
         // Phase 0: ask every candidate for a zero-length range. The reply is a
         // tiny 4 KiB onion message that only reports the total length, so
-        // probing eight peers does not flood the return path with eight 48 KiB
+        // probing eight peers does not flood the return path with eight real
         // chunk replies.
         let mut tasks = JoinSet::new();
         for exit in peers {
-            let path = privacy::select_path_dynamic(&self.engine, Some(exit))?;
+            // One unusable candidate must not abort the fetch: every peer is
+            // asked in its own circuit, and the first answer wins.
+            let Ok(path) = privacy::select_path_dynamic(&self.engine, Some(exit)) else {
+                continue;
+            };
             let engine = self.engine.clone();
             tasks.spawn(async move {
                 let circuit_key = Keypair::generate();
@@ -1115,6 +1137,8 @@ impl DistributedSearch {
                     offset: 0,
                     len: 0,
                 };
+                // A silent or unreachable exit is just a candidate that did
+                // not answer; the other probes still race.
                 let reply = engine
                     .send_onion_request_as(&circuit_key, &path, &message, PRIVATE_FETCH_TIMEOUT)
                     .await
@@ -1163,7 +1187,7 @@ impl DistributedSearch {
             let message = NetworkMessage::FetchArtifactChunk {
                 content_id: requested,
                 offset: 0,
-                len: MAX_ARTIFACT_CHUNK as u32,
+                len: PRIVATE_CHUNK_LEN as u32,
             };
             let Ok(NetworkMessage::ArtifactChunkResponse {
                 content_id,
@@ -1183,7 +1207,7 @@ impl DistributedSearch {
             let Some(bytes) = decode_artifact_chunk(&data) else {
                 continue;
             };
-            if bytes.len() != total.min(MAX_ARTIFACT_CHUNK) {
+            if bytes.len() != total.min(PRIVATE_CHUNK_LEN) {
                 continue;
             }
             assembled = Some(bytes);
@@ -1207,7 +1231,7 @@ impl DistributedSearch {
                     break;
                 }
                 let chunk_offset = offset;
-                let chunk_len = (total - chunk_offset).min(MAX_ARTIFACT_CHUNK);
+                let chunk_len = (total - chunk_offset).min(PRIVATE_CHUNK_LEN);
                 offset += chunk_len;
                 expected.push((chunk_offset, chunk_len));
                 let path = privacy::select_path_dynamic(&self.engine, Some(exit))?;
