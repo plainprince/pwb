@@ -162,20 +162,36 @@ impl ReliabilityTracker {
 
     /// Rank candidates best-first, filtering peers in cooldown unless
     /// everything is in cooldown (then return the least-bad).
+    ///
+    /// Callers that must fill a fixed number of slots should use
+    /// [`Self::ranked_including_avoided`] instead: this filtered list can be
+    /// shorter than the hop count, and cooldown is a preference, not a
+    /// disconnection.
     pub fn ranked(&self, candidates: &[PublicKey]) -> Vec<PublicKey> {
+        let all = self.ranked_including_avoided(candidates);
+        if all.iter().all(|key| self.should_avoid(key)) {
+            return all;
+        }
+        all.into_iter()
+            .filter(|key| !self.should_avoid(key))
+            .collect()
+    }
+
+    /// Rank every candidate best-first, keeping peers in cooldown at the end
+    /// of the list instead of dropping them.
+    ///
+    /// A cooldown means "avoid when there is an alternative", so a caller
+    /// that needs `n` peers can still build a path from this full ranking
+    /// when fewer than `n` are currently healthy.
+    pub fn ranked_including_avoided(&self, candidates: &[PublicKey]) -> Vec<PublicKey> {
         let mut scored: Vec<(PublicKey, f64)> =
             candidates.iter().map(|k| (*k, self.score(k))).collect();
         scored.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
-        let usable: Vec<PublicKey> = scored
-            .iter()
-            .filter(|(k, _)| !self.should_avoid(k))
-            .map(|(k, _)| *k)
-            .collect();
-        if usable.is_empty() {
-            scored.into_iter().map(|(k, _)| k).collect()
-        } else {
-            usable
-        }
+        let (mut usable, mut avoided): (Vec<_>, Vec<_>) = scored
+            .into_iter()
+            .partition(|(key, _)| !self.should_avoid(key));
+        usable.append(&mut avoided);
+        usable.into_iter().map(|(key, _)| key).collect()
     }
 }
 
@@ -246,6 +262,37 @@ mod tests {
         assert!(!tracker.should_avoid(&good));
         let ranked = tracker.ranked(&[bad, good]);
         assert_eq!(ranked[0], good);
+    }
+
+    #[test]
+    fn cooldown_peers_stay_in_the_full_ranking_last() {
+        let mut tracker = ReliabilityTracker::default();
+        let good = PublicKey([3; 32]);
+        let bad = PublicKey([4; 32]);
+        tracker.record_success(&good, Some(Duration::from_millis(20)));
+        for _ in 0..5 {
+            tracker.record_failure(&bad);
+        }
+        let all = tracker.ranked_including_avoided(&[bad, good]);
+        assert_eq!(all, vec![good, bad], "avoided peers are kept, ranked last");
+        // The filtered list still drops it when a healthy alternative exists.
+        assert_eq!(tracker.ranked(&[bad, good]), vec![good]);
+    }
+
+    #[test]
+    fn all_peers_avoided_are_all_returned() {
+        let mut tracker = ReliabilityTracker::default();
+        let a = PublicKey([5; 32]);
+        let b = PublicKey([6; 32]);
+        for peer in [a, b] {
+            for _ in 0..5 {
+                tracker.record_failure(&peer);
+            }
+        }
+        let all = tracker.ranked_including_avoided(&[a, b]);
+        assert_eq!(all.len(), 2, "cooldown must not look like disconnection");
+        assert!(all.contains(&a) && all.contains(&b));
+        assert_eq!(tracker.ranked(&[a, b]).len(), 2);
     }
 
     #[test]

@@ -864,7 +864,11 @@ impl DomainService {
 
         let mut tasks = JoinSet::new();
         for exit in peers {
-            let path = privacy::select_path_dynamic(&self.engine, Some(exit))?;
+            // Skip a candidate whose circuit cannot be built; the remaining
+            // exits may still hold the record.
+            let Ok(path) = privacy::select_path_dynamic(&self.engine, Some(exit)) else {
+                continue;
+            };
             let query_id = self.next_query_id.fetch_add(1, Ordering::Relaxed);
             let mut challenge = [0u8; 32];
             rand::thread_rng().fill_bytes(&mut challenge);

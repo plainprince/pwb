@@ -741,30 +741,45 @@ impl NodeEngine {
     /// reliability-aware path selection so a slow or lossy relay stops
     /// being picked for new circuits without ever being probed in lockstep.
     pub fn ranked_direct_keys(&self) -> Vec<PublicKey> {
-        let keys: Vec<PublicKey> = {
-            let table = self.peer_table.lock().unwrap();
-            table
-                .keys()
-                .filter(|k| **k != self.config.keypair.public)
-                .copied()
-                .collect()
-        };
+        let keys = self.direct_peer_keys();
         self.reliability.lock().unwrap().ranked(&keys)
+    }
+
+    /// Direct peer keys ranked best-first, **including** peers in failure
+    /// cooldown at the end of the list.
+    ///
+    /// Path selection needs the full set: [`Self::ranked_direct_keys`] drops
+    /// cooling-down peers, so a swarm where most relays recently failed looks
+    /// too small for a circuit even though it has enough direct peers. A
+    /// cooldown should change the order, never the reachability.
+    pub fn ranked_direct_keys_including_avoided(&self) -> Vec<PublicKey> {
+        let keys = self.direct_peer_keys();
+        self.reliability
+            .lock()
+            .unwrap()
+            .ranked_including_avoided(&keys)
+    }
+
+    /// Every peer this node can dial directly, in table order.
+    ///
+    /// Taken before any reliability lock is acquired: callers rank the result,
+    /// and holding the reliability lock while locking the peer table would
+    /// invert the order used by [`Self::record_onion_success`].
+    fn direct_peer_keys(&self) -> Vec<PublicKey> {
+        let table = self.peer_table.lock().unwrap();
+        table
+            .keys()
+            .filter(|k| **k != self.config.keypair.public)
+            .copied()
+            .collect()
     }
 
     /// Health snapshot for adaptive decisions: (measured peers, mean RTT ms,
     /// failure rate). Unmeasured peers count as 250ms / 20% loss so a fresh
     /// swarm does not look healthier than a proven one.
     pub fn reliability_summary(&self) -> (usize, f64, f64) {
+        let keys = self.direct_peer_keys();
         let guard = self.reliability.lock().unwrap();
-        let keys: Vec<PublicKey> = {
-            let table = self.peer_table.lock().unwrap();
-            table
-                .keys()
-                .filter(|k| **k != self.config.keypair.public)
-                .copied()
-                .collect()
-        };
         if keys.is_empty() {
             return (0, 250.0, 0.2);
         }
@@ -793,9 +808,14 @@ impl NodeEngine {
         (measured, rtt_sum / n, fail_sum / n)
     }
 
-    /// Reliability-aware onion path: rank known relays by RTT / loss score
-    /// and return the best `count` (3..=6), avoiding hosts in failure
-    /// cooldown. Falls back to the raw peer set when nothing is measured.
+    /// Reliability-aware onion path: rank known relays by RTT / loss score and
+    /// return the best `count` (3..=6), with relays in failure cooldown ranked
+    /// last rather than dropped.
+    ///
+    /// Every slot is filled or nothing is returned: a short path would be
+    /// rejected by `validate_path`, turn a recoverable timeout into a hard
+    /// request error, and make a connected swarm look unreachable after a few
+    /// slow circuits.
     pub fn select_onion_path(&self, count: usize) -> Option<Vec<DhPublicKey>> {
         let count = count.clamp(crate::onion::MIN_HOPS, crate::onion::MAX_LAYER_SLOTS);
         let peers: Vec<(PublicKey, DhPublicKey)> = {
@@ -810,15 +830,20 @@ impl NodeEngine {
             return None;
         }
         let keys: Vec<PublicKey> = peers.iter().map(|(k, _)| *k).collect();
-        let ranked = self.reliability.lock().unwrap().ranked(&keys);
+        // The cooldown-filtered ranking can be shorter than `count`, which this
+        // slot-filling selection cannot use.
+        let ranked = self
+            .reliability
+            .lock()
+            .unwrap()
+            .ranked_including_avoided(&keys);
         let by_key: std::collections::HashMap<PublicKey, DhPublicKey> = peers.into_iter().collect();
-        Some(
-            ranked
-                .into_iter()
-                .take(count)
-                .filter_map(|k| by_key.get(&k).copied())
-                .collect(),
-        )
+        let path: Vec<DhPublicKey> = ranked
+            .into_iter()
+            .take(count)
+            .filter_map(|k| by_key.get(&k).copied())
+            .collect();
+        (path.len() == count).then_some(path)
     }
 
     /// Record a successful onion reply through `path` (RTT sample).
@@ -1285,6 +1310,8 @@ impl NodeEngine {
     /// Alternate path for a failover retry: keep the caller's exit/middle but
     /// swap a failing entry for the best-ranked spare relay.
     fn failover_path(&self, original: &[DhPublicKey]) -> Option<Vec<DhPublicKey>> {
+        // `select_onion_path` only returns a path with exactly this many hops,
+        // so an alternate is always usable once it exists.
         let spare = self.select_onion_path(original.len())?;
         // Prefer a path whose entry differs (the slow hop is usually first).
         if spare[0] != original[0] {
