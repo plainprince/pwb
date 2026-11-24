@@ -139,7 +139,7 @@ network to check that it resolves.
 | `.pml` | Parsed and merged into one page document. All top-level `.pml` files are read in alphabetical order and their children concatenated. |
 | `.pss` | Concatenated in alphabetical order, then applied as one stylesheet at compile time. |
 | `.css` | Bundled through `lightningcss` (resolves `@import`, non-minified), then applied like `.pss`. |
-| `.pjs`, `.js` | Concatenated in alphabetical order into one script. `import`/`export` lines are stripped; the entry file (`app.pjs`, `main.pjs`, or `index.pjs`) runs last. |
+| `.pjs`, `.js` | Concatenated in alphabetical order into one script. Imports and export lists are rewritten to script mode (unsupported `export default` is a compile error); the entry file (`app.pjs`, `main.pjs`, or `index.pjs`) runs last. |
 | `<component>` / `<import>` | Expanded while compiling; components are not shipped as separate files. |
 | `<script src="x.pjs">` or inline `<script>` | Extracted into the same script payload, deduplicated by name. |
 
@@ -246,7 +246,7 @@ bundle itself carries the public key, never the secret.
 | `Failed to write output binary …` | The output directory does not exist or is not writable. | Create the directory or pick another output path. |
 | Styles do nothing | Selector did not match (no descendant selectors), or the value is unsupported. | Start with `#id`, `.class`, or a tag selector; check the property list. |
 | Colors are ignored | `#abc` shorthand and most color names are not parsed. | Use `#rrggbb`, `white`, or `black`. |
-| Script does nothing | Syntax error, or `import`/`export` was stripped. | Check devtools console; load bundled modules with `pwb.import("lib.js")`. |
+| Script does nothing | Syntax error, or an unsupported `export default`. | Check devtools console; the compiler rejects `export default` with a `file:line` error. Load bundled modules with `pwb.import("lib.js")`. |
 | Component shows nothing | Import name does not match, or nesting exceeds 8 levels. | Check the `name`, then compile again; the compiler prints a warning for unknown imports. |
 
 ## Next

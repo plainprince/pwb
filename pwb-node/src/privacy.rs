@@ -165,6 +165,10 @@ pub fn select_path_dynamic(
 /// Reliability-aware core: rank direct peers by health, keep a top pool of
 /// `hops * 2` (so choice is not deterministic), shuffle the pool, then take
 /// `hops` (with `exit` pinned last when set).
+///
+/// Peers in failure cooldown are ranked last rather than dropped when the
+/// healthy set cannot fill the circuit or does not contain the pinned exit, so
+/// a few slow circuits never make a connected swarm unreachable.
 pub fn select_path_scored(
     engine: &NodeEngine,
     exit: Option<PublicKey>,
@@ -173,14 +177,28 @@ pub fn select_path_scored(
     if !(MIN_ONION_HOPS..=MAX_ONION_HOPS).contains(&hops) {
         return Err(PrivacyError::BadHopCount(hops));
     }
+    let mut rng = rand::thread_rng();
     let ranked = engine.ranked_direct_keys();
+    let exit_ranked = match exit {
+        Some(exit) => ranked.contains(&exit),
+        None => true,
+    };
+    // A cooldown is a routing preference, not a disconnection. It must not make
+    // a connected swarm look too small for a circuit, and it must not hide the
+    // exit a fetch already chose: a holder does not stop holding a bundle
+    // because it recently missed an unrelated circuit. Fall back to the full
+    // direct set, which ranks cooling-down peers last, in both cases.
+    let ranked = if ranked.len() >= hops && exit_ranked {
+        ranked
+    } else {
+        engine.ranked_direct_keys_including_avoided()
+    };
     if ranked.len() < hops {
         return Err(PrivacyError::NotEnoughPeers {
             needed: hops,
             available: ranked.len(),
         });
     }
-    let mut rng = rand::thread_rng();
     select_path_scored_with(engine, &ranked, exit, hops, &mut rng)
 }
 
@@ -332,6 +350,70 @@ mod tests {
             select_path_with(&observer, &peers, Some(absent), 3, &mut rng),
             Err(PrivacyError::ExitNotConnected(_))
         ));
+    }
+
+    #[test]
+    fn cooling_down_peers_are_still_routeable() {
+        use pwb_core::crypto::DhPublicKey;
+        use pwb_core::net::PeerInfo;
+        use std::time::Instant;
+        let observer = engine();
+        let peers: Vec<PublicKey> = (0..4).map(|_| Keypair::generate().public).collect();
+        for key in &peers {
+            observer.add_peer(PeerInfo {
+                public_key: *key,
+                address: "127.0.0.1:9001".parse().unwrap(),
+                last_seen: Instant::now(),
+                reputation: 0,
+            });
+        }
+        // Three failed circuits touch nearly every hop, exactly like the
+        // end-to-end private-routing test on a slow runner.
+        let path: Vec<DhPublicKey> = peers
+            .iter()
+            .take(3)
+            .map(|key| DhPublicKey::from_ed25519(key).unwrap())
+            .collect();
+        for _ in 0..3 {
+            observer.record_onion_failure(&path);
+        }
+        assert!(
+            observer.ranked_direct_keys().len() < 3,
+            "the healthy set cannot fill a circuit"
+        );
+        // The swarm still has four direct peers, so a path must be buildable.
+        let path = select_path_scored(&observer, None, 3)
+            .expect("cooldown must not make a connected swarm unreachable");
+        assert_eq!(path.len(), 3);
+    }
+
+    #[test]
+    fn a_cooling_down_exit_stays_selectable() {
+        use pwb_core::crypto::DhPublicKey;
+        use pwb_core::net::PeerInfo;
+        use std::time::Instant;
+        let observer = engine();
+        let peers: Vec<PublicKey> = (0..5).map(|_| Keypair::generate().public).collect();
+        for key in &peers {
+            observer.add_peer(PeerInfo {
+                public_key: *key,
+                address: "127.0.0.1:9001".parse().unwrap(),
+                last_seen: Instant::now(),
+                reputation: 0,
+            });
+        }
+        // The bundle's holder is in cooldown, but enough healthy peers remain
+        // to build the entry and middle hops.
+        let exit = peers[0];
+        let exit_dh = DhPublicKey::from_ed25519(&exit).unwrap();
+        for _ in 0..3 {
+            observer.record_onion_failure(&[exit_dh]);
+        }
+        assert!(observer.ranked_direct_keys().len() >= 3);
+        let path = select_path_scored(&observer, Some(exit), 3)
+            .expect("a cooling-down holder is still a reachable exit");
+        assert_eq!(path.len(), 3);
+        assert_eq!(path[2], exit_dh, "the chosen holder stays the exit hop");
     }
 
     #[test]

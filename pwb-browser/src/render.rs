@@ -1,5 +1,6 @@
 //! Skia 2D Graphical Renderer & Pixel-Exact Hit Testing (`pwb-browser::render`).
 
+mod banner;
 mod color;
 mod core;
 mod entry;
@@ -15,6 +16,7 @@ mod tooltip;
 #[cfg(test)]
 mod tests;
 
+pub use banner::draw_error_banner;
 pub use core::{child_render_state, RenderState, SelectionPoint, TextSelection};
 pub use entry::{render_dom_into_pixmap, render_dom_to_pixmap, ScrollbarInfo};
 pub use highlight::{

@@ -260,8 +260,21 @@ with `// ── file: x.pjs ──` separators. The entry file (`app.pjs`, `main
 `index.pjs`, in that preference order) is placed last so definitions it uses
 exist first.
 
-`import`/`export` lines are stripped, because the runtime is script-mode QuickJS.
-Use the bundle's named-module map instead:
+The runtime is script-mode QuickJS, so the bundler rewrites ordinary ESM into
+script mode:
+
+- `import ...` and `import "x";` are removed.
+- `export { ... }` and `export * from "x"` are removed.
+- `export const`/`let`/`var`/`function`/`class`/`async` keep the declaration
+  and drop only the `export` keyword.
+- `export default` and other export forms are compile errors that name the
+  file and line; script mode has no module object to receive the value.
+
+Strings, template literals, and comments are not touched, and multi-line
+`import { ... } from` statements are consumed correctly, including a `from`
+clause placed on the line after the closing brace. Each file is also
+available as a script-mode module for the bundle's named-module map, so a file
+that used `export` loads without further changes:
 
 ```js
 pwb.import("lib.js");      // evaluate a bundled file by name
@@ -302,7 +315,7 @@ Notes that surprise web developers:
 | Top-level files only | Keep assets flat in the site folder, or point `src` at a relative path. |
 | PNG images only | Other formats render a placeholder; downloads work for unlinked files. |
 | No HTML/CSS engine | Unsupported tags are compile errors and unsupported properties are silent no-ops. Check the tables above. |
-| Script-mode JS | `import`/`export` are removed; use `pwb.import`. No `window`, `document` is a small custom object. |
+| Script-mode JS | ESM is rewritten to script mode (`export default` is rejected); use `pwb.import` for modules. No `window`, `document` is a small custom object. |
 | Compile-time styles | Dynamic restyling requires `setStyle` or `pwb.loadStyle(css)`. |
 
 ## See also

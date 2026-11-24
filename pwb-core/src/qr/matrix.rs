@@ -66,7 +66,10 @@ pub(super) fn place_geometry(size: usize, version: usize, mut set: impl FnMut(us
     let last = centers.len() - 1;
     for (ri, &row) in centers.iter().enumerate() {
         for (ci, &col) in centers.iter().enumerate() {
-            if (ri == 0 && ci == 0) || (ri == 0 && ci == last) || (ri == last && ci == 0) {
+            // Omit the three finder-adjacent corners: top-left, top-right,
+            // and bottom-left (bottom-right is not adjacent to a finder).
+            let top_row = ri == 0 && (ci == 0 || ci == last);
+            if top_row || (ri == last && ci == 0) {
                 continue;
             }
             for dr in -2isize..=2 {

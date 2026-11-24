@@ -1805,3 +1805,47 @@ async fn test_e2ee_rejects_a_forged_inner_sender() {
     a.stop().await;
     b.stop().await;
 }
+
+#[tokio::test]
+async fn onion_path_selection_survives_relay_cooldown() {
+    let engine = NodeEngine::new(NodeConfig {
+        listen_addr: SocketAddr::from_str("127.0.0.1:0").unwrap(),
+        keypair: Keypair::generate(),
+        bootstrap_peers: Vec::new(),
+        stun_server: None,
+        max_peers: 100,
+        heartbeat_interval: Duration::from_secs(30),
+    });
+    let mut peers = Vec::new();
+    for _ in 0..4 {
+        let kp = Keypair::generate();
+        engine.add_peer(PeerInfo {
+            public_key: kp.public,
+            last_seen: Instant::now(),
+            address: SocketAddr::from_str("127.0.0.1:9100").unwrap(),
+            reputation: 0,
+        });
+        peers.push(kp.public);
+    }
+    let hops: Vec<DhPublicKey> = peers
+        .iter()
+        .filter_map(DhPublicKey::from_ed25519)
+        .take(3)
+        .collect();
+    // Three failed circuits touch nearly every hop, exactly like the
+    // end-to-end suite on a slow debug runner.
+    for _ in 0..3 {
+        engine.record_onion_failure(&hops);
+    }
+    assert!(
+        engine.ranked_direct_keys().len() < 3,
+        "the healthy set cannot fill a circuit"
+    );
+
+    // A cooldown must never shorten the path: `validate_path` rejects that and
+    // `failover_path` would spend the request on an unusable alternate.
+    let path = engine
+        .select_onion_path(3)
+        .expect("four direct peers must still yield a circuit");
+    assert_eq!(path.len(), 3);
+}

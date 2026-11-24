@@ -272,11 +272,13 @@ a loopback test cluster.
   shim in `pwb-core/tests/packet_loss.rs` drops the first two probes in each
   direction and proves the dial still succeeds.
 - **Fuzzing runs in CI.** `.github/workflows/fuzz.yml` runs the onion-cell,
-  JSON-message, bundle, and PML/PSS parser targets for 30 seconds per target on
-  relevant pull requests and five minutes each weekly (plus manual dispatch).
-  The workflow caches corpora under `fuzz/corpus/` and uploads crash artifacts.
-  The local limitation remains: this environment has no C++ toolchain, so the
-  targets were not executed here.
+  JSON-message, bundle, PML/PSS parser, and site-directory targets for 30
+  seconds per target on relevant pull requests and five minutes each weekly
+  (plus manual dispatch). The workflow caches corpora under `fuzz/corpus/` and
+  uploads crash artifacts. The local limitation remains: this environment has
+  no C++ toolchain, so instrumented cargo-fuzz runs were not performed here;
+  the site-directory target was smoke-run uninstrumented with `cargo run`
+  against a seed corpus (exit 0, no panic).
 
 ### Open after the 2026-10-23 public-network audit
 
@@ -322,9 +324,10 @@ descriptors with the existing release key. A flagless node now joins the
   one circuit carried a message. These limits are stated in
   `docs/security.md`, not hidden claims.
 - **Fuzzing coverage is still narrow.** `fuzz/` targets the onion-cell, JSON
-  message, `.pwb` bundle, and PML/PSS parsers, and `.github/workflows/fuzz.yml`
-  runs them on relevant pull requests and weekly. There is still no target for
-  the `.pwb` site-directory builder (which touches the filesystem).
+  message, `.pwb` bundle, PML/PSS parsers, and the site-directory builder, and
+  `.github/workflows/fuzz.yml` runs them on relevant pull requests and weekly.
+  The site target is bounded and hermetic (one per-process temp directory
+  tree, `src` paths that escape it are skipped).
 
 Residual (accepted, not blocking local/public use): a node that does not pin
 `--trust-anchor` still trusts its live peer view during bootstrap; see the
@@ -408,22 +411,46 @@ is not mistaken for a missing local feature. Check items off as they land.
 - [x] **Artifact decode errors surface in the UI.** A malformed bundle or an
   invalid author signature now renders a native "cannot open page" page with
   the decode reason instead of printing to stderr and leaving the old page.
-- [ ] **Script and event-handler errors surface.** Failed page scripts and
-  event handlers still print to stderr; add a visible page/status banner so a
-  broken handler is not silent.
+- [x] **Script and event-handler errors surface.** Uncaught page scripts,
+  click and context-menu handlers, timers, fetch/WebSocket callbacks, and
+  unhandled promise rejections now record a one-line summary in the page's
+  `DomHandle`. The renderer paints it as a full-width danger-colored banner
+  directly below the chrome, so a broken handler is visible without opening
+  devtools (the console still keeps the full stack). The banner is
+  page-scoped: top-level navigation clears it in `reset_page_state`, and it
+  never enters the DOM or the hit-test tree. Covered by
+  `js_runtime::tests::test_js_error_reports_message_and_sets_the_banner`,
+  `test_event_handler_error_surfaces_instead_of_being_silent`,
+  `test_unhandled_rejection_sets_the_banner`, the reset-state test, and the
+  `render::banner` geometry/truncation tests.
 - [ ] **Browser downloads.** Links marked `download` are followed as ordinary
   navigations; there is no save path or download state.
-- [ ] **PlainJS modules are not silently mangled.** `strip_esm_syntax` is a
-  line filter: multi-line imports, `export default`, and strings that start
-  with `import` are not handled correctly, and `pwb.import` re-evaluates the
-  original (untransformed) module source. Either compile a well-defined
-  script-mode subset or reject unsupported ESM with a clear build error.
+- [x] **PlainJS modules are rewritten, not silently mangled.** The bundler now
+  classifies ESM from a code mask (so strings, template literals, and comments
+  are never touched) and consumes statements through their semicolon, which
+  handles multi-line `import { ... } from` and `export { ... }` lists. Import
+  statements and export lists are removed, and `export const`/`let`/`var`/
+  `function`/`class`/`async` keep the declaration with only the keyword
+  dropped. `export default` and other unsupported exports fail the build with
+  a `file:line` error instead of producing a silently broken script. The
+  `pwb.import` module map now stores the same script-mode source the bundle
+  runs, so importing a module that used `export` works. Unit tests cover
+  multi-line imports, declarations, data that looks like ESM, same-line code
+  after a stripped import, and the error path; `tests/esm_bundling.rs` drives
+  the public `parse_site_directory` entry point.
 - [ ] **`bundle.toml` is honored or removed.** The manifest exists in
   `pwb-browser/webpages/devtools/` but no crate reads it. Define its role
   (title/author/assets) and implement it, or delete the stale format.
-- [ ] **Site-directory fuzz target.** `fuzz/` covers the parsers but not the
-  filesystem-facing site builder; add a bounded target and wire it into the
-  fuzz workflow.
+- [x] **Site-directory fuzz target.** `fuzz/fuzz_targets/site_directory.rs`
+  runs each corpus entry through the public `parse_site_directory` →
+  `create_bundle` → `compress_bundle` → `decompress_bundle` path three times:
+  as `index.pml`, as the `app.pjs` entry beside a fixed valid page, and as
+  `style.pss` beside that page, using one temp directory tree per process.
+  Input is capped at 64 KiB, and `src` references that are absolute or contain
+  `..` are skipped so the harness cannot read a device or a file outside its
+  corpus. Wired into the workflow matrix and the `pwb-web/src/bundler.rs`,
+  `bundle.rs`, and `compress.rs` path filters. (Instrumented runs still need
+  cargo-fuzz and clang; see "Fuzzing runs in CI".)
 - [ ] **CI coverage threshold.** Coverage is uploaded but never enforced, so
   a change can delete tested paths without failing CI.
 - [ ] **Distributed tracing.** Structured logs, metrics, and health endpoints

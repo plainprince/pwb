@@ -92,6 +92,11 @@ pub struct DomHandle {
     /// Node ids to scroll to their bottom on the next redraw (the devtools
     /// console output auto-scrolls to the newest line).
     pub scroll_to_bottom: Rc<RefCell<Vec<usize>>>,
+    /// Summary of the last uncaught script, event-handler, timer, or async
+    /// error on this page. The pipeline paints it as a banner under the
+    /// chrome so a broken handler is visible without opening devtools; it is
+    /// cleared on the next top-level navigation ([`Self::reset_page_state`]).
+    pub script_error: Rc<RefCell<Option<String>>>,
 }
 
 impl DomHandle {
@@ -113,6 +118,7 @@ impl DomHandle {
         *self.pending_room.borrow_mut() = None;
         *self.pending_blog.borrow_mut() = None;
         self.scroll_to_bottom.borrow_mut().clear();
+        *self.script_error.borrow_mut() = None;
         // A new WebApiState drops the old async queue, WebSocket outbound
         // queues, session storage, and detached nodes. Background threads that
         // still hold a clone deliver into the old queue, which the new page
@@ -136,6 +142,7 @@ impl DomHandle {
             pending_blog: Rc::new(RefCell::new(None)),
             web: WebApiState::new(),
             scroll_to_bottom: Rc::new(RefCell::new(Vec::new())),
+            script_error: Rc::new(RefCell::new(None)),
         }
     }
 }
