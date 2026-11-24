@@ -543,8 +543,13 @@ Production gaps:
 - *(Fixed)* `Bundle::deserialize` now requires the cursor to reach the end of
   the input (truncated and trailing-byte bundles are rejected), including for
   the compressed `PWBZ` container.
-- `strip_esm_syntax` is line-based: multi-line imports, `export default`
-  expressions, and strings containing `import ` can be mangled silently.
+- *(Fixed 2026-11-22)* `strip_esm_syntax` is mask-aware instead of line-based:
+  it ignores strings, template literals, and comments, consumes multi-line
+  import/export statements through their semicolon, removes import statements
+  and export lists, and drops only the keyword from exported declarations.
+  `export default` and unsupported export forms are now build errors naming
+  the file and line in script-mode PlainJS. The `pwb.import` module map stores
+  the rewritten source, not the raw ESM.
 - *(Fixed)* `pwb-browser/src/bundler/` no longer has a divergent PML parser:
   `bundle_from_dir` delegates to `pwb_web::parse::parse_site_directory`, so
   devtools and built-in pages share one compiler. The shared parser now also
@@ -690,12 +695,15 @@ Not closed by this pass, and not to be mistaken for done:
 
 - Search link/author and freshness signals need a signed link graph or a
   trustworthy publication-time protocol; local heuristics would be gameable.
-- Browser downloads, ESM execution, and consistent in-UI error surfacing remain
-  separate features. Per-page JS/dom isolation is closed (2026-10-31).
-- `bundle.toml`, the line-based `strip_esm_syntax` limitation, a
-  site-directory fuzz target, a CI coverage threshold, distributed tracing,
-  and the remaining async `unwrap`/`expect` cleanup remain engineering work
-  outside this pass. Bundle author signatures are closed (2026-10-31).
+- True ESM execution (module objects, live bindings, dynamic import) is still
+  not supported; the bundler rewrites the documented script-mode subset and
+  rejects the rest loudly. Browser downloads and consistent in-UI error
+  surfacing remain separate features. Per-page JS/dom isolation is closed
+  (2026-10-31) and the ESM rewrite is closed (2026-11-22).
+- `bundle.toml`, a site-directory fuzz target, a CI coverage threshold,
+  distributed tracing, and the remaining async `unwrap`/`expect` cleanup
+  remain engineering work outside this pass. Bundle author signatures are
+  closed (2026-10-31).
 - Seed/anchor publication, real multi-node topology and large-swarm
   validation, open-network sybil economics, and an independent security
   review are operator/design/external work, not code that a local checkout can
@@ -717,8 +725,8 @@ Closed in code:
   devtools in the fresh context. A global, timer, fetch callback, or handler
   from the previous page cannot run against the next page's reused node ids.
 
-Not closed by this pass: browser downloads, ESM execution and the
-`strip_esm_syntax` text hack, script/event-handler error surfacing, `bundle.toml`,
-the site-directory fuzz target, a CI coverage threshold, distributed tracing,
-and the remaining async `unwrap`/`expect` cleanup. The operator/external items
-above are unchanged.
+Not closed by this pass: browser downloads, true ESM execution (the subset is
+now rewritten and the rest rejected), script/event-handler error surfacing,
+`bundle.toml`, the site-directory fuzz target, a CI coverage threshold,
+distributed tracing, and the remaining async `unwrap`/`expect` cleanup. The
+operator/external items above are unchanged.

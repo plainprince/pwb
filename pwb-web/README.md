@@ -93,7 +93,7 @@ bundle is one page: there is no router and no per-file page mapping.
 - selector support, cascade, specificity, and inheritance
 - the property and unit subset the renderer implements
 - components, imports, `{placeholder}` substitution, and nesting limits
-- script bundling, `import`/`export` stripping, and `pwb.import`
+- script bundling, the supported ESM-to-script rewrite, and `pwb.import`
 - known limits (one page per bundle, PNG only, single-value box properties)
 
 The PlainJS API (`document`, `pwb.*`, fetch, storage, timers, WebSocket) lives

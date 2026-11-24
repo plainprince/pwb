@@ -129,7 +129,7 @@ pub fn parse_site_directory<P: AsRef<Path>>(dir_path: P) -> Result<ParsedSite, P
         .iter()
         .find(|n| js_entries.iter().any(|(name, _)| name == *n))
         .copied();
-    let (script_payload, modules) = crate::bundler::bundle_js_files(&js_entries, entry_name);
+    let (script_payload, modules) = crate::bundler::bundle_js_files(&js_entries, entry_name)?;
     let title = extract_title(&root_node);
 
     Ok(ParsedSite {
