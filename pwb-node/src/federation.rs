@@ -1,26 +1,16 @@
 //! Federated, DHT-sharded decentralized search (`pwb-node::federation`).
 //!
-//! This is the PlainWeb answer to a central search index. There is no server:
+//! A central index replaced by three mechanisms:
 //!
-//! 1. **Sharded inverted index.** Every term maps to a 256-bit shard id
-//!    ([`search::shard_id`]) and its postings list lives on the
-//!    [`SHARD_REPLICATION`] DHT nodes XOR-closest to that id. When a node
-//!    indexes a bundle, [`DistributedSearch::index_and_publish`] writes each
-//!    term's postings to the responsible shards via
-//!    [`NetworkMessage::StorePosting`].
-//! 2. **Shard-routed queries.** A query is tokenized and each term is sent as a
-//!    [`NetworkMessage::ShardQuery`] to that term's responsible nodes, which
-//!    answer with their local postings in a
-//!    [`NetworkMessage::ShardResponse`]. The requester merges every shard's
-//!    postings ([`search::aggregate`]) and ranks locally.
-//! 3. **Proof of service.** A term-responsible node signs a
-//!    [`crate::credit::QueryReceipt`] over the results it served, bound to the
-//!    requester's challenge nonce, so serving a query mints credits under the
-//!    node's [`CreditMinter`] (challenge/response round-trip, claim-once).
+//! 1. **Sharded index.** A term's 256-bit shard id ([`search::shard_id`]) puts
+//!    its postings on the [`SHARD_REPLICATION`] XOR-closest DHT nodes.
+//! 2. **Shard-routed queries.** Each term is queried at its responsible nodes;
+//!    the requester merges ([`search::aggregate`]) and ranks locally.
+//! 3. **Proof of service.** A responder signs a [`crate::credit::QueryReceipt`]
+//!    bound to the requester's challenge nonce, minting credits claim-once.
 //!
-//! The service is transport-agnostic: it drives a [`NodeEngine`] and only needs
-//! `subscribe()` + `send_to_addr()`. Both the browser's embedded node and the
-//! full `pwb-node` instantiate it.
+//! Transport-agnostic: needs only a [`NodeEngine`]'s `subscribe()` and
+//! `send_to_addr()`; used by the browser's embedded node and `pwb-node`.
 
 use std::collections::{HashMap, HashSet};
 use std::net::SocketAddr;
@@ -81,16 +71,11 @@ pub const MAX_PRIVATE_CHUNKS_IN_FLIGHT: usize = 4;
 
 /// Bytes requested per private (onion) chunk request.
 ///
-/// An onion message is padded to one of two envelope classes, 4 KiB or 48 KiB,
-/// and each class is carried as a burst of 512-byte cells (about 45 or 535
-/// fragments). A reply that lands in the 48 KiB class is a multi-hundred-cell
-/// burst, and the onion transport has no per-fragment repair: one fragment
-/// dropped by a busy or slow relay destroys the whole reply and with it the
-/// chunk. Base64 inflates a payload by 4/3, so 2 KiB of artifact plus framing
-/// stays inside the 4 KiB class, where a reply is a handful of cells that any
-/// receiver can buffer. That is why this is deliberately *not*
-/// [`MAX_ARTIFACT_CHUNK`]: a direct fetch can move 16 KiB per reply because TCP
-/// repairs loss, an onion fetch cannot.
+/// Onion envelopes are padded to 4 KiB or 48 KiB classes, and the transport has
+/// no per-fragment repair: one dropped fragment destroys the whole reply. Base64
+/// inflates by 4/3, so 2 KiB plus framing stays in the 4 KiB class (a handful of
+/// cells any receiver can buffer). Deliberately not [`MAX_ARTIFACT_CHUNK`]: a
+/// direct fetch can move 16 KiB because TCP repairs loss; onion cannot.
 pub const PRIVATE_CHUNK_LEN: usize = 2 * 1024;
 
 /// Largest artifact accepted over private chunked fetch. Larger content needs
@@ -317,14 +302,11 @@ impl DistributedSearch {
         Some(content_id)
     }
 
-    /// Write a document's postings to the responsible shards (and keep them
-    /// locally so this node can always serve its own documents).
+    /// Write a document's postings to the responsible shards, keeping them
+    /// locally so this node can always serve its own documents.
     ///
-    /// Postings for one recipient are grouped and sent in signed batches, so a
-    /// bundle with hundreds of terms costs a handful of messages instead of
-    /// hundreds. Before batching, each term was its own message and any
-    /// document larger than the receiver's per-peer burst bucket lost the tail
-    /// of its index (and the follow-up `CheckIndexProof`) to the rate limiter.
+    /// Postings for one recipient are grouped into signed batches: unbatched,
+    /// a large document lost the tail of its index to the per-peer rate limiter.
     fn publish_postings(&self, postings: &[PostingWire], snippet: &str) {
         for posting in postings {
             self.index.record_posting(posting);
@@ -369,11 +351,9 @@ impl DistributedSearch {
     /// The [`SHARD_REPLICATION`] nodes (self + live DHT contacts) XOR-closest
     /// to `target`.
     ///
-    /// This reads the Kademlia routing table populated from authenticated
-    /// peers and `FindNode`/`PeerExchange` traffic, not a flat peer list, so a
-    /// node that is not directly connected but learned through the DHT is
-    /// still eligible to hold the shard. The flat peer table is only a fallback
-    /// for engines that have not populated routing yet (e.g. before start).
+    /// Reads the Kademlia routing table, so a node learned through the DHT but
+    /// not directly connected can hold a shard; the flat peer table is only a
+    /// fallback before routing is populated (e.g. before start).
     fn responsible_nodes(&self, target: &NodeId) -> Vec<(PublicKey, SocketAddr)> {
         let mut nodes: Vec<(PublicKey, SocketAddr)> = Vec::new();
         if let Some(Ok(local)) = self.engine.local_addr() {
@@ -672,11 +652,9 @@ impl DistributedSearch {
     }
 
     /// Answer one base64-encoded artifact chunk from the local host. A missing
-    /// content id or an offset past the end yields an empty slice; the
-    /// requester reassembles and verifies the whole bundle by content id.
-    ///
-    /// The reply is sized by the request's `len`, which private fetches keep
-    /// inside the small onion envelope class (see [`PRIVATE_CHUNK_LEN`]).
+    /// content id or an offset past the end yields an empty slice; the requester
+    /// reassembles and verifies the bundle by content id. The reply is sized by
+    /// the request's `len` (see [`PRIVATE_CHUNK_LEN`]).
     pub fn answer_private_fetch_chunk(&self, message: &NetworkMessage) -> Option<NetworkMessage> {
         let NetworkMessage::FetchArtifactChunk {
             content_id,
@@ -853,11 +831,8 @@ impl DistributedSearch {
                     {
                         continue;
                     }
-                    // Snippets are informational, but they still enter the
-                    // local index. Accept only excerpts that the responder
-                    // signed and that belong to a document in this response;
-                    // an unsigned or foreign excerpt is ignored without
-                    // discarding the postings.
+                    // Snippets are informational but enter the local index:
+                    // accept only signed excerpts of documents in this response.
                     let named: HashSet<ContentId> =
                         remote.iter().map(|posting| posting.content_id).collect();
                     let snippets_ok = if snippets.is_empty() {
@@ -907,15 +882,14 @@ impl DistributedSearch {
         outcome
     }
 
-    /// Federated search over onion circuits: the local index contributes its
-    /// own postings, and every remote shard answer is requested through a
-    /// three-hop circuit ending at that shard's responsible node. Shard nodes
-    /// learn the term and query id but never the requester's address.
+    /// Federated search over onion circuits: the local index contributes its own
+    /// postings, and each remote shard is queried through a circuit ending at its
+    /// responsible node. Shard nodes learn the term and query id, never the
+    /// requester's address.
     ///
-    /// Returns an error instead of silently falling back to direct traffic when
-    /// the swarm is too small to build a circuit. A partial result is returned
-    /// when at least one remote shard answered; missing shards simply contribute
-    /// nothing.
+    /// Errors rather than falling back to direct traffic when the swarm is too
+    /// small for a circuit. Partial results are returned when at least one shard
+    /// answered; missing shards contribute nothing.
     pub async fn query_private(&self, query: &str) -> Result<Vec<SearchResult>, PrivacyError> {
         self.query_private_report(query)
             .await
@@ -1095,14 +1069,13 @@ impl DistributedSearch {
         Ok(outcome)
     }
 
-    /// Retrieve a bundle by content id through independent onion circuits. Each
-    /// candidate exit is asked in its own circuit, so no peer sees both the
-    /// requester and the content id. The first content-addressed answer wins.
+    /// Retrieve a bundle by content id through independent onion circuits: each
+    /// candidate exit is asked in its own circuit, so no peer sees both requester
+    /// and content id. The first content-addressed answer wins.
     ///
-    /// Artifacts larger than [`PRIVATE_CHUNK_LEN`] are pulled chunk by chunk
-    /// from the same holder over fresh circuits and verified against the
-    /// requested content id, so the bytes never travel in the clear. Anything
-    /// over [`MAX_PRIVATE_BUNDLE`] is refused rather than assembled unbounded.
+    /// Larger artifacts are pulled chunk by chunk over fresh circuits and verified
+    /// against the content id. Over [`MAX_PRIVATE_BUNDLE`] is refused rather than
+    /// assembled unbounded.
     pub async fn fetch_private(&self, content_id: &ContentId) -> Result<Vec<u8>, PrivacyError> {
         if let Some(bytes) = self.host.get(content_id) {
             return Ok(bytes);

@@ -126,6 +126,8 @@ PlainWeb is built by the people on this list.
 - project lead
 2. **[developmental-suffering](https://github.com/developmental-suffering)**
 - first contributor
+3. **[picklem0b](https://github.com/picklem0b)**
+- contributor
 
 Want to be on it? Read [CONTRIBUTING.md](CONTRIBUTING.md) and open a PR — or
 run a seed and publish its join descriptor, as described at the top of this

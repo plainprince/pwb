@@ -1,16 +1,12 @@
 //! Onion path selection for private browser/node operations.
 //!
-//! Paths are built only from *directly dialable* peers in the engine's peer
-//! table, because every hop must be addressed individually. Selection is
-//! randomized with a cryptographic RNG and rejects duplicate hops. A caller
-//! that must reach a specific exit (for example the shard node responsible for
-//! a search term) can pin the last hop; the entry and middle hops are still
-//! random.
+//! Hops are drawn at random (cryptographic RNG, no duplicates) from directly
+//! dialable peers, because every hop is addressed individually. A caller that
+//! must reach a specific exit pins the last hop; entry and middle stay random.
 //!
-//! This module deliberately does not implement guard nodes or a persisted guard
-//! set yet. Random entry selection is weaker against a global passive adversary,
-//! but it removes the old deterministic "first three peers by node id" choice,
-//! which let any peer predict every circuit.
+//! Guard nodes are not implemented yet: random entry selection is weaker against
+//! a global passive adversary, but it beats the old deterministic "first three
+//! peers by node id", which let any peer predict every circuit.
 
 use std::collections::HashSet;
 
@@ -119,18 +115,10 @@ pub fn select_path(
 
 /// Recommended circuit length for this swarm right now.
 ///
-/// Static 3-hop circuits are the safe default (Tor's choice): every extra hop
-/// adds latency, bandwidth (each hop forwards every cell), and failure
-/// surface — a 5-hop circuit through a lossy swarm fails far more often than
-/// a 3-hop one. So this only adds hops when the swarm can afford them: enough
-/// distinct peers, low mean RTT, and low failure rate. Small, slow, or lossy
-/// swarms stay at 3; healthy medium swarms use 4, large healthy swarms use 5.
-/// Six is never automatic (reserved for a manual high-privacy request).
-///
-/// Yes, dynamic hops make sense — but only upward from 3 and only when
-/// measured health allows it. Randomizing length per request would also help
-/// traffic analysis, but the cell layer already pads length with dummies
-/// (`randomize_path`); this picks the *active* length, not padding.
+/// Three hops is the safe default: every extra hop adds latency, bandwidth, and
+/// failure surface, so 4 or 5 is chosen only with enough distinct peers and low
+/// measured RTT/loss. Six is never automatic. This picks the *active* length,
+/// not padding — the cell layer already pads with dummies (`randomize_path`).
 pub fn recommended_hops(engine: &NodeEngine) -> usize {
     let direct = direct_peers(engine).len();
     if direct < HOPS4_MIN_PEERS {
@@ -148,12 +136,10 @@ pub fn recommended_hops(engine: &NodeEngine) -> usize {
 
 /// Reliability-aware path with a dynamic hop count.
 ///
-/// Like [`select_path`] with `hops = recommended_hops()`, but the entry and
-/// middle relays prefer high-score peers (RTT / loss ranked, cooldown
-/// avoided) while still shuffling within a top pool so circuits are not
-/// predictable. A pinned `exit` stays last; the remaining hops are drawn
-/// from the healthiest spares. Falls back to plain random selection when no
-/// reliability data exists yet (fresh swarm ranks all peers equally).
+/// Like [`select_path`] with `hops = recommended_hops()`, but entry and middle
+/// relays come from a shuffled top pool of healthy peers (RTT / loss ranked,
+/// cooldown avoided) so circuits stay unpredictable. A pinned `exit` stays last.
+/// A fresh swarm with no reliability data ranks every peer equally.
 pub fn select_path_dynamic(
     engine: &NodeEngine,
     exit: Option<PublicKey>,
@@ -163,12 +149,11 @@ pub fn select_path_dynamic(
 }
 
 /// Reliability-aware core: rank direct peers by health, keep a top pool of
-/// `hops * 2` (so choice is not deterministic), shuffle the pool, then take
-/// `hops` (with `exit` pinned last when set).
+/// `hops * 2`, shuffle it, then take `hops` (with `exit` pinned last).
 ///
-/// Peers in failure cooldown are ranked last rather than dropped when the
-/// healthy set cannot fill the circuit or does not contain the pinned exit, so
-/// a few slow circuits never make a connected swarm unreachable.
+/// Peers in failure cooldown are ranked last, not dropped, when the healthy set
+/// cannot fill the circuit or hold the pinned exit: a cooldown is a routing
+/// preference, not a disconnection.
 pub fn select_path_scored(
     engine: &NodeEngine,
     exit: Option<PublicKey>,
@@ -183,11 +168,8 @@ pub fn select_path_scored(
         Some(exit) => ranked.contains(&exit),
         None => true,
     };
-    // A cooldown is a routing preference, not a disconnection. It must not make
-    // a connected swarm look too small for a circuit, and it must not hide the
-    // exit a fetch already chose: a holder does not stop holding a bundle
-    // because it recently missed an unrelated circuit. Fall back to the full
-    // direct set, which ranks cooling-down peers last, in both cases.
+    // Fall back to the full direct set (cooling-down peers ranked last) so a
+    // cooldown neither shrinks the swarm nor hides an already-chosen exit.
     let ranked = if ranked.len() >= hops && exit_ranked {
         ranked
     } else {
