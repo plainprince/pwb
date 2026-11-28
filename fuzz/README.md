@@ -10,6 +10,7 @@ cargo +nightly fuzz run onion_cell
 cargo +nightly fuzz run network_message
 cargo +nightly fuzz run bundle
 cargo +nightly fuzz run pml
+cargo +nightly fuzz run site_scripts
 ```
 
 Each target asserts only that decoding terminates without a panic; the normal
@@ -23,8 +24,10 @@ Each target asserts only that decoding terminates without a panic; the normal
   30 seconds per target;
 - weekly (and on manual dispatch) for five minutes per target.
 
-Targets cover onion cells, JSON network messages, `.pwb` bundles, and the PML
-markup/PSS stylesheet parsers.
+Targets cover onion cells, JSON network messages, `.pwb` bundles (decode,
+re-serialize, and `PWBZ` compression round-trips), the PML markup/PSS
+stylesheet parsers, and the `.pjs`/`.js` code-file bundler used by every hosted
+site.
 
 The workflow installs nightly Rust and `cargo-fuzz`, caches each target's
 corpus under `fuzz/corpus/`, and uploads `fuzz/artifacts/<target>/` when a run
